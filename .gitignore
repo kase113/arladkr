@@ -1,0 +1,23 @@
+# Go build and test artifacts
+/bin/
+/*.test
+*.out
+*.prof
+coverage.*
+
+# Local protocol runs and generated key material
+/cv-run/
+**/store/
+**/ready/
+**/private/
+*.scalar
+*.pem
+*.key
+*.p12
+
+# Local environment and editor files
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/

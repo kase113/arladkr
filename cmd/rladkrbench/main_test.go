@@ -1,0 +1,167 @@
+package main
+
+import (
+	"rladkr_go/core"
+	"strings"
+	"testing"
+)
+
+func TestAdmitAggPassRatio(t *testing.T) {
+	if got := admitAggPassRatio(0, 0); got != 0 {
+		t.Fatalf("expected 0 ratio on zero attempts, got %.4f", got)
+	}
+	if got := admitAggPassRatio(3, 4); got != 0.75 {
+		t.Fatalf("expected 0.75 ratio, got %.4f", got)
+	}
+}
+
+func TestFormatBenchResultIncludesEffectiveKappa(t *testing.T) {
+	effective := core.NormalizeConfig(core.Config{F: 1, Kappa: 0}).Kappa
+	line := formatBenchResult(benchResultInput{kappa: effective, runs: 1})
+	if !strings.Contains(line, " kappa=2 ") {
+		t.Fatalf("benchmark output missing effective kappa: %s", line)
+	}
+}
+
+func TestFormatBenchResultIncludesARLADKRMetrics(t *testing.T) {
+	stats := []runStat{
+		{
+			latencyMs:             100,
+			setupMs:               10,
+			recoverBarrierWaitMs:  20,
+			recoverServiceGraceMs: 30,
+			completedNodes:        4,
+			decidedSetMean:        3,
+			fallbackUsed:          false,
+			aggRLOReadyMs:         5,
+			admitAggAttempts:      2,
+			admitAggPasses:        2,
+			recoverAggSuccess:     1,
+		},
+		{
+			latencyMs:             200,
+			setupMs:               20,
+			recoverBarrierWaitMs:  40,
+			recoverServiceGraceMs: 60,
+			completedNodes:        4,
+			decidedSetMean:        3,
+			fallbackUsed:          true,
+			aggRLOReadyMs:         7,
+			admitAggAttempts:      2,
+			admitAggPasses:        1,
+			recoverAggSuccess:     1,
+		},
+	}
+	line := formatBenchResult(benchResultInput{
+		n:               4,
+		f:               1,
+		kappa:           2,
+		runs:            2,
+		timeoutMs:       90000,
+		policy:          "auto",
+		apvssProvider:   "optrand",
+		apvssOutput:     "emulated",
+		securityProfile: "protocol-emulator",
+		deriveMode:      "aggregate",
+		successRuns:     2,
+		fallbackRuns:    1,
+		stats:           stats,
+	})
+	for _, token := range []string{
+		"mean_aggrlo_ready_ms=",
+		"admitagg_pass_ratio=",
+		"recoveragg_success_ratio=",
+		"mean_recover_service_grace_ms=45.00",
+		"mean_online_protocol_ms=105.00",
+		"mean_online_phase_wall_ms=60.00",
+		"protocol=ARLADKR-GO",
+		"apvss_provider=optrand",
+		"apvss_output=emulated",
+		"security_profile=protocol-emulator",
+		"derive_mode=aggregate",
+	} {
+		if !strings.Contains(line, token) {
+			t.Fatalf("benchmark output missing token %q: %s", token, line)
+		}
+	}
+}
+
+func TestAPVSSProviderFlagUsageIsCVOnly(t *testing.T) {
+	if apvssProviderUsage != "APVSS provider: cv-sapvss" {
+		t.Fatalf("APVSS provider usage is not CV-only: %q", apvssProviderUsage)
+	}
+}
+
+func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
+	line := formatBenchResult(benchResultInput{
+		runs: 1,
+		stats: []runStat{{
+			cvComponentCount: 2, cvARCHolderCount: 3, cvRecoveredShardCount: 2,
+			cvVerifiedReceiptCount: 2, cvLeafBuildMs: 7, cvComponentDisperseMs: 1, cvCommonCandidateMs: 2,
+			cvAggregateDisperseMs: 3, cvAggregateAgreementMs: 4, cvRecoverShardMs: 5,
+			cvReceiptMs: 6, cvAPVSSACKCount: 5, cvAPVSSFallbackCount: 2,
+			cvAPVSSProofBytes: 101, cvAPVSSLeafWireBytes: 202,
+			cvAggregateGateWaitMs: 7, cvAggregateLeafLoadMs: 8, cvAggregateBuildMs: 9,
+			cvAggregateRSMs: 10, cvAggregateHeaderTokenMs: 11, cvAggregateOfferSendMs: 12,
+			cvAggregateARCWaitMs: 13, cvAggregateCertificateMs: 14,
+			phaseSentBytes: map[string]float64{"component_disperse": 10, "common_candidate": 11,
+				"aggregate_disperse": 12, "arc_share": 13, "recover_shard": 14, "receipt": 15},
+		}},
+	})
+	for _, token := range []string{
+		"mean_cv_component_count=2", "mean_cv_arc_holder_count=3",
+		"mean_cv_recovered_shard_count=2", "mean_cv_verified_receipt_count=2",
+		"leaf_build_ms=7", "component_disperse_ms=1", "common_candidate_ms=2", "aggregate_disperse_ms=3",
+		"aggregate_agreement_ms=4", "recover_shard_ms=5", "receipt_ms=6",
+		"mean_apvss_ack_count=5.00", "mean_apvss_fallback_count=2.00",
+		"mean_apvss_proof_bytes=101", "mean_apvss_leaf_wire_bytes=202",
+		"aggregate_gate_wait_ms=7.00", "aggregate_leaf_load_ms=8.00",
+		"aggregate_build_ms=9.00", "aggregate_rs_ms=10.00",
+		"aggregate_header_token_ms=11.00", "aggregate_offer_send_ms=12.00",
+		"aggregate_arc_wait_ms=13.00", "aggregate_certificate_ms=14.00",
+		"mean_component_disperse_sent_bytes=10", "mean_common_candidate_sent_bytes=11",
+		"mean_aggregate_disperse_sent_bytes=12", "mean_arc_share_sent_bytes=13",
+		"mean_recover_shard_sent_bytes=14", "mean_receipt_sent_bytes=15",
+	} {
+		if !strings.Contains(line, token) {
+			t.Fatalf("CV benchmark output missing %q: %s", token, line)
+		}
+	}
+}
+
+func TestFormatBenchResultIncludesScalarShamirSecurityMetadata(t *testing.T) {
+	line := formatBenchResult(benchResultInput{
+		n:               4,
+		f:               1,
+		kappa:           2,
+		runs:            1,
+		timeoutMs:       90000,
+		policy:          "force",
+		apvssProvider:   "scalar-shamir",
+		apvssOutput:     "scalar",
+		securityProfile: "functional-scalar-prototype",
+		deriveMode:      "scalar",
+		successRuns:     1,
+		stats:           []runStat{{latencyMs: 1, completedNodes: 4}},
+	})
+	for _, token := range []string{
+		"apvss_provider=scalar-shamir",
+		"apvss_output=scalar",
+		"security_profile=functional-scalar-prototype",
+		"derive_mode=scalar",
+	} {
+		if !strings.Contains(line, token) {
+			t.Fatalf("scalar benchmark output missing %q: %s", token, line)
+		}
+	}
+}
+
+func TestFormatBenchResultUsesConfiguredMaterializedARCLabel(t *testing.T) {
+	line := formatBenchResult(benchResultInput{
+		arcMode: "materialized",
+		runs:    1,
+	})
+	if !strings.Contains(line, "arc_mode=materialized") {
+		t.Fatalf("benchmark output mislabels materialized ARC: %s", line)
+	}
+}
