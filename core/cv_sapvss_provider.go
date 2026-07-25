@@ -10,66 +10,66 @@ import (
 )
 
 const (
-	cvAggregateV1Domain = "ARL-CV-sAPVSS-v1/aggregate"
-	cvReceiptV1Domain   = "ARL-CV-sAPVSS-v1/receipt"
-	cvDLEQV1Domain      = "ARL-CV-sAPVSS-v1/receipt-dleq"
+	cvAggregateDomain = "ARL-CV-sAPVSS/aggregate"
+	cvReceiptDomain   = "ARL-CV-sAPVSS/receipt"
+	cvDLEQDomain      = "ARL-CV-sAPVSS/receipt-dleq"
 )
 
-type cvAggregateReceiverV1 struct {
+type cvAggregateReceiver struct {
 	receiverIndex     int
 	receiverPublicKey bls12381.G1Affine
 	scalarChunks      []cvElGamalCiphertext
 	blinding          cvElGamalCiphertext
 }
 
-type cvAggregateV1 struct {
-	context                cvLeafContextV1
+type cvAggregateTranscript struct {
+	context                cvLeafContext
 	dealerIDs              []uint64
 	leafDigests            [][]byte
 	coefficientCommitments []bls12381.G1Affine
-	receivers              []cvAggregateReceiverV1
+	receivers              []cvAggregateReceiver
 	digestWire             []byte
 	digest                 []byte
 }
 
-// cvVerifiedLeafV1 carries the canonical bytes that were accepted by a full
+// cvVerifiedLeaf carries the canonical bytes that were accepted by a full
 // leaf verification. Callers must recheck those bytes before using the leaf so
 // a mutable in-memory object cannot inherit stale verified status.
-type cvVerifiedLeafV1 struct {
-	leaf          *cvLeafV1
-	apvss         *apvssLeafPrototypeV1
+type cvVerifiedLeaf struct {
+	leaf          *cvLeaf
+	apvss         *apvssLeafPrototype
 	contextDigest []byte
 	leafDigest    []byte
 	canonicalWire []byte
 }
 
-func cvAcceptedAPVSSLeafV1(
-	context *cvLeafContextV1,
-	prototype *apvssLeafPrototypeV1,
+func cvAcceptedAPVSSLeaf(
+	context *cvLeafContext,
+	prototype *apvssLeafPrototype,
 	canonicalWire []byte,
-) (*cvVerifiedLeafV1, error) {
-	if err := apvssVerifyPrototypeV1(context, prototype); err != nil {
+) (*cvVerifiedLeaf, error) {
+	if err := apvssVerifyPrototype(context, prototype); err != nil {
 		return nil, err
 	}
-	return cvAcceptedDecodedAPVSSLeafV1(context, prototype, canonicalWire)
+	return cvAcceptedDecodedAPVSSLeaf(context, prototype, canonicalWire)
 }
 
-// cvAcceptedDecodedAPVSSLeafV1 wraps a prototype returned by
-// apvssDecodeLeafPrototypeV1. That decoder has already verified both the
+// cvAcceptedDecodedAPVSSLeaf wraps a prototype returned by
+// apvssDecodeLeafPrototype. That decoder has already verified both the
 // structural leaf and its ACK/fallback partition.
-func cvAcceptedDecodedAPVSSLeafV1(
-	context *cvLeafContextV1,
-	prototype *apvssLeafPrototypeV1,
+func cvAcceptedDecodedAPVSSLeaf(
+	context *cvLeafContext,
+	prototype *apvssLeafPrototype,
 	canonicalWire []byte,
-) (*cvVerifiedLeafV1, error) {
-	if err := cvValidateLeafContextV1(context); err != nil {
+) (*cvVerifiedLeaf, error) {
+	if err := cvValidateLeafContext(context); err != nil {
 		return nil, err
 	}
 	if prototype == nil || prototype.leaf == nil ||
-		!bytes.Equal(cvLeafContextV1Digest(context), cvLeafContextV1Digest(&prototype.leaf.context)) {
+		!bytes.Equal(cvLeafContextDigest(context), cvLeafContextDigest(&prototype.leaf.context)) {
 		return nil, fmt.Errorf("accepted APVSS leaf context mismatch")
 	}
-	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil {
 		return nil, err
 	}
@@ -81,34 +81,34 @@ func cvAcceptedDecodedAPVSSLeafV1(
 		return nil, fmt.Errorf("accepted APVSS leaf digest mismatch")
 	}
 	prototype.digest = append([]byte(nil), digest...)
-	return &cvVerifiedLeafV1{
+	return &cvVerifiedLeaf{
 		leaf: prototype.leaf, apvss: prototype,
-		contextDigest: append([]byte(nil), cvLeafContextV1Digest(context)...),
+		contextDigest: append([]byte(nil), cvLeafContextDigest(context)...),
 		leafDigest:    append([]byte(nil), digest...),
 		canonicalWire: append([]byte(nil), wire...),
 	}, nil
 }
 
-type cvMultiDLEQProofV1 struct {
+type cvMultiDLEQProof struct {
 	tKey, tScalar, tBlinding bls12381.G1Affine
 	z                        fr.Element
 }
 
-type cvReceiptV1 struct {
+type cvReceipt struct {
 	aggregateDigest []byte
 	receiverIndex   int
 	publicScalar    bls12381.G1Affine
 	blindingOpening bls12381.G1Affine
-	proof           cvMultiDLEQProofV1
+	proof           cvMultiDLEQProof
 	digestWire      []byte
 	digest          []byte
 }
 
-func cvAggV1(context *cvLeafContextV1, leaves []*cvLeafV1) (*cvAggregateV1, error) {
+func cvAgg(context *cvLeafContext, leaves []*cvLeaf) (*cvAggregateTranscript, error) {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.aggCalls.Add(1)
 	}
-	if err := cvValidateLeafContextV1(context); err != nil {
+	if err := cvValidateLeafContext(context); err != nil {
 		return nil, err
 	}
 	if len(leaves) == 0 || len(leaves) > context.profile.maxComponents {
@@ -118,48 +118,48 @@ func cvAggV1(context *cvLeafContextV1, leaves []*cvLeafV1) (*cvAggregateV1, erro
 		if leaf == nil {
 			return nil, fmt.Errorf("nil CV-sAPVSS aggregate leaf")
 		}
-		if err := cvVerifyLeafV1(context, leaf); err != nil {
+		if err := cvVerifyLeaf(context, leaf); err != nil {
 			return nil, fmt.Errorf("dealer %d leaf: %w", leaf.dealerID, err)
 		}
 	}
-	return cvAggregateAcceptedLeavesV1(context, leaves)
+	return cvAggregateAcceptedLeaves(context, leaves)
 }
 
-func cvAcceptedLeafV1(context *cvLeafContextV1, leaf *cvLeafV1, canonicalWire []byte) (*cvVerifiedLeafV1, error) {
-	if err := cvValidateLeafContextV1(context); err != nil {
+func cvAcceptedLeaf(context *cvLeafContext, leaf *cvLeaf, canonicalWire []byte) (*cvVerifiedLeaf, error) {
+	if err := cvValidateLeafContext(context); err != nil {
 		return nil, err
 	}
 	if leaf == nil || len(leaf.digest) != 32 {
 		return nil, fmt.Errorf("invalid accepted CV-sAPVSS leaf")
 	}
-	wire, err := cvLeafV1CanonicalBytes(leaf)
+	wire, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		return nil, err
 	}
 	if len(canonicalWire) > 0 && !bytes.Equal(wire, canonicalWire) {
 		return nil, fmt.Errorf("accepted CV-sAPVSS leaf wire mismatch")
 	}
-	contextDigest := cvLeafContextV1Digest(context)
-	if !bytes.Equal(contextDigest, cvLeafContextV1Digest(&leaf.context)) ||
-		!bytes.Equal(leaf.digest, hashBytes([]byte(cvLeafV1DigestDomain), wire)) {
+	contextDigest := cvLeafContextDigest(context)
+	if !bytes.Equal(contextDigest, cvLeafContextDigest(&leaf.context)) ||
+		!bytes.Equal(leaf.digest, hashBytes([]byte(cvLeafDigestDomain), wire)) {
 		return nil, fmt.Errorf("accepted CV-sAPVSS leaf binding mismatch")
 	}
-	return &cvVerifiedLeafV1{
+	return &cvVerifiedLeaf{
 		leaf: leaf, contextDigest: append([]byte(nil), contextDigest...),
 		leafDigest: append([]byte(nil), leaf.digest...), canonicalWire: append([]byte(nil), wire...),
 	}, nil
 }
 
-func cvValidateAcceptedLeafV1(context *cvLeafContextV1, accepted *cvVerifiedLeafV1) error {
+func cvValidateAcceptedLeaf(context *cvLeafContext, accepted *cvVerifiedLeaf) error {
 	if accepted == nil || accepted.leaf == nil ||
-		!bytes.Equal(accepted.contextDigest, cvLeafContextV1Digest(context)) {
+		!bytes.Equal(accepted.contextDigest, cvLeafContextDigest(context)) {
 		return fmt.Errorf("invalid verified CV-sAPVSS leaf token")
 	}
 	if accepted.apvss != nil {
 		if accepted.apvss.leaf != accepted.leaf {
 			return fmt.Errorf("invalid verified APVSS leaf token")
 		}
-		wire, err := apvssLeafPrototypeV1CanonicalBytes(accepted.apvss)
+		wire, err := apvssLeafPrototypeCanonicalBytes(accepted.apvss)
 		if err != nil || !bytes.Equal(wire, accepted.canonicalWire) ||
 			!bytes.Equal(accepted.leafDigest, accepted.apvss.digest) ||
 			!bytes.Equal(accepted.leafDigest, hashBytes([]byte(apvssLeafDigestDomain), wire)) {
@@ -170,57 +170,57 @@ func cvValidateAcceptedLeafV1(context *cvLeafContextV1, accepted *cvVerifiedLeaf
 	if !bytes.Equal(accepted.leafDigest, accepted.leaf.digest) {
 		return fmt.Errorf("invalid verified CV-sAPVSS leaf token")
 	}
-	wire, err := cvLeafV1CanonicalBytes(accepted.leaf)
+	wire, err := cvLeafCanonicalBytes(accepted.leaf)
 	if err != nil || !bytes.Equal(wire, accepted.canonicalWire) ||
-		!bytes.Equal(accepted.leafDigest, hashBytes([]byte(cvLeafV1DigestDomain), wire)) {
+		!bytes.Equal(accepted.leafDigest, hashBytes([]byte(cvLeafDigestDomain), wire)) {
 		return fmt.Errorf("mutated verified CV-sAPVSS leaf")
 	}
 	return nil
 }
 
-func cvAggVerifiedV1(context *cvLeafContextV1, accepted []*cvVerifiedLeafV1) (*cvAggregateV1, error) {
+func cvAggVerified(context *cvLeafContext, accepted []*cvVerifiedLeaf) (*cvAggregateTranscript, error) {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.aggVerifiedCalls.Add(1)
 	}
-	if err := cvValidateLeafContextV1(context); err != nil {
+	if err := cvValidateLeafContext(context); err != nil {
 		return nil, err
 	}
 	if len(accepted) == 0 || len(accepted) > context.profile.maxComponents {
 		return nil, fmt.Errorf("invalid CV-sAPVSS verified aggregate component count")
 	}
-	leaves := make([]*cvLeafV1, len(accepted))
+	leaves := make([]*cvLeaf, len(accepted))
 	for i := range accepted {
-		if err := cvValidateAcceptedLeafV1(context, accepted[i]); err != nil {
+		if err := cvValidateAcceptedLeaf(context, accepted[i]); err != nil {
 			return nil, err
 		}
 		leaves[i] = accepted[i].leaf
 	}
-	agg, err := cvAggregateAcceptedLeavesUnfinalizedV1(context, leaves)
+	agg, err := cvAggregateAcceptedLeavesUnfinalized(context, leaves)
 	if err != nil {
 		return nil, err
 	}
 	for i := range accepted {
 		agg.leafDigests[i] = append([]byte(nil), accepted[i].leafDigest...)
 	}
-	return cvFinalizeAggregateV1(agg)
+	return cvFinalizeAggregate(agg)
 }
 
-func cvAggregateAcceptedLeavesV1(context *cvLeafContextV1, leaves []*cvLeafV1) (*cvAggregateV1, error) {
-	agg, err := cvAggregateAcceptedLeavesUnfinalizedV1(context, leaves)
+func cvAggregateAcceptedLeaves(context *cvLeafContext, leaves []*cvLeaf) (*cvAggregateTranscript, error) {
+	agg, err := cvAggregateAcceptedLeavesUnfinalized(context, leaves)
 	if err != nil {
 		return nil, err
 	}
-	return cvFinalizeAggregateV1(agg)
+	return cvFinalizeAggregate(agg)
 }
 
-func cvAggregateAcceptedLeavesUnfinalizedV1(context *cvLeafContextV1, leaves []*cvLeafV1) (*cvAggregateV1, error) {
-	agg := &cvAggregateV1{
-		context:     cvCloneLeafContextV1(*context),
+func cvAggregateAcceptedLeavesUnfinalized(context *cvLeafContext, leaves []*cvLeaf) (*cvAggregateTranscript, error) {
+	agg := &cvAggregateTranscript{
+		context:     cvCloneLeafContext(*context),
 		dealerIDs:   make([]uint64, len(leaves)),
 		leafDigests: make([][]byte, len(leaves)),
 		coefficientCommitments: make([]bls12381.G1Affine,
 			context.sharingDegree+1),
-		receivers: make([]cvAggregateReceiverV1, len(context.receiverPublicKeys)),
+		receivers: make([]cvAggregateReceiver, len(context.receiverPublicKeys)),
 	}
 	for i, leaf := range leaves {
 		if leaf == nil {
@@ -248,7 +248,7 @@ func cvAggregateAcceptedLeavesUnfinalizedV1(context *cvLeafContextV1, leaves []*
 		if err != nil {
 			return nil, fmt.Errorf("aggregate receiver %d: %w", receiverIndex+1, err)
 		}
-		agg.receivers[receiverIndex] = cvAggregateReceiverV1{
+		agg.receivers[receiverIndex] = cvAggregateReceiver{
 			receiverIndex:     receiverIndex + 1,
 			receiverPublicKey: share.receiverPublicKey,
 			scalarChunks:      share.scalarChunks,
@@ -258,46 +258,46 @@ func cvAggregateAcceptedLeavesUnfinalizedV1(context *cvLeafContextV1, leaves []*
 	return agg, nil
 }
 
-func cvFinalizeAggregateV1(agg *cvAggregateV1) (*cvAggregateV1, error) {
-	wire, err := cvAggregateV1CanonicalBytes(agg)
+func cvFinalizeAggregate(agg *cvAggregateTranscript) (*cvAggregateTranscript, error) {
+	wire, err := cvAggregateCanonicalBytes(agg)
 	if err != nil {
 		return nil, err
 	}
 	agg.digestWire = append([]byte(nil), wire...)
-	agg.digest = hashBytes([]byte(cvAggregateV1Domain), wire)
+	agg.digest = hashBytes([]byte(cvAggregateDomain), wire)
 	return agg, nil
 }
 
-func cvAVerV1(context *cvLeafContextV1, agg *cvAggregateV1, leaves []*cvLeafV1) error {
+func cvAVer(context *cvLeafContext, agg *cvAggregateTranscript, leaves []*cvLeaf) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.averCalls.Add(1)
 	}
-	expected, err := cvAggV1(context, leaves)
+	expected, err := cvAgg(context, leaves)
 	if err != nil {
 		return err
 	}
-	return cvCompareAggregateV1(agg, expected)
+	return cvCompareAggregate(agg, expected)
 }
 
-func cvAVerVerifiedV1(context *cvLeafContextV1, agg *cvAggregateV1, leaves []*cvVerifiedLeafV1) error {
+func cvAVerVerified(context *cvLeafContext, agg *cvAggregateTranscript, leaves []*cvVerifiedLeaf) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.averVerifiedCalls.Add(1)
 	}
-	expected, err := cvAggVerifiedV1(context, leaves)
+	expected, err := cvAggVerified(context, leaves)
 	if err != nil {
 		return err
 	}
-	return cvCompareAggregateV1(agg, expected)
+	return cvCompareAggregate(agg, expected)
 }
 
-func cvCompareAggregateV1(agg, expected *cvAggregateV1) error {
-	gotWire, err := cvAggregateV1CanonicalBytes(agg)
+func cvCompareAggregate(agg, expected *cvAggregateTranscript) error {
+	gotWire, err := cvAggregateCanonicalBytes(agg)
 	if err != nil {
 		return err
 	}
 	if !bytes.Equal(agg.digestWire, gotWire) || !bytes.Equal(gotWire, expected.digestWire) ||
-		!bytes.Equal(agg.digest, hashBytes([]byte(cvAggregateV1Domain), gotWire)) {
-		return fmt.Errorf("CV-sAPVSS AggregateV1 wire or digest mismatch")
+		!bytes.Equal(agg.digest, hashBytes([]byte(cvAggregateDomain), gotWire)) {
+		return fmt.Errorf("CV-sAPVSS Aggregate wire or digest mismatch")
 	}
 	if cvPerfCountersEnabled {
 		cvPerfCounters.averSuccesses.Add(1)
@@ -305,22 +305,22 @@ func cvCompareAggregateV1(agg, expected *cvAggregateV1) error {
 	return nil
 }
 
-func cvCheckAggregateDigestV1(agg *cvAggregateV1) error {
-	wire, err := cvAggregateV1CanonicalBytes(agg)
+func cvCheckAggregateDigest(agg *cvAggregateTranscript) error {
+	wire, err := cvAggregateCanonicalBytes(agg)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(agg.digestWire, wire) || !bytes.Equal(agg.digest, hashBytes([]byte(cvAggregateV1Domain), wire)) {
-		return fmt.Errorf("CV-sAPVSS AggregateV1 wire or digest mismatch")
+	if !bytes.Equal(agg.digestWire, wire) || !bytes.Equal(agg.digest, hashBytes([]byte(cvAggregateDomain), wire)) {
+		return fmt.Errorf("CV-sAPVSS Aggregate wire or digest mismatch")
 	}
 	return nil
 }
 
-func cvValidateAggregateV1(agg *cvAggregateV1) error {
+func cvValidateAggregate(agg *cvAggregateTranscript) error {
 	if agg == nil {
-		return fmt.Errorf("nil CV-sAPVSS AggregateV1")
+		return fmt.Errorf("nil CV-sAPVSS Aggregate")
 	}
-	if err := cvValidateLeafContextV1(&agg.context); err != nil {
+	if err := cvValidateLeafContext(&agg.context); err != nil {
 		return err
 	}
 	if len(agg.dealerIDs) == 0 || len(agg.dealerIDs) > agg.context.profile.maxComponents ||
@@ -363,22 +363,22 @@ func cvValidateAggregateV1(agg *cvAggregateV1) error {
 	return nil
 }
 
-func cvAggregateV1CanonicalBytes(agg *cvAggregateV1) ([]byte, error) {
-	if err := cvValidateAggregateV1(agg); err != nil {
+func cvAggregateCanonicalBytes(agg *cvAggregateTranscript) ([]byte, error) {
+	if err := cvValidateAggregate(agg); err != nil {
 		return nil, err
 	}
-	contextWire, err := cvLeafContextV1CanonicalBytes(&agg.context)
+	contextWire, err := cvLeafContextCanonicalBytes(&agg.context)
 	if err != nil {
 		return nil, err
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(cvAggregateV1Domain)); err != nil {
+	if err := cvWriteBytes(&wire, []byte(cvAggregateDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, contextWire); err != nil {
 		return nil, err
 	}
-	if err := cvWriteBytes(&wire, cvLeafContextV1Digest(&agg.context)); err != nil {
+	if err := cvWriteBytes(&wire, cvLeafContextDigest(&agg.context)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteUint32(&wire, len(agg.dealerIDs)); err != nil {
@@ -413,8 +413,8 @@ func cvAggregateV1CanonicalBytes(agg *cvAggregateV1) ([]byte, error) {
 	return wire.Bytes(), nil
 }
 
-func cvAggregateScalarCiphertextV1(agg *cvAggregateV1, receiverIndex int) (cvElGamalCiphertext, error) {
-	if err := cvValidateAggregateV1(agg); err != nil {
+func cvAggregateScalarCiphertext(agg *cvAggregateTranscript, receiverIndex int) (cvElGamalCiphertext, error) {
+	if err := cvValidateAggregate(agg); err != nil {
 		return cvElGamalCiphertext{}, err
 	}
 	if receiverIndex <= 0 || receiverIndex > len(agg.receivers) {
@@ -435,8 +435,8 @@ func cvAggregateScalarCiphertextV1(agg *cvAggregateV1, receiverIndex int) (cvElG
 	return result, nil
 }
 
-func cvDLEQTargetsV1(agg *cvAggregateV1, receiverIndex int, publicScalar, blindingOpening *bls12381.G1Affine) (bls12381.G1Affine, bls12381.G1Affine, bls12381.G1Affine, bls12381.G1Affine, error) {
-	scalarCipher, err := cvAggregateScalarCiphertextV1(agg, receiverIndex)
+func cvDLEQTargets(agg *cvAggregateTranscript, receiverIndex int, publicScalar, blindingOpening *bls12381.G1Affine) (bls12381.G1Affine, bls12381.G1Affine, bls12381.G1Affine, bls12381.G1Affine, error) {
+	scalarCipher, err := cvAggregateScalarCiphertext(agg, receiverIndex)
 	if err != nil {
 		return bls12381.G1Affine{}, bls12381.G1Affine{}, bls12381.G1Affine{}, bls12381.G1Affine{}, err
 	}
@@ -447,8 +447,8 @@ func cvDLEQTargetsV1(agg *cvAggregateV1, receiverIndex int, publicScalar, blindi
 	return scalarCipher.r, scalarTarget, receiver.blinding.r, blindingTarget, nil
 }
 
-func cvDLEQChallengeV1(agg *cvAggregateV1, receiverIndex int, publicScalar, blindingOpening *bls12381.G1Affine, proof *cvMultiDLEQProofV1) (fr.Element, error) {
-	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargetsV1(agg, receiverIndex, publicScalar, blindingOpening)
+func cvDLEQChallenge(agg *cvAggregateTranscript, receiverIndex int, publicScalar, blindingOpening *bls12381.G1Affine, proof *cvMultiDLEQProof) (fr.Element, error) {
+	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargets(agg, receiverIndex, publicScalar, blindingOpening)
 	if err != nil {
 		return fr.Element{}, err
 	}
@@ -462,22 +462,22 @@ func cvDLEQChallengeV1(agg *cvAggregateV1, receiverIndex int, publicScalar, blin
 	}
 	var indexWire bytes.Buffer
 	cvWriteUint64(&indexWire, uint64(receiverIndex))
-	return cvHashToFrV1(cvDLEQV1Domain, agg.digest, indexWire.Bytes(), points.Bytes())
+	return cvHashToFr(cvDLEQDomain, agg.digest, indexWire.Bytes(), points.Bytes())
 }
 
-func cvProveDLEQV1(agg *cvAggregateV1, receiverIndex int, receiverSecret fr.Element, publicScalar, blindingOpening *bls12381.G1Affine) (*cvMultiDLEQProofV1, error) {
+func cvProveDLEQ(agg *cvAggregateTranscript, receiverIndex int, receiverSecret fr.Element, publicScalar, blindingOpening *bls12381.G1Affine) (*cvMultiDLEQProof, error) {
 	var nonce fr.Element
 	if _, err := nonce.SetRandom(); err != nil {
 		return nil, fmt.Errorf("sample CV-sAPVSS receipt nonce: %w", err)
 	}
-	proof := &cvMultiDLEQProofV1{tKey: cvPointTimes(&genG1, &nonce)}
-	scalarCipher, err := cvAggregateScalarCiphertextV1(agg, receiverIndex)
+	proof := &cvMultiDLEQProof{tKey: cvPointTimes(&genG1, &nonce)}
+	scalarCipher, err := cvAggregateScalarCiphertext(agg, receiverIndex)
 	if err != nil {
 		return nil, err
 	}
 	proof.tScalar = cvPointTimes(&scalarCipher.r, &nonce)
 	proof.tBlinding = cvPointTimes(&agg.receivers[receiverIndex-1].blinding.r, &nonce)
-	challenge, err := cvDLEQChallengeV1(agg, receiverIndex, publicScalar, blindingOpening, proof)
+	challenge, err := cvDLEQChallenge(agg, receiverIndex, publicScalar, blindingOpening, proof)
 	if err != nil {
 		return nil, err
 	}
@@ -485,11 +485,11 @@ func cvProveDLEQV1(agg *cvAggregateV1, receiverIndex int, receiverSecret fr.Elem
 	return proof, nil
 }
 
-func cvDecShareV1(agg *cvAggregateV1, receiverSecret fr.Element, receiverIndex int) (*cvDecryptedShare, *cvReceiptV1, error) {
-	if err := cvValidateAggregateV1(agg); err != nil {
+func cvDecShare(agg *cvAggregateTranscript, receiverSecret fr.Element, receiverIndex int) (*cvDecryptedShare, *cvReceipt, error) {
+	if err := cvValidateAggregate(agg); err != nil {
 		return nil, nil, err
 	}
-	if err := cvCheckAggregateDigestV1(agg); err != nil {
+	if err := cvCheckAggregateDigest(agg); err != nil {
 		return nil, nil, err
 	}
 	if receiverIndex <= 0 || receiverIndex > len(agg.receivers) {
@@ -507,33 +507,33 @@ func cvDecShareV1(agg *cvAggregateV1, receiverSecret fr.Element, receiverIndex i
 		receiverPublicKey: receiver.receiverPublicKey,
 		scalarChunks:      append([]cvElGamalCiphertext(nil), receiver.scalarChunks...),
 		blinding:          receiver.blinding,
-		commitment:        cvEvaluateCommitmentsV1(agg.coefficientCommitments, receiverIndex),
+		commitment:        cvEvaluateCommitments(agg.coefficientCommitments, receiverIndex),
 	}
 	decrypted, err := cvDecryptShare(agg.context.profile, receiverSecret, share, len(agg.dealerIDs))
 	if err != nil {
 		return nil, nil, err
 	}
-	proof, err := cvProveDLEQV1(agg, receiverIndex, receiverSecret, &decrypted.publicScalar, &decrypted.blindingOpening)
+	proof, err := cvProveDLEQ(agg, receiverIndex, receiverSecret, &decrypted.publicScalar, &decrypted.blindingOpening)
 	if err != nil {
 		return nil, nil, err
 	}
-	receipt := &cvReceiptV1{
+	receipt := &cvReceipt{
 		aggregateDigest: append([]byte(nil), agg.digest...),
 		receiverIndex:   receiverIndex,
 		publicScalar:    decrypted.publicScalar,
 		blindingOpening: decrypted.blindingOpening,
 		proof:           *proof,
 	}
-	wire, err := cvReceiptV1CanonicalBytes(receipt)
+	wire, err := cvReceiptCanonicalBytes(receipt)
 	if err != nil {
 		return nil, nil, err
 	}
 	receipt.digestWire = wire
-	receipt.digest = hashBytes([]byte(cvReceiptV1Domain), wire)
+	receipt.digest = hashBytes([]byte(cvReceiptDomain), wire)
 	return decrypted, receipt, nil
 }
 
-func cvReceiptV1CanonicalBytes(receipt *cvReceiptV1) ([]byte, error) {
+func cvReceiptCanonicalBytes(receipt *cvReceipt) ([]byte, error) {
 	if receipt == nil || len(receipt.aggregateDigest) != 32 || receipt.receiverIndex <= 0 ||
 		!cvValidG1(&receipt.publicScalar, true) || !cvValidG1(&receipt.blindingOpening, true) ||
 		!cvValidG1(&receipt.proof.tKey, true) || !cvValidG1(&receipt.proof.tScalar, true) ||
@@ -541,7 +541,7 @@ func cvReceiptV1CanonicalBytes(receipt *cvReceiptV1) ([]byte, error) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receipt")
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(cvReceiptV1Domain)); err != nil {
+	if err := cvWriteBytes(&wire, []byte(cvReceiptDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, receipt.aggregateDigest); err != nil {
@@ -560,43 +560,43 @@ func cvReceiptV1CanonicalBytes(receipt *cvReceiptV1) ([]byte, error) {
 	return wire.Bytes(), nil
 }
 
-func cvVerifyShareV1(context *cvLeafContextV1, agg *cvAggregateV1, receiverIndex int, receipt *cvReceiptV1) error {
-	if err := cvValidateLeafContextV1(context); err != nil {
+func cvVerifyShare(context *cvLeafContext, agg *cvAggregateTranscript, receiverIndex int, receipt *cvReceipt) error {
+	if err := cvValidateLeafContext(context); err != nil {
 		return err
 	}
-	if err := cvValidateAggregateV1(agg); err != nil {
+	if err := cvValidateAggregate(agg); err != nil {
 		return err
 	}
-	if err := cvCheckAggregateDigestV1(agg); err != nil {
+	if err := cvCheckAggregateDigest(agg); err != nil {
 		return err
 	}
 	if receiverIndex <= 0 || receiverIndex > len(agg.receivers) {
 		return fmt.Errorf("invalid CV-sAPVSS aggregate receiver index")
 	}
-	contextWire, err := cvLeafContextV1CanonicalBytes(context)
+	contextWire, err := cvLeafContextCanonicalBytes(context)
 	if err != nil {
 		return err
 	}
-	aggContextWire, err := cvLeafContextV1CanonicalBytes(&agg.context)
+	aggContextWire, err := cvLeafContextCanonicalBytes(&agg.context)
 	if err != nil || !bytes.Equal(contextWire, aggContextWire) {
 		return fmt.Errorf("CV-sAPVSS aggregate context mismatch")
 	}
 	if receipt == nil || receipt.receiverIndex != receiverIndex || !bytes.Equal(receipt.aggregateDigest, agg.digest) {
 		return fmt.Errorf("CV-sAPVSS receipt binding mismatch")
 	}
-	receiptWire, err := cvReceiptV1CanonicalBytes(receipt)
+	receiptWire, err := cvReceiptCanonicalBytes(receipt)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(receipt.digest, hashBytes([]byte(cvReceiptV1Domain), receiptWire)) {
+	if !bytes.Equal(receipt.digest, hashBytes([]byte(cvReceiptDomain), receiptWire)) {
 		return fmt.Errorf("CV-sAPVSS receipt digest mismatch")
 	}
 	key := &agg.receivers[receiverIndex-1].receiverPublicKey
-	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargetsV1(agg, receiverIndex, &receipt.publicScalar, &receipt.blindingOpening)
+	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargets(agg, receiverIndex, &receipt.publicScalar, &receipt.blindingOpening)
 	if err != nil {
 		return err
 	}
-	challenge, err := cvDLEQChallengeV1(agg, receiverIndex, &receipt.publicScalar, &receipt.blindingOpening, &receipt.proof)
+	challenge, err := cvDLEQChallenge(agg, receiverIndex, &receipt.publicScalar, &receipt.blindingOpening, &receipt.proof)
 	if err != nil {
 		return err
 	}
@@ -615,7 +615,7 @@ func cvVerifyShareV1(context *cvLeafContextV1, agg *cvAggregateV1, receiverIndex
 	if !left.Equal(&right) {
 		return fmt.Errorf("CV-sAPVSS receipt blinding DLEQ failed")
 	}
-	evaluation := cvEvaluateCommitmentsV1(agg.coefficientCommitments, receiverIndex)
+	evaluation := cvEvaluateCommitments(agg.coefficientCommitments, receiverIndex)
 	var publicCommitment bls12381.G1Affine
 	publicCommitment.Add(&receipt.publicScalar, &receipt.blindingOpening)
 	if !publicCommitment.Equal(&evaluation) {

@@ -25,31 +25,31 @@ func cvTestCoins(count int, start uint64) []fr.Element {
 
 func TestCVAggregateVerifiedLeavesRejectsMutationAndContextReplay(t *testing.T) {
 	_, context, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&context, leaves)
+	agg, err := cvAgg(&context, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepted := make([]*cvVerifiedLeafV1, len(leaves))
+	accepted := make([]*cvVerifiedLeaf, len(leaves))
 	for i := range leaves {
-		accepted[i], err = cvAcceptedLeafV1(&context, leaves[i], nil)
+		accepted[i], err = cvAcceptedLeaf(&context, leaves[i], nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := cvAVerVerifiedV1(&context, agg, accepted); err != nil {
+	if err := cvAVerVerified(&context, agg, accepted); err != nil {
 		t.Fatalf("verified aggregate rejected: %v", err)
 	}
 
 	originalDealer := leaves[0].dealerID
 	leaves[0].dealerID++
-	if err := cvAVerVerifiedV1(&context, agg, accepted); err == nil {
+	if err := cvAVerVerified(&context, agg, accepted); err == nil {
 		t.Fatal("verified aggregate accepted a mutated leaf")
 	}
 	leaves[0].dealerID = originalDealer
 
-	replayedContext := cvCloneLeafContextV1(context)
+	replayedContext := cvCloneLeafContext(context)
 	replayedContext.epoch++
-	if err := cvAVerVerifiedV1(&replayedContext, agg, accepted); err == nil {
+	if err := cvAVerVerified(&replayedContext, agg, accepted); err == nil {
 		t.Fatal("verified aggregate accepted a cross-epoch token")
 	}
 }
@@ -149,7 +149,7 @@ func TestCVBoundedDLogSolverReusesTableAcrossTargets(t *testing.T) {
 	}
 }
 
-func TestCVSAPVSSM1AReferenceDealAndLeafV1(t *testing.T) {
+func TestCVSAPVSSM1AReferenceDealAndLeaf(t *testing.T) {
 	profile := cvChunkProfile{chunkBits: 4, maxComponents: 2}
 	chunks, err := cvChunkCount(profile)
 	if err != nil {
@@ -163,20 +163,20 @@ func TestCVSAPVSSM1AReferenceDealAndLeafV1(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("m1-a-session"),
 		epoch:              9,
 		sharingDegree:      1,
 		profile:            profile,
 		receiverPublicKeys: receiverKeys,
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1StructuralProofProfile,
+		proofProfile:       cvLeafStructuralProofProfile,
 	}
 	scalarCoins := make([][]fr.Element, len(receiverKeys))
 	for i := range scalarCoins {
 		scalarCoins[i] = cvTestCoins(chunks, uint64(1000+i*chunks))
 	}
-	leaf, err := cvReferenceDealV1(
+	leaf, err := cvReferenceDeal(
 		context,
 		41,
 		[]fr.Element{cvTestScalar(5), cvTestScalar(7)},
@@ -190,26 +190,26 @@ func TestCVSAPVSSM1AReferenceDealAndLeafV1(t *testing.T) {
 	if leaf.hasLeafNIZK {
 		t.Fatal("M1-A must not claim a leaf NIZK")
 	}
-	if err := cvVerifyLeafV1(&context, leaf); err != nil {
+	if err := cvVerifyLeaf(&context, leaf); err != nil {
 		t.Fatalf("honest M1-A leaf rejected: %v", err)
 	}
-	firstWire, err := cvLeafV1CanonicalBytes(leaf)
+	firstWire, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondWire, err := cvLeafV1CanonicalBytes(leaf)
+	secondWire, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(firstWire, secondWire) || len(leaf.digest) != 32 {
-		t.Fatal("LeafV1 wire or digest is not canonical")
+		t.Fatal("Leaf wire or digest is not canonical")
 	}
-	contextWire, err := cvLeafContextV1CanonicalBytes(&context)
+	contextWire, err := cvLeafContextCanonicalBytes(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(cvLeafContextV1Digest(&context), hashBytes([]byte(cvLeafV1ContextDigestDomain), contextWire)) {
-		t.Fatal("LeafV1 context digest mismatch")
+	if !bytes.Equal(cvLeafContextDigest(&context), hashBytes([]byte(cvLeafContextDigestDomain), contextWire)) {
+		t.Fatal("Leaf context digest mismatch")
 	}
 
 	decrypted, err := cvDecryptShare(profile, receiverSecrets[1], leaf.receivers[1].encryptedShare, 1)
@@ -222,44 +222,44 @@ func TestCVSAPVSSM1AReferenceDealAndLeafV1(t *testing.T) {
 	}
 
 	t.Run("wrong key", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.receivers[0].receiverPublicKey = receiverKeys[1]
 		bad.receivers[0].encryptedShare.receiverPublicKey = receiverKeys[1]
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
-			t.Fatal("accepted LeafV1 under the wrong receiver key")
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
+			t.Fatal("accepted Leaf under the wrong receiver key")
 		}
 	})
 	t.Run("wrong index", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.receivers[0].receiverIndex = 2
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
-			t.Fatal("accepted LeafV1 under the wrong receiver index")
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
+			t.Fatal("accepted Leaf under the wrong receiver index")
 		}
 	})
 	t.Run("replay", func(t *testing.T) {
 		replayedContext := context
 		replayedContext.epoch++
-		if err := cvVerifyLeafV1(&replayedContext, leaf); err == nil {
-			t.Fatal("accepted LeafV1 replayed into another epoch")
+		if err := cvVerifyLeaf(&replayedContext, leaf); err == nil {
+			t.Fatal("accepted Leaf replayed into another epoch")
 		}
 	})
 	t.Run("commitment mutation", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.coefficientCommitments[0].Add(&bad.coefficientCommitments[0], &genG1)
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted coefficient commitment inconsistent with receiver evaluations")
 		}
 	})
 	t.Run("ciphertext mutation", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.receivers[0].encryptedShare.scalarChunks[0].c.Add(
 			&bad.receivers[0].encryptedShare.scalarChunks[0].c,
 			&genG1,
 		)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted ciphertext mutation with a stale leaf digest")
 		}
 	})
@@ -279,14 +279,14 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("m1-b-session"),
 		epoch:              10,
 		sharingDegree:      1,
 		profile:            profile,
 		receiverPublicKeys: receiverKeys,
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1GrothProofProfile,
+		proofProfile:       cvLeafGrothProofProfile,
 	}
 	commonCoins := cvTestCoins(chunks, 3001)
 	scalarCoins := make([][]fr.Element, len(receiverKeys))
@@ -295,7 +295,7 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 		scalarCoins[i] = append([]fr.Element(nil), commonCoins...)
 		blindingCoins[i] = cvTestScalar(4001)
 	}
-	leaf, err := cvReferenceDealV1(
+	leaf, err := cvReferenceDeal(
 		context,
 		43,
 		[]fr.Element{cvTestScalar(17), cvTestScalar(5)},
@@ -309,7 +309,7 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 	if !leaf.hasLeafNIZK || leaf.proof == nil {
 		t.Fatal("M1-B leaf did not carry a public proof")
 	}
-	statementDigest, err := cvLeafV1StatementDigest(leaf)
+	statementDigest, err := cvLeafStatementDigest(leaf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 	if !leaf.proof.chunking.y0.Equal(&wantY0) {
 		t.Fatal("M1-B chunk base was dealer-selected instead of statement-derived")
 	}
-	if err := cvVerifyLeafV1(&context, leaf); err != nil {
+	if err := cvVerifyLeaf(&context, leaf); err != nil {
 		t.Fatalf("honest M1-B leaf rejected: %v", err)
 	}
 	for i := 1; i < len(leaf.receivers); i++ {
@@ -345,7 +345,7 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 		}
 		one := fr.One()
 		badCoins[1][0].Add(&badCoins[1][0], &one)
-		if _, err := cvReferenceDealV1(
+		if _, err := cvReferenceDeal(
 			context,
 			44,
 			[]fr.Element{cvTestScalar(17), cvTestScalar(5)},
@@ -357,50 +357,50 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 		}
 	})
 	t.Run("ciphertext mutation with refreshed digest", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.receivers[1].encryptedShare.scalarChunks[0].c.Add(
 			&bad.receivers[1].encryptedShare.scalarChunks[0].c,
 			&genG1,
 		)
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted ciphertext mutation after refreshing the leaf digest")
 		}
 	})
 	t.Run("sharing response mutation with refreshed digest", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		one := fr.One()
 		bad.proof.sharing.zScalar.Add(&bad.proof.sharing.zScalar, &one)
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted a mutated correct-sharing response")
 		}
 	})
 	t.Run("out of range chunk response with refreshed digest", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		tooLarge := new(big.Int).Sub(fr.Modulus(), big.NewInt(1))
 		bad.proof.chunking.zDigits[0].SetBigInt(tooLarge)
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted an out-of-range Groth chunk response")
 		}
 	})
 	t.Run("exact range commitment mutation with refreshed digest", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.proof.chunking.exactRange.commitments[0].Add(
 			&bad.proof.chunking.exactRange.commitments[0],
 			&genG1,
 		)
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted an exact range commitment mutation")
 		}
 	})
 	t.Run("proof replay with refreshed digest", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(leaf)
+		bad := cvCloneLeafForTest(leaf)
 		bad.dealerID++
-		bad.digest = cvLeafV1Digest(bad)
-		if err := cvVerifyLeafV1(&context, bad); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&context, bad); err == nil {
 			t.Fatal("accepted a proof replayed for another dealer")
 		}
 	})
@@ -408,7 +408,7 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 
 func TestCVSAPVSSM1BRejectsOutOfRangeDigitProof(t *testing.T) {
 	leaf, context := cvM1BLeafWithCustomPlaintexts(t, 256, 7, 256)
-	if err := cvVerifyLeafV1(&context, leaf); err == nil {
+	if err := cvVerifyLeaf(&context, leaf); err == nil {
 		t.Fatal("accepted a leaf whose scalar chunk plaintext is digit B")
 	}
 }
@@ -426,14 +426,14 @@ func TestCVSAPVSSM1BRejectsScalarBlindingCompensation(t *testing.T) {
 	if !cvVerifyRelation(leaf.receivers[0].encryptedShare, decrypted) {
 		t.Fatal("compensation fixture did not satisfy the current Pedersen relation")
 	}
-	if err := cvVerifyLeafV1(&context, leaf); err == nil {
+	if err := cvVerifyLeaf(&context, leaf); err == nil {
 		t.Fatal("accepted scalar/blinding compensation with a mismatched scalar witness")
 	}
 }
 
 func TestCVSAPVSSM1BRejectsRangeLinkHOffset(t *testing.T) {
 	leaf, _ := cvM1BLeafWithCustomPlaintexts(t, 17, 7, 17)
-	bad := cvCloneLeafV1ForTest(leaf)
+	bad := cvCloneLeafForTest(leaf)
 	h, err := cvPedersenBase()
 	if err != nil {
 		t.Fatal(err)
@@ -449,11 +449,11 @@ func TestCVSAPVSSM1BRejectsRangeLinkHOffset(t *testing.T) {
 		t.Fatal(err)
 	}
 	scalarCoins := cvTestCoins(len(bad.receivers[0].encryptedShare.scalarChunks), 7001)
-	proof, err := cvProveExactRangeV1(bad, [][]uint64{digits}, scalarCoins)
+	proof, err := cvProveExactRange(bad, [][]uint64{digits}, scalarCoins)
 	if err != nil {
 		t.Fatal(err)
 	}
-	statementDigest, err := cvLeafV1StatementDigest(bad)
+	statementDigest, err := cvLeafStatementDigest(bad)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,32 +464,32 @@ func TestCVSAPVSSM1BRejectsRangeLinkHOffset(t *testing.T) {
 	var compensation fr.Element
 	compensation.Mul(&challenge, &delta)
 	proof.links[0].zRhos[0].Sub(&proof.links[0].zRhos[0], &compensation)
-	if err := cvVerifyExactRangeV1(bad, &proof); err == nil {
+	if err := cvVerifyExactRange(bad, &proof); err == nil {
 		t.Fatal("accepted a ciphertext H-offset compensated only in the old range-link response")
 	}
 }
 
 func TestCVSAPVSSM2AggregateReceipt(t *testing.T) {
 	context, secrets, leaves := cvM2Fixture(t)
-	agg, err := cvAggV1(&context, leaves)
+	agg, err := cvAgg(&context, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cvAVerV1(&context, agg, leaves); err != nil {
+	if err := cvAVer(&context, agg, leaves); err != nil {
 		t.Fatalf("honest aggregate rejected: %v", err)
 	}
-	wire, err := cvAggregateV1CanonicalBytes(agg)
+	wire, err := cvAggregateCanonicalBytes(agg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(wire, agg.digestWire) || len(agg.digest) != 32 {
-		t.Fatal("AggregateV1 wire/digest is not canonical")
+		t.Fatal("Aggregate wire/digest is not canonical")
 	}
-	decrypted, receipt, err := cvDecShareV1(agg, secrets[0], 1)
+	decrypted, receipt, err := cvDecShare(agg, secrets[0], 1)
 	if err != nil {
 		t.Fatalf("aggregate DecShare failed: %v", err)
 	}
-	if err := cvVerifyShareV1(&context, agg, 1, receipt); err != nil {
+	if err := cvVerifyShare(&context, agg, 1, receipt); err != nil {
 		t.Fatalf("honest receipt rejected: %v", err)
 	}
 	want := cvTestScalar(24) // (5+3*1) + (11+5*1).
@@ -498,16 +498,16 @@ func TestCVSAPVSSM2AggregateReceipt(t *testing.T) {
 	}
 
 	t.Run("manifest mutation", func(t *testing.T) {
-		bad := cvCloneAggregateV1ForTest(agg)
+		bad := cvCloneAggregateForTest(agg)
 		bad.dealerIDs[0], bad.dealerIDs[1] = bad.dealerIDs[1], bad.dealerIDs[0]
-		if err := cvAVerV1(&context, bad, leaves); err == nil {
+		if err := cvAVer(&context, bad, leaves); err == nil {
 			t.Fatal("accepted noncanonical dealer manifest")
 		}
 	})
 	t.Run("ciphertext mutation", func(t *testing.T) {
-		bad := cvCloneAggregateV1ForTest(agg)
+		bad := cvCloneAggregateForTest(agg)
 		bad.receivers[0].scalarChunks[0].c.Add(&bad.receivers[0].scalarChunks[0].c, &genG1)
-		if err := cvAVerV1(&context, bad, leaves); err == nil {
+		if err := cvAVer(&context, bad, leaves); err == nil {
 			t.Fatal("accepted aggregate ciphertext mutation")
 		}
 	})
@@ -516,7 +516,7 @@ func TestCVSAPVSSM2AggregateReceipt(t *testing.T) {
 		var one fr.Element
 		one.SetOne()
 		bad.proof.z.Add(&bad.proof.z, &one)
-		if err := cvVerifyShareV1(&context, agg, 1, &bad); err == nil {
+		if err := cvVerifyShare(&context, agg, 1, &bad); err == nil {
 			t.Fatal("accepted mutated public receipt")
 		}
 	})
@@ -525,19 +525,19 @@ func TestCVSAPVSSM2AggregateReceipt(t *testing.T) {
 		var one fr.Element
 		one.SetOne()
 		bad.proof.z.Add(&bad.proof.z, &one)
-		wire, err := cvReceiptV1CanonicalBytes(&bad)
+		wire, err := cvReceiptCanonicalBytes(&bad)
 		if err != nil {
 			t.Fatal(err)
 		}
 		bad.digestWire = wire
-		bad.digest = hashBytes([]byte(cvReceiptV1Domain), wire)
-		if err := cvVerifyShareV1(&context, agg, 1, &bad); err == nil {
+		bad.digest = hashBytes([]byte(cvReceiptDomain), wire)
+		if err := cvVerifyShare(&context, agg, 1, &bad); err == nil {
 			t.Fatal("accepted a receipt mutation after refreshing its digest")
 		}
 	})
 }
 
-func cvM2Fixture(t *testing.T) (cvLeafContextV1, []fr.Element, []*cvLeafV1) {
+func cvM2Fixture(t *testing.T) (cvLeafContext, []fr.Element, []*cvLeaf) {
 	t.Helper()
 	profile := cvChunkProfile{chunkBits: 4, maxComponents: 2}
 	secrets := []fr.Element{cvTestScalar(13), cvTestScalar(17)}
@@ -549,14 +549,14 @@ func cvM2Fixture(t *testing.T) (cvLeafContextV1, []fr.Element, []*cvLeafV1) {
 			t.Fatal(err)
 		}
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("m2-session"),
 		epoch:              12,
 		sharingDegree:      1,
 		profile:            profile,
 		receiverPublicKeys: keys,
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1StructuralProofProfile,
+		proofProfile:       cvLeafStructuralProofProfile,
 	}
 	chunks, err := cvChunkCount(profile)
 	if err != nil {
@@ -569,24 +569,24 @@ func cvM2Fixture(t *testing.T) (cvLeafContextV1, []fr.Element, []*cvLeafV1) {
 		}
 		return coins
 	}
-	first, err := cvReferenceDealV1(context, 10,
+	first, err := cvReferenceDeal(context, 10,
 		[]fr.Element{cvTestScalar(5), cvTestScalar(3)},
 		[]fr.Element{cvTestScalar(7), cvTestScalar(2)},
 		makeCoins(100), []fr.Element{cvTestScalar(201), cvTestScalar(202)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := cvReferenceDealV1(context, 11,
+	second, err := cvReferenceDeal(context, 11,
 		[]fr.Element{cvTestScalar(11), cvTestScalar(5)},
 		[]fr.Element{cvTestScalar(13), cvTestScalar(4)},
 		makeCoins(300), []fr.Element{cvTestScalar(401), cvTestScalar(402)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return context, secrets, []*cvLeafV1{first, second}
+	return context, secrets, []*cvLeaf{first, second}
 }
 
-func cvCloneAggregateV1ForTest(in *cvAggregateV1) *cvAggregateV1 {
+func cvCloneAggregateForTest(in *cvAggregateTranscript) *cvAggregateTranscript {
 	out := *in
 	out.dealerIDs = append([]uint64(nil), in.dealerIDs...)
 	out.leafDigests = make([][]byte, len(in.leafDigests))
@@ -594,7 +594,7 @@ func cvCloneAggregateV1ForTest(in *cvAggregateV1) *cvAggregateV1 {
 		out.leafDigests[i] = append([]byte(nil), in.leafDigests[i]...)
 	}
 	out.coefficientCommitments = append([]bls12381.G1Affine(nil), in.coefficientCommitments...)
-	out.receivers = make([]cvAggregateReceiverV1, len(in.receivers))
+	out.receivers = make([]cvAggregateReceiver, len(in.receivers))
 	for i := range in.receivers {
 		out.receivers[i] = in.receivers[i]
 		out.receivers[i].scalarChunks = append([]cvElGamalCiphertext(nil), in.receivers[i].scalarChunks...)
@@ -608,7 +608,7 @@ func cvCloneAggregateV1ForTest(in *cvAggregateV1) *cvAggregateV1 {
 func cvM1BLeafWithCustomPlaintexts(
 	t *testing.T,
 	scalar, blinding, firstDigit uint64,
-) (*cvLeafV1, cvLeafContextV1) {
+) (*cvLeaf, cvLeafContext) {
 	t.Helper()
 	profile := cvChunkProfile{chunkBits: 8, maxComponents: 2}
 	secret := cvTestScalar(23)
@@ -616,14 +616,14 @@ func cvM1BLeafWithCustomPlaintexts(
 	if err != nil {
 		t.Fatal(err)
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("m1-b-forgery"),
 		epoch:              11,
 		sharingDegree:      0,
 		profile:            profile,
 		receiverPublicKeys: []bls12381.G1Affine{pk},
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1GrothProofProfile,
+		proofProfile:       cvLeafGrothProofProfile,
 	}
 	chunks, err := cvChunkCount(profile)
 	if err != nil {
@@ -661,11 +661,11 @@ func cvM1BLeafWithCustomPlaintexts(
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaf := &cvLeafV1{
-		context:                cvCloneLeafContextV1(context),
+	leaf := &cvLeaf{
+		context:                cvCloneLeafContext(context),
 		dealerID:               91,
 		coefficientCommitments: []bls12381.G1Affine{commitment},
-		receivers: []cvLeafReceiverV1{{
+		receivers: []cvLeafReceiver{{
 			receiverIndex:     1,
 			receiverPublicKey: pk,
 			encryptedShare: &cvEncryptedShare{
@@ -677,7 +677,7 @@ func cvM1BLeafWithCustomPlaintexts(
 		}},
 		hasLeafNIZK: true,
 	}
-	sharing, err := cvProveSharingV1(
+	sharing, err := cvProveSharing(
 		leaf,
 		[]fr.Element{scalarWitness},
 		[]fr.Element{blindingWitness},
@@ -687,29 +687,29 @@ func cvM1BLeafWithCustomPlaintexts(
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunking, err := cvProveChunkingV1(leaf, [][]uint64{digits}, scalarCoin)
+	chunking, err := cvProveChunking(leaf, [][]uint64{digits}, scalarCoin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunking.exactRange, err = cvProveExactRangeV1(leaf, [][]uint64{digits}, scalarCoin)
+	chunking.exactRange, err = cvProveExactRange(leaf, [][]uint64{digits}, scalarCoin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaf.proof = &cvLeafProofV1{sharing: sharing, chunking: chunking}
-	leaf.digest = cvLeafV1Digest(leaf)
+	leaf.proof = &cvLeafProof{sharing: sharing, chunking: chunking}
+	leaf.digest = cvLeafDigest(leaf)
 	if leaf.digest == nil {
 		t.Fatal("failed to encode malicious fixture")
 	}
 	return leaf, context
 }
 
-func cvCloneLeafV1ForTest(in *cvLeafV1) *cvLeafV1 {
+func cvCloneLeafForTest(in *cvLeaf) *cvLeaf {
 	out := *in
 	out.context.sessionID = append([]byte(nil), in.context.sessionID...)
 	out.context.receiverPublicKeys = append([]bls12381.G1Affine(nil), in.context.receiverPublicKeys...)
 	out.context.dealerSetPolicy = append([]byte(nil), in.context.dealerSetPolicy...)
 	out.coefficientCommitments = append([]bls12381.G1Affine(nil), in.coefficientCommitments...)
-	out.receivers = append([]cvLeafReceiverV1(nil), in.receivers...)
+	out.receivers = append([]cvLeafReceiver(nil), in.receivers...)
 	for i := range out.receivers {
 		share := *in.receivers[i].encryptedShare
 		share.scalarChunks = append([]cvElGamalCiphertext(nil), share.scalarChunks...)
@@ -724,8 +724,8 @@ func cvCloneLeafV1ForTest(in *cvLeafV1) *cvLeafV1 {
 		proof.chunking.zCoins = append([]fr.Element(nil), in.proof.chunking.zCoins...)
 		proof.chunking.zDigits = append([]fr.Element(nil), in.proof.chunking.zDigits...)
 		proof.chunking.exactRange.commitments = append([]bls12381.G1Affine(nil), in.proof.chunking.exactRange.commitments...)
-		proof.chunking.exactRange.bits = append([]cvBitProofV1(nil), in.proof.chunking.exactRange.bits...)
-		proof.chunking.exactRange.links = append([]cvRangeLinkProofV1(nil), in.proof.chunking.exactRange.links...)
+		proof.chunking.exactRange.bits = append([]cvBitProof(nil), in.proof.chunking.exactRange.bits...)
+		proof.chunking.exactRange.links = append([]cvRangeLinkProof(nil), in.proof.chunking.exactRange.links...)
 		for i := range proof.chunking.exactRange.links {
 			proof.chunking.exactRange.links[i].tCommitments = append([]bls12381.G1Affine(nil), in.proof.chunking.exactRange.links[i].tCommitments...)
 			proof.chunking.exactRange.links[i].tCiphertexts = append([]bls12381.G1Affine(nil), in.proof.chunking.exactRange.links[i].tCiphertexts...)

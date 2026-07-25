@@ -13,21 +13,21 @@ import (
 )
 
 const (
-	apvssCompactRangeDomainV1       = "ARL-APVSS-v1/compact-range"
-	apvssCompactRangeGeneratorDSTV1 = "ARL-APVSS-v1/compact-range/H2C"
+	apvssCompactRangeDomain       = "ARL-APVSS/compact-range"
+	apvssCompactRangeGeneratorDST = "ARL-APVSS/compact-range/H2C"
 )
 
-type apvssCompactInnerProductProofV1 struct {
+type apvssCompactInnerProductProof struct {
 	left  []bls12381.G1Affine
 	right []bls12381.G1Affine
 	a     fr.Element
 	b     fr.Element
 }
 
-// apvssCompactRangeProofV1 is an aggregated Bulletproof range proof. It may
+// apvssCompactRangeProof is an aggregated Bulletproof range proof. It may
 // prove any positive number of same-width values; the implementation pads the
 // value count to a power of two with public zero commitments.
-type apvssCompactRangeProofV1 struct {
+type apvssCompactRangeProof struct {
 	valueCount int
 	bits       int
 	a          bls12381.G1Affine
@@ -37,18 +37,18 @@ type apvssCompactRangeProofV1 struct {
 	tauX       fr.Element
 	mu         fr.Element
 	tHat       fr.Element
-	inner      apvssCompactInnerProductProofV1
+	inner      apvssCompactInnerProductProof
 }
 
-type apvssCompactRangeGeneratorsV1 struct {
+type apvssCompactRangeGenerators struct {
 	g []bls12381.G1Affine
 	h []bls12381.G1Affine
 	u bls12381.G1Affine
 }
 
-var apvssCompactRangeGeneratorCacheV1 sync.Map
+var apvssCompactRangeGeneratorCache sync.Map
 
-func apvssNextPowerOfTwoV1(value int) (int, error) {
+func apvssNextPowerOfTwo(value int) (int, error) {
 	if value <= 0 || value > 1<<20 {
 		return 0, fmt.Errorf("invalid APVSS compact vector size")
 	}
@@ -59,73 +59,73 @@ func apvssNextPowerOfTwoV1(value int) (int, error) {
 	return out, nil
 }
 
-func apvssCompactRangeDimensionsV1(valueCount, bits int) (int, int, error) {
+func apvssCompactRangeDimensions(valueCount, bits int) (int, int, error) {
 	if valueCount <= 0 || bits <= 0 || bits > 63 {
 		return 0, 0, fmt.Errorf("invalid APVSS compact range dimensions")
 	}
-	paddedValues, err := apvssNextPowerOfTwoV1(valueCount)
+	paddedValues, err := apvssNextPowerOfTwo(valueCount)
 	if err != nil {
 		return 0, 0, err
 	}
-	vectorSize, err := apvssNextPowerOfTwoV1(paddedValues * bits)
+	vectorSize, err := apvssNextPowerOfTwo(paddedValues * bits)
 	if err != nil || vectorSize != paddedValues*bits {
 		return 0, 0, fmt.Errorf("APVSS compact range width must be a power of two")
 	}
 	return paddedValues, vectorSize, nil
 }
 
-func apvssCompactRangeGeneratorV1(kind byte, index int) (bls12381.G1Affine, error) {
+func apvssCompactRangeGenerator(kind byte, index int) (bls12381.G1Affine, error) {
 	message := make([]byte, 9)
 	message[0] = kind
 	binary.BigEndian.PutUint64(message[1:], uint64(index))
-	point, err := bls12381.HashToG1(message, []byte(apvssCompactRangeGeneratorDSTV1))
+	point, err := bls12381.HashToG1(message, []byte(apvssCompactRangeGeneratorDST))
 	if err != nil || !cvValidG1(&point, false) || point.Equal(&genG1) {
 		return bls12381.G1Affine{}, fmt.Errorf("derive APVSS compact range generator %d/%d", kind, index)
 	}
 	return point, nil
 }
 
-func apvssCompactRangeGeneratorsForV1(size int) (*apvssCompactRangeGeneratorsV1, error) {
-	if cached, ok := apvssCompactRangeGeneratorCacheV1.Load(size); ok {
-		return cached.(*apvssCompactRangeGeneratorsV1), nil
+func apvssCompactRangeGeneratorsFor(size int) (*apvssCompactRangeGenerators, error) {
+	if cached, ok := apvssCompactRangeGeneratorCache.Load(size); ok {
+		return cached.(*apvssCompactRangeGenerators), nil
 	}
-	generators := &apvssCompactRangeGeneratorsV1{
+	generators := &apvssCompactRangeGenerators{
 		g: make([]bls12381.G1Affine, size),
 		h: make([]bls12381.G1Affine, size),
 	}
 	var err error
 	for i := 0; i < size; i++ {
-		generators.g[i], err = apvssCompactRangeGeneratorV1('G', i)
+		generators.g[i], err = apvssCompactRangeGenerator('G', i)
 		if err != nil {
 			return nil, err
 		}
-		generators.h[i], err = apvssCompactRangeGeneratorV1('H', i)
+		generators.h[i], err = apvssCompactRangeGenerator('H', i)
 		if err != nil {
 			return nil, err
 		}
 	}
-	generators.u, err = apvssCompactRangeGeneratorV1('U', 0)
+	generators.u, err = apvssCompactRangeGenerator('U', 0)
 	if err != nil {
 		return nil, err
 	}
-	actual, _ := apvssCompactRangeGeneratorCacheV1.LoadOrStore(size, generators)
-	return actual.(*apvssCompactRangeGeneratorsV1), nil
+	actual, _ := apvssCompactRangeGeneratorCache.LoadOrStore(size, generators)
+	return actual.(*apvssCompactRangeGenerators), nil
 }
 
-func apvssCompactIdentityV1() bls12381.G1Affine {
+func apvssCompactIdentity() bls12381.G1Affine {
 	var identity bls12381.G1Affine
 	identity.ScalarMultiplication(&genG1, big.NewInt(0))
 	return identity
 }
 
-func apvssCompactPointSumV1(points []bls12381.G1Affine, scalars []fr.Element) bls12381.G1Affine {
+func apvssCompactPointSum(points []bls12381.G1Affine, scalars []fr.Element) bls12381.G1Affine {
 	if len(points) == len(scalars) && len(points) >= 32 {
 		var out bls12381.G1Affine
 		if _, err := out.MultiExp(points, scalars, ecc.MultiExpConfig{NbTasks: 8}); err == nil {
 			return out
 		}
 	}
-	out := apvssCompactIdentityV1()
+	out := apvssCompactIdentity()
 	for i := range points {
 		term := cvPointTimes(&points[i], &scalars[i])
 		out.Add(&out, &term)
@@ -133,7 +133,7 @@ func apvssCompactPointSumV1(points []bls12381.G1Affine, scalars []fr.Element) bl
 	return out
 }
 
-func apvssCompactInnerProductV1(left, right []fr.Element) fr.Element {
+func apvssCompactInnerProduct(left, right []fr.Element) fr.Element {
 	var out fr.Element
 	for i := range left {
 		var term fr.Element
@@ -143,7 +143,7 @@ func apvssCompactInnerProductV1(left, right []fr.Element) fr.Element {
 	return out
 }
 
-func apvssCompactScalarPowersV1(base fr.Element, count int) []fr.Element {
+func apvssCompactScalarPowers(base fr.Element, count int) []fr.Element {
 	out := make([]fr.Element, count)
 	if count == 0 {
 		return out
@@ -155,7 +155,7 @@ func apvssCompactScalarPowersV1(base fr.Element, count int) []fr.Element {
 	return out
 }
 
-func apvssCompactRangeBaseTranscriptV1(
+func apvssCompactRangeBaseTranscript(
 	statement []byte,
 	commitments []bls12381.G1Affine,
 	valueCount, bits int,
@@ -164,7 +164,7 @@ func apvssCompactRangeBaseTranscriptV1(
 		return nil, fmt.Errorf("invalid APVSS compact range statement")
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(apvssCompactRangeDomainV1)); err != nil {
+	if err := cvWriteBytes(&wire, []byte(apvssCompactRangeDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, statement); err != nil {
@@ -182,8 +182,8 @@ func apvssCompactRangeBaseTranscriptV1(
 	return wire.Bytes(), nil
 }
 
-func apvssCompactChallengeV1(domain string, parts ...[]byte) (fr.Element, error) {
-	challenge, err := cvHashToFrV1(domain, parts...)
+func apvssCompactChallenge(domain string, parts ...[]byte) (fr.Element, error) {
+	challenge, err := cvHashToFr(domain, parts...)
 	if err != nil {
 		return fr.Element{}, err
 	}
@@ -193,7 +193,7 @@ func apvssCompactChallengeV1(domain string, parts ...[]byte) (fr.Element, error)
 	return challenge, nil
 }
 
-func apvssCompactPointBytesV1(points ...*bls12381.G1Affine) []byte {
+func apvssCompactPointBytes(points ...*bls12381.G1Affine) []byte {
 	var wire bytes.Buffer
 	for _, point := range points {
 		cvWritePoint(&wire, point)
@@ -201,7 +201,7 @@ func apvssCompactPointBytesV1(points ...*bls12381.G1Affine) []byte {
 	return wire.Bytes()
 }
 
-func apvssCompactScalarBytesV1(scalars ...*fr.Element) []byte {
+func apvssCompactScalarBytes(scalars ...*fr.Element) []byte {
 	var wire bytes.Buffer
 	for _, scalar := range scalars {
 		cvWriteScalar(&wire, scalar)
@@ -209,7 +209,7 @@ func apvssCompactScalarBytesV1(scalars ...*fr.Element) []byte {
 	return wire.Bytes()
 }
 
-func apvssCompactRangeCommitmentV1(value uint64, blinding fr.Element) (bls12381.G1Affine, error) {
+func apvssCompactRangeCommitment(value uint64, blinding fr.Element) (bls12381.G1Affine, error) {
 	h, err := cvPedersenBase()
 	if err != nil {
 		return bls12381.G1Affine{}, err
@@ -222,17 +222,17 @@ func apvssCompactRangeCommitmentV1(value uint64, blinding fr.Element) (bls12381.
 	), nil
 }
 
-func apvssProveCompactRangeV1(
+func apvssProveCompactRange(
 	statement []byte,
 	commitments []bls12381.G1Affine,
 	values []uint64,
 	blindings []fr.Element,
 	bits int,
-) (*apvssCompactRangeProofV1, error) {
+) (*apvssCompactRangeProof, error) {
 	if len(commitments) == 0 || len(commitments) != len(values) || len(values) != len(blindings) {
 		return nil, fmt.Errorf("invalid APVSS compact range witness")
 	}
-	paddedValues, vectorSize, err := apvssCompactRangeDimensionsV1(len(values), bits)
+	paddedValues, vectorSize, err := apvssCompactRangeDimensions(len(values), bits)
 	if err != nil {
 		return nil, err
 	}
@@ -245,16 +245,16 @@ func apvssProveCompactRangeV1(
 		}
 	}
 	for i := range values {
-		expected, err := apvssCompactRangeCommitmentV1(values[i], blindings[i])
+		expected, err := apvssCompactRangeCommitment(values[i], blindings[i])
 		if err != nil || !expected.Equal(&commitments[i]) {
 			return nil, fmt.Errorf("APVSS compact range opening mismatch %d", i)
 		}
 	}
-	baseTranscript, err := apvssCompactRangeBaseTranscriptV1(statement, commitments, len(values), bits)
+	baseTranscript, err := apvssCompactRangeBaseTranscript(statement, commitments, len(values), bits)
 	if err != nil {
 		return nil, err
 	}
-	generators, err := apvssCompactRangeGeneratorsForV1(vectorSize)
+	generators, err := apvssCompactRangeGeneratorsFor(vectorSize)
 	if err != nil {
 		return nil, err
 	}
@@ -279,42 +279,42 @@ func apvssProveCompactRangeV1(
 		}
 	}
 	for i := range sL {
-		sL[i], err = apvssRandomFrV1()
+		sL[i], err = apvssRandomFr()
 		if err != nil {
 			return nil, err
 		}
-		sR[i], err = apvssRandomFrV1()
+		sR[i], err = apvssRandomFr()
 		if err != nil {
 			return nil, err
 		}
 	}
-	alpha, err := apvssRandomFrV1()
+	alpha, err := apvssRandomFr()
 	if err != nil {
 		return nil, err
 	}
-	rho, err := apvssRandomFrV1()
+	rho, err := apvssRandomFr()
 	if err != nil {
 		return nil, err
 	}
-	proof := &apvssCompactRangeProofV1{valueCount: len(values), bits: bits}
-	proof.a = apvssCompactPointSumV1(generators.g, aL)
-	proof.a.Add(&proof.a, pointPtr(apvssCompactPointSumV1(generators.h, aR)))
+	proof := &apvssCompactRangeProof{valueCount: len(values), bits: bits}
+	proof.a = apvssCompactPointSum(generators.g, aL)
+	proof.a.Add(&proof.a, pointPtr(apvssCompactPointSum(generators.h, aR)))
 	proof.a.Add(&proof.a, pointPtr(cvPointTimes(&hBlind, &alpha)))
-	proof.s = apvssCompactPointSumV1(generators.g, sL)
-	proof.s.Add(&proof.s, pointPtr(apvssCompactPointSumV1(generators.h, sR)))
+	proof.s = apvssCompactPointSum(generators.g, sL)
+	proof.s.Add(&proof.s, pointPtr(apvssCompactPointSum(generators.h, sR)))
 	proof.s.Add(&proof.s, pointPtr(cvPointTimes(&hBlind, &rho)))
 
-	firstMove := apvssCompactPointBytesV1(&proof.a, &proof.s)
-	y, err := apvssCompactChallengeV1(apvssCompactRangeDomainV1+"/y", baseTranscript, firstMove)
+	firstMove := apvssCompactPointBytes(&proof.a, &proof.s)
+	y, err := apvssCompactChallenge(apvssCompactRangeDomain+"/y", baseTranscript, firstMove)
 	if err != nil {
 		return nil, err
 	}
-	yBytes := apvssCompactScalarBytesV1(&y)
-	z, err := apvssCompactChallengeV1(apvssCompactRangeDomainV1+"/z", baseTranscript, firstMove, yBytes)
+	yBytes := apvssCompactScalarBytes(&y)
+	z, err := apvssCompactChallenge(apvssCompactRangeDomain+"/z", baseTranscript, firstMove, yBytes)
 	if err != nil {
 		return nil, err
 	}
-	yPowers := apvssCompactScalarPowersV1(y, vectorSize)
+	yPowers := apvssCompactScalarPowers(y, vectorSize)
 	zTwo := make([]fr.Element, vectorSize)
 	var zPower fr.Element
 	zPower.Mul(&z, &z)
@@ -340,25 +340,25 @@ func apvssProveCompactRangeV1(
 		r0[i].Mul(&yPowers[i], &shifted).Add(&r0[i], &zTwo[i])
 		r1[i].Mul(&yPowers[i], &sR[i])
 	}
-	t1Left := apvssCompactInnerProductV1(l1, r0)
-	t1Right := apvssCompactInnerProductV1(l0, r1)
+	t1Left := apvssCompactInnerProduct(l1, r0)
+	t1Right := apvssCompactInnerProduct(l0, r1)
 	var t1, t2 fr.Element
 	t1.Add(&t1Left, &t1Right)
-	t2 = apvssCompactInnerProductV1(l1, r1)
-	tau1, err := apvssRandomFrV1()
+	t2 = apvssCompactInnerProduct(l1, r1)
+	tau1, err := apvssRandomFr()
 	if err != nil {
 		return nil, err
 	}
-	tau2, err := apvssRandomFrV1()
+	tau2, err := apvssRandomFr()
 	if err != nil {
 		return nil, err
 	}
 	proof.t1 = cvPointSum(pointPtr(cvPointTimes(&genG1, &t1)), pointPtr(cvPointTimes(&hBlind, &tau1)))
 	proof.t2 = cvPointSum(pointPtr(cvPointTimes(&genG1, &t2)), pointPtr(cvPointTimes(&hBlind, &tau2)))
-	secondMove := apvssCompactPointBytesV1(&proof.t1, &proof.t2)
-	x, err := apvssCompactChallengeV1(
-		apvssCompactRangeDomainV1+"/x", baseTranscript, firstMove, yBytes,
-		apvssCompactScalarBytesV1(&z), secondMove,
+	secondMove := apvssCompactPointBytes(&proof.t1, &proof.t2)
+	x, err := apvssCompactChallenge(
+		apvssCompactRangeDomain+"/x", baseTranscript, firstMove, yBytes,
+		apvssCompactScalarBytes(&z), secondMove,
 	)
 	if err != nil {
 		return nil, err
@@ -374,7 +374,7 @@ func apvssProveCompactRangeV1(
 		term.Mul(&r1[i], &x)
 		r[i].Add(&r0[i], &term)
 	}
-	proof.tHat = apvssCompactInnerProductV1(l, r)
+	proof.tHat = apvssCompactInnerProduct(l, r)
 	proof.tauX.Mul(&tau2, &xSquared)
 	var tauTerm fr.Element
 	tauTerm.Mul(&tau1, &x)
@@ -388,12 +388,12 @@ func apvssProveCompactRangeV1(
 		zPower.Mul(&zPower, &z)
 	}
 	proof.mu.Mul(&rho, &x).Add(&proof.mu, &alpha)
-	w, err := apvssCompactChallengeV1(
-		apvssCompactRangeDomainV1+"/w",
+	w, err := apvssCompactChallenge(
+		apvssCompactRangeDomain+"/w",
 		baseTranscript,
 		firstMove,
 		yBytes,
-		apvssCompactScalarBytesV1(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
+		apvssCompactScalarBytes(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
 		secondMove,
 	)
 	if err != nil {
@@ -404,7 +404,7 @@ func apvssProveCompactRangeV1(
 	hPrime := make([]bls12381.G1Affine, vectorSize)
 	var yInverse fr.Element
 	yInverse.Inverse(&y)
-	yInversePowers := apvssCompactScalarPowersV1(yInverse, vectorSize)
+	yInversePowers := apvssCompactScalarPowers(yInverse, vectorSize)
 	for i := range hPrime {
 		hPrime[i] = cvPointTimes(&generators.h[i], &yInversePowers[i])
 	}
@@ -418,8 +418,8 @@ func apvssProveCompactRangeV1(
 		gCoefficients[i].Set(&minusZ)
 		hCoefficients[i].Mul(&z, &yPowers[i]).Add(&hCoefficients[i], &zTwo[i])
 	}
-	p.Add(&p, pointPtr(apvssCompactPointSumV1(generators.g, gCoefficients)))
-	p.Add(&p, pointPtr(apvssCompactPointSumV1(hPrime, hCoefficients)))
+	p.Add(&p, pointPtr(apvssCompactPointSum(generators.g, gCoefficients)))
+	p.Add(&p, pointPtr(apvssCompactPointSum(hPrime, hCoefficients)))
 	var minusMu fr.Element
 	minusMu.Neg(&proof.mu)
 	p.Add(&p, pointPtr(cvPointTimes(&hBlind, &minusMu)))
@@ -428,19 +428,19 @@ func apvssProveCompactRangeV1(
 		baseTranscript,
 		firstMove,
 		yBytes,
-		apvssCompactScalarBytesV1(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
+		apvssCompactScalarBytes(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
 		secondMove,
-		apvssCompactPointBytesV1(&p),
+		apvssCompactPointBytes(&p),
 	)
-	proof.inner, err = apvssProveCompactInnerProductV1(innerPrefix, generators.g, hPrime, uPrime, l, r)
+	proof.inner, err = apvssProveCompactInnerProduct(innerPrefix, generators.g, hPrime, uPrime, l, r)
 	if err != nil {
 		return nil, err
 	}
 	return proof, nil
 }
 
-func apvssCompactRangeDeltaV1(y, z fr.Element, paddedValues, bits, vectorSize int) fr.Element {
-	yPowers := apvssCompactScalarPowersV1(y, vectorSize)
+func apvssCompactRangeDelta(y, z fr.Element, paddedValues, bits, vectorSize int) fr.Element {
+	yPowers := apvssCompactScalarPowers(y, vectorSize)
 	var sumY fr.Element
 	for i := range yPowers {
 		sumY.Add(&sumY, &yPowers[i])
@@ -462,16 +462,16 @@ func apvssCompactRangeDeltaV1(y, z fr.Element, paddedValues, bits, vectorSize in
 	return first
 }
 
-func apvssVerifyCompactRangeV1(
+func apvssVerifyCompactRange(
 	statement []byte,
 	commitments []bls12381.G1Affine,
-	proof *apvssCompactRangeProofV1,
+	proof *apvssCompactRangeProof,
 	bits int,
 ) error {
 	if proof == nil || proof.valueCount != len(commitments) || proof.bits != bits {
 		return fmt.Errorf("invalid APVSS compact range proof shape")
 	}
-	paddedValues, vectorSize, err := apvssCompactRangeDimensionsV1(len(commitments), bits)
+	paddedValues, vectorSize, err := apvssCompactRangeDimensions(len(commitments), bits)
 	if err != nil {
 		return err
 	}
@@ -480,24 +480,24 @@ func apvssVerifyCompactRangeV1(
 			return fmt.Errorf("invalid APVSS compact range proof point")
 		}
 	}
-	baseTranscript, err := apvssCompactRangeBaseTranscriptV1(statement, commitments, len(commitments), bits)
+	baseTranscript, err := apvssCompactRangeBaseTranscript(statement, commitments, len(commitments), bits)
 	if err != nil {
 		return err
 	}
-	firstMove := apvssCompactPointBytesV1(&proof.a, &proof.s)
-	y, err := apvssCompactChallengeV1(apvssCompactRangeDomainV1+"/y", baseTranscript, firstMove)
+	firstMove := apvssCompactPointBytes(&proof.a, &proof.s)
+	y, err := apvssCompactChallenge(apvssCompactRangeDomain+"/y", baseTranscript, firstMove)
 	if err != nil {
 		return err
 	}
-	yBytes := apvssCompactScalarBytesV1(&y)
-	z, err := apvssCompactChallengeV1(apvssCompactRangeDomainV1+"/z", baseTranscript, firstMove, yBytes)
+	yBytes := apvssCompactScalarBytes(&y)
+	z, err := apvssCompactChallenge(apvssCompactRangeDomain+"/z", baseTranscript, firstMove, yBytes)
 	if err != nil {
 		return err
 	}
-	secondMove := apvssCompactPointBytesV1(&proof.t1, &proof.t2)
-	x, err := apvssCompactChallengeV1(
-		apvssCompactRangeDomainV1+"/x", baseTranscript, firstMove, yBytes,
-		apvssCompactScalarBytesV1(&z), secondMove,
+	secondMove := apvssCompactPointBytes(&proof.t1, &proof.t2)
+	x, err := apvssCompactChallenge(
+		apvssCompactRangeDomain+"/x", baseTranscript, firstMove, yBytes,
+		apvssCompactScalarBytes(&z), secondMove,
 	)
 	if err != nil {
 		return err
@@ -510,7 +510,7 @@ func apvssVerifyCompactRangeV1(
 		pointPtr(cvPointTimes(&genG1, &proof.tHat)),
 		pointPtr(cvPointTimes(&hBlind, &proof.tauX)),
 	)
-	delta := apvssCompactRangeDeltaV1(y, z, paddedValues, bits, vectorSize)
+	delta := apvssCompactRangeDelta(y, z, paddedValues, bits, vectorSize)
 	right := cvPointTimes(&genG1, &delta)
 	var zPower fr.Element
 	zPower.Mul(&z, &z)
@@ -527,26 +527,26 @@ func apvssVerifyCompactRangeV1(
 	if !left.Equal(&right) {
 		return fmt.Errorf("invalid APVSS compact range polynomial commitment")
 	}
-	generators, err := apvssCompactRangeGeneratorsForV1(vectorSize)
+	generators, err := apvssCompactRangeGeneratorsFor(vectorSize)
 	if err != nil {
 		return err
 	}
-	w, err := apvssCompactChallengeV1(
-		apvssCompactRangeDomainV1+"/w",
+	w, err := apvssCompactChallenge(
+		apvssCompactRangeDomain+"/w",
 		baseTranscript,
 		firstMove,
 		yBytes,
-		apvssCompactScalarBytesV1(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
+		apvssCompactScalarBytes(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
 		secondMove,
 	)
 	if err != nil {
 		return err
 	}
 	uPrime := cvPointTimes(&generators.u, &w)
-	yPowers := apvssCompactScalarPowersV1(y, vectorSize)
+	yPowers := apvssCompactScalarPowers(y, vectorSize)
 	var yInverse fr.Element
 	yInverse.Inverse(&y)
-	yInversePowers := apvssCompactScalarPowersV1(yInverse, vectorSize)
+	yInversePowers := apvssCompactScalarPowers(yInverse, vectorSize)
 	hPrime := make([]bls12381.G1Affine, vectorSize)
 	for i := range hPrime {
 		hPrime[i] = cvPointTimes(&generators.h[i], &yInversePowers[i])
@@ -573,8 +573,8 @@ func apvssVerifyCompactRangeV1(
 		gCoefficients[i].Set(&minusZ)
 		hCoefficients[i].Mul(&z, &yPowers[i]).Add(&hCoefficients[i], &zTwo[i])
 	}
-	p.Add(&p, pointPtr(apvssCompactPointSumV1(generators.g, gCoefficients)))
-	p.Add(&p, pointPtr(apvssCompactPointSumV1(hPrime, hCoefficients)))
+	p.Add(&p, pointPtr(apvssCompactPointSum(generators.g, gCoefficients)))
+	p.Add(&p, pointPtr(apvssCompactPointSum(hPrime, hCoefficients)))
 	var minusMu fr.Element
 	minusMu.Neg(&proof.mu)
 	p.Add(&p, pointPtr(cvPointTimes(&hBlind, &minusMu)))
@@ -583,60 +583,60 @@ func apvssVerifyCompactRangeV1(
 		baseTranscript,
 		firstMove,
 		yBytes,
-		apvssCompactScalarBytesV1(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
+		apvssCompactScalarBytes(&z, &x, &proof.tauX, &proof.mu, &proof.tHat),
 		secondMove,
-		apvssCompactPointBytesV1(&p),
+		apvssCompactPointBytes(&p),
 	)
-	if err := apvssVerifyCompactInnerProductV1(innerPrefix, generators.g, hPrime, uPrime, p, &proof.inner); err != nil {
+	if err := apvssVerifyCompactInnerProduct(innerPrefix, generators.g, hPrime, uPrime, p, &proof.inner); err != nil {
 		return fmt.Errorf("invalid APVSS compact range inner product: %w", err)
 	}
 	return nil
 }
 
-func apvssCompactInnerChallengeV1(prefix []byte, round int, left, right *bls12381.G1Affine) (fr.Element, error) {
+func apvssCompactInnerChallenge(prefix []byte, round int, left, right *bls12381.G1Affine) (fr.Element, error) {
 	var index [8]byte
 	binary.BigEndian.PutUint64(index[:], uint64(round))
-	return apvssCompactChallengeV1(
-		apvssCompactRangeDomainV1+"/inner",
+	return apvssCompactChallenge(
+		apvssCompactRangeDomain+"/inner",
 		prefix,
 		index[:],
-		apvssCompactPointBytesV1(left, right),
+		apvssCompactPointBytes(left, right),
 	)
 }
 
-func apvssProveCompactInnerProductV1(
+func apvssProveCompactInnerProduct(
 	prefix []byte,
 	g, h []bls12381.G1Affine,
 	u bls12381.G1Affine,
 	a, b []fr.Element,
-) (apvssCompactInnerProductProofV1, error) {
+) (apvssCompactInnerProductProof, error) {
 	if len(g) == 0 || len(g) != len(h) || len(g) != len(a) || len(a) != len(b) || len(g)&(len(g)-1) != 0 {
-		return apvssCompactInnerProductProofV1{}, fmt.Errorf("invalid APVSS inner-product witness")
+		return apvssCompactInnerProductProof{}, fmt.Errorf("invalid APVSS inner-product witness")
 	}
 	gWork := append([]bls12381.G1Affine(nil), g...)
 	hWork := append([]bls12381.G1Affine(nil), h...)
 	aWork := append([]fr.Element(nil), a...)
 	bWork := append([]fr.Element(nil), b...)
-	proof := apvssCompactInnerProductProofV1{}
+	proof := apvssCompactInnerProductProof{}
 	transcript := append([]byte(nil), prefix...)
 	for round := 0; len(aWork) > 1; round++ {
 		half := len(aWork) / 2
 		aLeft, aRight := aWork[:half], aWork[half:]
 		bLeft, bRight := bWork[:half], bWork[half:]
-		left := apvssCompactPointSumV1(gWork[half:], aLeft)
-		left.Add(&left, pointPtr(apvssCompactPointSumV1(hWork[:half], bRight)))
-		leftInner := apvssCompactInnerProductV1(aLeft, bRight)
+		left := apvssCompactPointSum(gWork[half:], aLeft)
+		left.Add(&left, pointPtr(apvssCompactPointSum(hWork[:half], bRight)))
+		leftInner := apvssCompactInnerProduct(aLeft, bRight)
 		left.Add(&left, pointPtr(cvPointTimes(&u, &leftInner)))
-		right := apvssCompactPointSumV1(gWork[:half], aRight)
-		right.Add(&right, pointPtr(apvssCompactPointSumV1(hWork[half:], bLeft)))
-		rightInner := apvssCompactInnerProductV1(aRight, bLeft)
+		right := apvssCompactPointSum(gWork[:half], aRight)
+		right.Add(&right, pointPtr(apvssCompactPointSum(hWork[half:], bLeft)))
+		rightInner := apvssCompactInnerProduct(aRight, bLeft)
 		right.Add(&right, pointPtr(cvPointTimes(&u, &rightInner)))
 		proof.left = append(proof.left, left)
 		proof.right = append(proof.right, right)
-		roundPoints := apvssCompactPointBytesV1(&left, &right)
-		x, err := apvssCompactInnerChallengeV1(transcript, round, &left, &right)
+		roundPoints := apvssCompactPointBytes(&left, &right)
+		x, err := apvssCompactInnerChallenge(transcript, round, &left, &right)
 		if err != nil {
-			return apvssCompactInnerProductProofV1{}, err
+			return apvssCompactInnerProductProof{}, err
 		}
 		transcript = cvTranscriptBytes(transcript, roundPoints)
 		var xInverse fr.Element
@@ -669,12 +669,12 @@ func apvssProveCompactInnerProductV1(
 	return proof, nil
 }
 
-func apvssVerifyCompactInnerProductV1(
+func apvssVerifyCompactInnerProduct(
 	prefix []byte,
 	g, h []bls12381.G1Affine,
 	u bls12381.G1Affine,
 	p bls12381.G1Affine,
-	proof *apvssCompactInnerProductProofV1,
+	proof *apvssCompactInnerProductProof,
 ) error {
 	if proof == nil || len(g) == 0 || len(g) != len(h) || len(g)&(len(g)-1) != 0 ||
 		len(proof.left) != len(proof.right) || 1<<uint(len(proof.left)) != len(g) {
@@ -689,8 +689,8 @@ func apvssVerifyCompactInnerProductV1(
 		if !cvValidG1(left, true) || !cvValidG1(right, true) {
 			return fmt.Errorf("invalid APVSS inner-product point %d", round)
 		}
-		roundPoints := apvssCompactPointBytesV1(left, right)
-		x, err := apvssCompactInnerChallengeV1(transcript, round, left, right)
+		roundPoints := apvssCompactPointBytes(left, right)
+		x, err := apvssCompactInnerChallenge(transcript, round, left, right)
 		if err != nil {
 			return err
 		}
@@ -729,7 +729,7 @@ func apvssVerifyCompactInnerProductV1(
 	return nil
 }
 
-func apvssCompactRangeProofV1CanonicalBytes(proof *apvssCompactRangeProofV1) ([]byte, error) {
+func apvssCompactRangeProofCanonicalBytes(proof *apvssCompactRangeProof) ([]byte, error) {
 	if proof == nil {
 		return nil, fmt.Errorf("nil APVSS compact range proof")
 	}
@@ -761,11 +761,11 @@ func apvssCompactRangeProofV1CanonicalBytes(proof *apvssCompactRangeProofV1) ([]
 	return wire.Bytes(), nil
 }
 
-func apvssDecodeCompactRangeProofV1(
+func apvssDecodeCompactRangeProof(
 	wire []byte,
 	expectedValues, expectedBits int,
-) (*apvssCompactRangeProofV1, error) {
-	if len(wire) == 0 || len(wire) > cvMaxLeafWireBytesV1 {
+) (*apvssCompactRangeProof, error) {
+	if len(wire) == 0 || len(wire) > cvMaxLeafWireBytes {
 		return nil, fmt.Errorf("invalid APVSS compact range wire")
 	}
 	r := newCVWireReader(wire)
@@ -777,11 +777,11 @@ func apvssDecodeCompactRangeProofV1(
 	if err != nil || bits != expectedBits {
 		return nil, fmt.Errorf("invalid APVSS compact range width")
 	}
-	_, vectorSize, err := apvssCompactRangeDimensionsV1(valueCount, bits)
+	_, vectorSize, err := apvssCompactRangeDimensions(valueCount, bits)
 	if err != nil {
 		return nil, err
 	}
-	proof := &apvssCompactRangeProofV1{valueCount: valueCount, bits: bits}
+	proof := &apvssCompactRangeProof{valueCount: valueCount, bits: bits}
 	for _, point := range []*bls12381.G1Affine{&proof.a, &proof.s, &proof.t1, &proof.t2} {
 		*point, err = r.point()
 		if err != nil {
@@ -822,7 +822,7 @@ func apvssDecodeCompactRangeProofV1(
 	if err != nil || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid APVSS compact range inner b or suffix")
 	}
-	canonical, err := apvssCompactRangeProofV1CanonicalBytes(proof)
+	canonical, err := apvssCompactRangeProofCanonicalBytes(proof)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical APVSS compact range proof")
 	}

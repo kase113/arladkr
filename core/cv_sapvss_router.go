@@ -9,59 +9,61 @@ import (
 )
 
 const (
-	cvNetworkEnvelopeVersionV1     = byte(1)
-	cvMaxNetworkEnvelopeSIDBytesV1 = 1 << 20
-	cvMaxNetworkPayloadBytesV1     = cvMaxLeafWireBytesV1 + 1<<20
-	cvNetworkEnvelopeFixedBytesV1  = 1 + 4 + 8 + 4
-	cvTagComponentInitV1           = "CV_COMPONENT_INIT"
-	cvTagComponentAckV1            = "CV_COMPONENT_ACK"
-	cvTagComponentCertV1           = "CV_COMPONENT_CERT"
-	cvTagComponentGetV1            = "CV_COMPONENT_GET"
-	cvTagComponentLeafV1           = "CV_COMPONENT_LEAF"
-	cvTagComponentReadyV1          = "CV_COMPONENT_READY"
-	cvTagAggregateShardV1          = "CV_AGG_SHARD"
-	cvTagARCShareV1                = "CV_ARC_SHARE"
-	cvTagRecoverGetV1              = "CV_RECOVER_GET"
-	cvTagRecoverShardV1            = "CV_RECOVER_SHARD"
-	cvTagRecoverDoneV1             = "CV_RECOVER_DONE"
-	cvTagReceiptV1                 = "CV_RECEIPT"
-	cvTagReceiptDoneV1             = "CV_RECEIPT_DONE"
-	apvssTagLaneOfferV1            = "APVSS_LANE_OFFER"
-	apvssTagLaneACKV1              = "APVSS_LANE_ACK"
+	cvNetworkEnvelopeVersion     = byte(1)
+	cvMaxNetworkEnvelopeSIDBytes = 1 << 20
+	cvMaxNetworkPayloadBytes     = cvMaxLeafWireBytes + 1<<20
+	cvNetworkEnvelopeFixedBytes  = 1 + 4 + 8 + 4
+	cvTagComponentInit           = "CV_COMPONENT_INIT"
+	cvTagComponentAck            = "CV_COMPONENT_ACK"
+	cvTagComponentCert           = "CV_COMPONENT_CERT"
+	cvTagComponentGet            = "CV_COMPONENT_GET"
+	cvTagComponentLeaf           = "CV_COMPONENT_LEAF"
+	cvTagComponentReady          = "CV_COMPONENT_READY"
+	cvTagAggregateManifest       = "CV_AGG_MANIFEST"
+	cvTagARCShare                = "CV_ARC_SHARE"
+	cvTagARCCertificate          = "CV_ARC_CERTIFICATE"
+	cvTagRecoverGet              = "CV_RECOVER_GET"
+	cvTagRecoverShard            = "CV_RECOVER_SHARD"
+	cvTagRecoverDone             = "CV_RECOVER_DONE"
+	cvTagReceipt                 = "CV_RECEIPT"
+	cvTagReceiptDone             = "CV_RECEIPT_DONE"
+	apvssTagLaneOffer            = "APVSS_LANE_OFFER"
+	apvssTagLaneACK              = "APVSS_LANE_ACK"
 )
 
-func cvAllowedNetworkTagV1(tag string) bool {
+func cvAllowedNetworkTag(tag string) bool {
 	switch tag {
-	case cvTagComponentInitV1,
-		cvTagComponentAckV1,
-		cvTagComponentCertV1,
-		cvTagComponentGetV1,
-		cvTagComponentLeafV1,
-		cvTagComponentReadyV1,
-		cvTagAggregateShardV1,
-		cvTagARCShareV1,
-		cvTagRecoverGetV1,
-		cvTagRecoverShardV1,
-		cvTagRecoverDoneV1,
-		cvTagReceiptV1,
-		cvTagReceiptDoneV1,
-		apvssTagLaneOfferV1,
-		apvssTagLaneACKV1:
+	case cvTagComponentInit,
+		cvTagComponentAck,
+		cvTagComponentCert,
+		cvTagComponentGet,
+		cvTagComponentLeaf,
+		cvTagComponentReady,
+		cvTagAggregateManifest,
+		cvTagARCShare,
+		cvTagARCCertificate,
+		cvTagRecoverGet,
+		cvTagRecoverShard,
+		cvTagRecoverDone,
+		cvTagReceipt,
+		cvTagReceiptDone,
+		apvssTagLaneOffer,
+		apvssTagLaneACK:
 		return true
 	default:
 		return false
 	}
 }
 
-func cvEncodeNetworkEnvelopeV1(sid string, epoch int, payload []byte) ([]byte, error) {
-	if sid == "" || len(sid) > cvMaxNetworkEnvelopeSIDBytesV1 || epoch < 0 {
+func cvEncodeNetworkEnvelope(sid string, epoch int, payload []byte) ([]byte, error) {
+	if sid == "" || len(sid) > cvMaxNetworkEnvelopeSIDBytes || epoch < 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS network envelope context")
 	}
-	if len(payload) > cvMaxNetworkPayloadBytesV1 {
+	if len(payload) > cvMaxNetworkPayloadBytes {
 		return nil, fmt.Errorf("CV-sAPVSS network payload exceeds limit")
 	}
-	wire := make([]byte, cvNetworkEnvelopeFixedBytesV1+len(sid)+len(payload))
-	wire[0] = cvNetworkEnvelopeVersionV1
+	wire := make([]byte, cvNetworkEnvelopeFixedBytes+len(sid)+len(payload))
+	wire[0] = cvNetworkEnvelopeVersion
 	offset := 1
 	binary.BigEndian.PutUint32(wire[offset:offset+4], uint32(len(sid)))
 	offset += 4
@@ -75,12 +77,12 @@ func cvEncodeNetworkEnvelopeV1(sid string, epoch int, payload []byte) ([]byte, e
 	return wire, nil
 }
 
-func cvDecodeNetworkEnvelopeV1(wire []byte, expectedSID string, expectedEpoch int) ([]byte, error) {
-	if expectedSID == "" || len(expectedSID) > cvMaxNetworkEnvelopeSIDBytesV1 || expectedEpoch < 0 {
+func cvDecodeNetworkEnvelope(wire []byte, expectedSID string, expectedEpoch int) ([]byte, error) {
+	if expectedSID == "" || len(expectedSID) > cvMaxNetworkEnvelopeSIDBytes || expectedEpoch < 0 {
 		return nil, fmt.Errorf("invalid expected CV-sAPVSS network context")
 	}
-	maximum := cvNetworkEnvelopeFixedBytesV1 + len(expectedSID) + cvMaxNetworkPayloadBytesV1
-	if len(wire) < cvNetworkEnvelopeFixedBytesV1+len(expectedSID) || len(wire) > maximum || wire[0] != cvNetworkEnvelopeVersionV1 {
+	maximum := cvNetworkEnvelopeFixedBytes + len(expectedSID) + cvMaxNetworkPayloadBytes
+	if len(wire) < cvNetworkEnvelopeFixedBytes+len(expectedSID) || len(wire) > maximum || wire[0] != cvNetworkEnvelopeVersion {
 		return nil, fmt.Errorf("invalid CV-sAPVSS network envelope framing")
 	}
 	offset := 1
@@ -97,13 +99,13 @@ func cvDecodeNetworkEnvelopeV1(wire []byte, expectedSID string, expectedEpoch in
 	offset += 8
 	payloadLength := int(binary.BigEndian.Uint32(wire[offset : offset+4]))
 	offset += 4
-	if payloadLength > cvMaxNetworkPayloadBytesV1 || payloadLength != len(wire)-offset {
+	if payloadLength > cvMaxNetworkPayloadBytes || payloadLength != len(wire)-offset {
 		return nil, fmt.Errorf("invalid CV-sAPVSS network payload length")
 	}
 	return append([]byte(nil), wire[offset:]...), nil
 }
 
-type cvSAPVSSRouterV1 struct {
+type cvSAPVSSRouter struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	sid      string
@@ -117,28 +119,28 @@ type cvSAPVSSRouterV1 struct {
 	failOnce sync.Once
 }
 
-func newCVSAPVSSRouterV1(
+func newCVSAPVSSRouter(
 	ctx context.Context,
 	transport agreementTransport,
 	sid string,
 	epoch int,
 	oldNodes, localOldNodes []int,
 	queueCapacity int,
-) (*cvSAPVSSRouterV1, error) {
-	return newCVSAPVSSRouterWithReceiversV1(
+) (*cvSAPVSSRouter, error) {
+	return newCVSAPVSSRouterWithReceivers(
 		ctx, transport, sid, epoch, oldNodes, nil, localOldNodes, queueCapacity,
 	)
 }
 
-func newCVSAPVSSRouterWithReceiversV1(
+func newCVSAPVSSRouterWithReceivers(
 	ctx context.Context,
 	transport agreementTransport,
 	sid string,
 	epoch int,
 	oldNodes, newNodes, localNodes []int,
 	queueCapacity int,
-) (*cvSAPVSSRouterV1, error) {
-	if ctx == nil || transport == nil || sid == "" || len(sid) > cvMaxNetworkEnvelopeSIDBytesV1 ||
+) (*cvSAPVSSRouter, error) {
+	if ctx == nil || transport == nil || sid == "" || len(sid) > cvMaxNetworkEnvelopeSIDBytes ||
 		epoch < 0 || queueCapacity <= 0 || len(oldNodes) == 0 || len(localNodes) == 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS router configuration")
 	}
@@ -182,7 +184,7 @@ func newCVSAPVSSRouterWithReceiversV1(
 		inboxes[node] = inbox
 	}
 	routerContext, cancel := context.WithCancel(ctx)
-	router := &cvSAPVSSRouterV1{
+	router := &cvSAPVSSRouter{
 		ctx:      routerContext,
 		cancel:   cancel,
 		sid:      sid,
@@ -207,7 +209,7 @@ func newCVSAPVSSRouterWithReceiversV1(
 	return router, nil
 }
 
-func (r *cvSAPVSSRouterV1) Receive(node int) (<-chan Message, error) {
+func (r *cvSAPVSSRouter) Receive(node int) (<-chan Message, error) {
 	queue, ok := r.queues[node]
 	if !ok {
 		return nil, fmt.Errorf("CV-sAPVSS router has no local node %d", node)
@@ -215,11 +217,11 @@ func (r *cvSAPVSSRouterV1) Receive(node int) (<-chan Message, error) {
 	return queue, nil
 }
 
-func (r *cvSAPVSSRouterV1) Errors() <-chan error {
+func (r *cvSAPVSSRouter) Errors() <-chan error {
 	return r.errors
 }
 
-func (r *cvSAPVSSRouterV1) Close() error {
+func (r *cvSAPVSSRouter) Close() error {
 	if r == nil {
 		return nil
 	}
@@ -228,7 +230,7 @@ func (r *cvSAPVSSRouterV1) Close() error {
 	return nil
 }
 
-func (r *cvSAPVSSRouterV1) readLoop(node int, inbox <-chan Message, queue chan Message) {
+func (r *cvSAPVSSRouter) readLoop(node int, inbox <-chan Message, queue chan Message) {
 	defer r.wait.Done()
 	defer close(queue)
 	for {
@@ -261,19 +263,19 @@ func (r *cvSAPVSSRouterV1) readLoop(node int, inbox <-chan Message, queue chan M
 	}
 }
 
-func (r *cvSAPVSSRouterV1) route(node int, msg Message) (Message, bool) {
-	if !cvAllowedNetworkTagV1(msg.Tag) || msg.To != node {
+func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
+	if !cvAllowedNetworkTag(msg.Tag) || msg.To != node {
 		return Message{}, false
 	}
 	switch msg.Tag {
-	case apvssTagLaneOfferV1:
+	case apvssTagLaneOffer:
 		if _, ok := r.oldNodes[msg.From]; !ok {
 			return Message{}, false
 		}
 		if _, ok := r.newNodes[msg.To]; !ok {
 			return Message{}, false
 		}
-	case apvssTagLaneACKV1:
+	case apvssTagLaneACK:
 		if _, ok := r.newNodes[msg.From]; !ok {
 			return Message{}, false
 		}
@@ -288,14 +290,14 @@ func (r *cvSAPVSSRouterV1) route(node int, msg Message) (Message, bool) {
 			return Message{}, false
 		}
 	}
-	payload, err := cvDecodeNetworkEnvelopeV1(msg.Body, r.sid, r.epoch)
+	payload, err := cvDecodeNetworkEnvelope(msg.Body, r.sid, r.epoch)
 	if err != nil {
 		return Message{}, false
 	}
 	return Message{From: msg.From, To: msg.To, Tag: msg.Tag, Body: payload}, true
 }
 
-func (r *cvSAPVSSRouterV1) fail(err error) {
+func (r *cvSAPVSSRouter) fail(err error) {
 	r.failOnce.Do(func() {
 		r.errors <- err
 		r.cancel()

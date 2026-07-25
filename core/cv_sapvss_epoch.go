@@ -5,14 +5,105 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-const cvMaterializedAggRLOWitnessDomainV1 = "ARL-CV-sAPVSS-v1/materialized-aggrlo-witness"
+const cvMaterializedAggRLOWitnessDomain = "ARL-CV-sAPVSS/materialized-aggrlo-certificate"
+
+func cvMaterializedAggRLOWitnessCanonicalBytes(rlo *AggRLO) ([]byte, error) {
+	if rlo == nil || rlo.Aggregate.Provider != "cv-sapvss" || rlo.Lock.Threshold <= 0 ||
+		len(rlo.Lock.Certificate) == 0 || len(rlo.Lock.Certificate) > cvMaxComponentSignatureBytes ||
+		len(rlo.Digest) != 32 || !bytes.Equal(rlo.Digest, digestAggRLO(*rlo)) {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS materialized AggRLO witness")
+	}
+	headerWire, err := cvNetworkAggHeaderCanonicalBytes(rlo.Header)
+	if err != nil {
+		return nil, err
+	}
+	var wire bytes.Buffer
+	_ = cvWriteBytes(&wire, []byte(cvMaterializedAggRLOWitnessDomain))
+	_ = cvWriteBytes(&wire, headerWire)
+	_ = cvWriteUint32(&wire, rlo.Lock.Threshold)
+	_ = cvWriteBytes(&wire, rlo.Lock.Certificate)
+	_ = cvWriteBytes(&wire, rlo.Digest)
+	return wire.Bytes(), nil
+}
+
+func cvDecodeMaterializedAggRLOWitness(wire []byte, cfg Config) (*AggRLO, error) {
+	c := NormalizeConfig(cfg)
+	if err := ensureRuntime(&c); err != nil {
+		return nil, err
+	}
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(cvMaterializedAggRLOWitnessDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvMaterializedAggRLOWitnessDomain)) {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS materialized AggRLO witness domain")
+	}
+	headerWire, err := r.bytes(1 << 20)
+	if err != nil {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS materialized AggRLO header")
+	}
+	header, err := cvDecodeNetworkAggHeader(headerWire, c)
+	if err != nil {
+		return nil, err
+	}
+	threshold, err := r.uint32()
+	if err != nil || threshold != len(c.OldCommittee)-c.FOld {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS ARC threshold")
+	}
+	certificate, err := r.bytes(cvMaxComponentSignatureBytes)
+	if err != nil || len(certificate) == 0 {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS ARC certificate")
+	}
+	digest, err := r.bytes(32)
+	if err != nil || len(digest) != 32 || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS materialized AggRLO digest")
+	}
+	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold,
+		Holders: sortedUnique(c.OldCommittee), Certificate: certificate}, Aggregate: APVSSAggregate{
+		Provider: "cv-sapvss", Dealers: append([]int(nil), header.Dealers...),
+		AggregateDigest: append([]byte(nil), header.AggregateDigest...)}, Digest: digest}
+	if _, err := validateAggRLOShape(c, rlo); err != nil {
+		return nil, err
+	}
+	if err := validateAggRLOLock(c, rlo, true); err != nil {
+		return nil, err
+	}
+	if err := validateAggRLODigest(rlo); err != nil {
+		return nil, err
+	}
+	canonical, err := cvMaterializedAggRLOWitnessCanonicalBytes(rlo)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical compact CV-sAPVSS materialized AggRLO witness")
+	}
+	return rlo, nil
+}
+
+func cvRunMaterializedAgreement(ctx context.Context, cfg Config, localRLO *AggRLO) (*AggRLO, time.Duration, error) {
+	if localRLO == nil {
+		return nil, 0, fmt.Errorf("missing local CV-sAPVSS materialized AggRLO")
+	}
+	wire, err := cvMaterializedAggRLOWitnessCanonicalBytes(localRLO)
+	if err != nil {
+		return nil, 0, err
+	}
+	predicate := func(_ int, payload []byte) bool {
+		_, decodeErr := cvDecodeMaterializedAggRLOWitness(payload, cfg)
+		return decodeErr == nil
+	}
+	payloads, peerWait, err := runArladkrMVBATCPInstance(ctx, cfg, "cv-materialized-aggrlo", wire, predicate)
+	if err != nil {
+		return nil, peerWait, err
+	}
+	if len(payloads) == 0 {
+		return nil, peerWait, fmt.Errorf("CV-sAPVSS compact materialized agreement returned no witness")
+	}
+	decided, err := cvDecodeMaterializedAggRLOWitness(payloads[0], cfg)
+	return decided, peerWait, err
+}
 
 func traceCVEpochPhase(cfg Config, node int, phase string) {
 	if os.Getenv("RLADKR_CV_DEBUG") == "" {
@@ -21,38 +112,38 @@ func traceCVEpochPhase(cfg Config, node int, phase string) {
 	fmt.Fprintf(os.Stderr, "CV_EPOCH_PHASE node=%d phase=%s\n", node, phase)
 }
 
-func cvBuildEpochLeafContextV1(cfg Config, material *cvReceiverKeyMaterialV1) (cvLeafContextV1, error) {
+func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLeafContext, error) {
 	c := NormalizeConfig(cfg)
 	if material == nil || len(material.receiverPublicKeys) != len(c.NewCommittee) || len(material.registryDigest) != 32 {
-		return cvLeafContextV1{}, fmt.Errorf("invalid CV-sAPVSS epoch receiver material")
+		return cvLeafContext{}, fmt.Errorf("invalid CV-sAPVSS epoch receiver material")
 	}
-	policy := append([]byte("ARL-CV-sAPVSS-v1/first-f-plus-one|registry="), material.registryDigest...)
+	policy := append([]byte("ARL-CV-sAPVSS/first-f-plus-one|registry="), material.registryDigest...)
 	policy = append(policy, encodeInts(sortedUnique(c.OldCommittee))...)
 	policy = append(policy, byte(c.Kappa>>24), byte(c.Kappa>>16), byte(c.Kappa>>8), byte(c.Kappa))
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte(c.SID),
 		epoch:              uint64(c.Epoch),
 		sharingDegree:      c.FNew,
 		profile:            cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
 		receiverPublicKeys: append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
 		dealerSetPolicy:    policy,
-		proofProfile:       cvLeafV1StructuralProofProfile,
+		proofProfile:       cvLeafStructuralProofProfile,
 	}
-	if err := cvValidateLeafContextV1(&context); err != nil {
-		return cvLeafContextV1{}, err
+	if err := cvValidateLeafContext(&context); err != nil {
+		return cvLeafContext{}, err
 	}
 	return context, nil
 }
 
-func cvRandomDealerLeafV1(context cvLeafContextV1, dealer int) (*cvLeafV1, error) {
-	leaf, _, err := cvRandomDealerLeafWithWitnessV1(context, dealer)
+func cvRandomDealerLeaf(context cvLeafContext, dealer int) (*cvLeaf, error) {
+	leaf, _, err := cvRandomDealerLeafWithWitness(context, dealer)
 	return leaf, err
 }
 
-func cvRandomDealerLeafWithWitnessV1(
-	context cvLeafContextV1,
+func cvRandomDealerLeafWithWitness(
+	context cvLeafContext,
 	dealer int,
-) (*cvLeafV1, *apvssDealerWitnessV1, error) {
+) (*cvLeaf, *apvssDealerWitness, error) {
 	if dealer < 0 {
 		return nil, nil, fmt.Errorf("invalid CV-sAPVSS dealer")
 	}
@@ -87,13 +178,13 @@ func cvRandomDealerLeafWithWitnessV1(
 		scalarCoins[i] = append([]fr.Element(nil), commonCoins...)
 		blindingCoins[i] = commonBlindingCoin
 	}
-	leaf, err := cvReferenceDealV1(
+	leaf, err := cvReferenceDeal(
 		context, uint64(dealer), scalarCoefficients, blindingCoefficients, scalarCoins, blindingCoins,
 	)
 	if err != nil {
 		return nil, nil, err
 	}
-	witness := &apvssDealerWitnessV1{
+	witness := &apvssDealerWitness{
 		scalars:       make([]fr.Element, len(context.receiverPublicKeys)),
 		blindings:     make([]fr.Element, len(context.receiverPublicKeys)),
 		scalarCoins:   scalarCoins,
@@ -104,151 +195,6 @@ func cvRandomDealerLeafWithWitnessV1(
 		witness.blindings[i] = evalPolyInt(blindingCoefficients, int64(i+1))
 	}
 	return leaf, witness, nil
-}
-
-func cvMaterializedAggRLOWitnessV1CanonicalBytes(rlo *AggRLO) ([]byte, error) {
-	if rlo == nil || rlo.Aggregate.Provider != "cv-sapvss" || rlo.Lock.Threshold <= 0 ||
-		len(rlo.Lock.Holders) < rlo.Lock.Threshold ||
-		len(rlo.Lock.ShareSignatures) != len(rlo.Lock.Holders) ||
-		len(rlo.Lock.Certificate) == 0 || len(rlo.Lock.Certificate) > cvMaxComponentSignatureBytesV1 ||
-		len(rlo.Digest) != 32 || !bytes.Equal(rlo.Digest, digestAggRLO(*rlo)) {
-		return nil, fmt.Errorf("invalid CV-sAPVSS materialized AggRLO witness")
-	}
-	holders := append([]int(nil), rlo.Lock.Holders...)
-	if !sort.IntsAreSorted(holders) {
-		return nil, fmt.Errorf("non-canonical CV-sAPVSS ARC holder order")
-	}
-	headerWire, err := cvNetworkAggHeaderV1CanonicalBytes(rlo.Header)
-	if err != nil {
-		return nil, err
-	}
-	var wire bytes.Buffer
-	_ = cvWriteBytes(&wire, []byte(cvMaterializedAggRLOWitnessDomainV1))
-	_ = cvWriteBytes(&wire, headerWire)
-	_ = cvWriteUint32(&wire, rlo.Lock.Threshold)
-	_ = cvWriteUint32(&wire, len(holders))
-	for i, holder := range holders {
-		if holder < 0 || (i > 0 && holder == holders[i-1]) {
-			return nil, fmt.Errorf("non-canonical CV-sAPVSS ARC holder order")
-		}
-		sig := rlo.Lock.ShareSignatures[holder]
-		if len(sig) == 0 || len(sig) > cvMaxComponentSignatureBytesV1 {
-			return nil, fmt.Errorf("invalid CV-sAPVSS ARC holder share")
-		}
-		cvWriteUint64(&wire, uint64(holder))
-		_ = cvWriteBytes(&wire, sig)
-	}
-	_ = cvWriteBytes(&wire, rlo.Lock.Certificate)
-	_ = cvWriteBytes(&wire, rlo.Digest)
-	return wire.Bytes(), nil
-}
-
-func cvDecodeMaterializedAggRLOWitnessV1(wire []byte, cfg Config) (*AggRLO, error) {
-	c := NormalizeConfig(cfg)
-	if err := ensureRuntime(&c); err != nil {
-		return nil, err
-	}
-	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvMaterializedAggRLOWitnessDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvMaterializedAggRLOWitnessDomainV1)) {
-		return nil, fmt.Errorf("invalid CV-sAPVSS materialized AggRLO witness domain")
-	}
-	headerWire, err := r.bytes(1 << 20)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CV-sAPVSS materialized AggRLO header")
-	}
-	header, err := cvDecodeNetworkAggHeaderV1(headerWire, c)
-	if err != nil {
-		return nil, err
-	}
-	threshold, err := r.uint32()
-	wantThreshold := len(c.OldCommittee) - c.FOld
-	if err != nil || threshold != wantThreshold {
-		return nil, fmt.Errorf("invalid CV-sAPVSS ARC threshold")
-	}
-	holderCount, err := r.uint32()
-	if err != nil || holderCount < threshold || holderCount > len(c.OldCommittee) {
-		return nil, fmt.Errorf("invalid CV-sAPVSS ARC holder count")
-	}
-	holders := make([]int, holderCount)
-	shares := make(map[int][]byte, holderCount)
-	oldSet := nodeSet(c.OldCommittee)
-	for i := 0; i < holderCount; i++ {
-		holderWire, readErr := r.uint64()
-		if readErr != nil || holderWire > uint64(^uint(0)>>1) {
-			return nil, fmt.Errorf("invalid CV-sAPVSS ARC holder")
-		}
-		holder := int(holderWire)
-		if _, ok := oldSet[holder]; !ok || (i > 0 && holder <= holders[i-1]) {
-			return nil, fmt.Errorf("non-canonical CV-sAPVSS ARC holder order")
-		}
-		sig, readErr := r.bytes(cvMaxComponentSignatureBytesV1)
-		if readErr != nil || len(sig) == 0 {
-			return nil, fmt.Errorf("invalid CV-sAPVSS ARC holder share")
-		}
-		holders[i] = holder
-		shares[holder] = sig
-	}
-	certificate, err := r.bytes(cvMaxComponentSignatureBytesV1)
-	if err != nil || len(certificate) == 0 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS ARC certificate")
-	}
-	digest, err := r.bytes(32)
-	if err != nil || len(digest) != 32 || r.reader.Len() != 0 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS materialized AggRLO digest")
-	}
-	rlo := &AggRLO{
-		Header: header,
-		Lock: AggLock{Threshold: threshold, Holders: holders,
-			ShareSignatures: shares, Certificate: certificate},
-		Aggregate: APVSSAggregate{Provider: "cv-sapvss",
-			Dealers:         append([]int(nil), header.Dealers...),
-			AggregateDigest: append([]byte(nil), header.AggregateDigest...)},
-		Digest: digest,
-	}
-	if _, err := validateAggRLOShape(c, rlo); err != nil {
-		return nil, err
-	}
-	if err := validateAggRLOLock(c, rlo, true); err != nil {
-		return nil, err
-	}
-	if err := validateAggRLODigest(rlo); err != nil {
-		return nil, err
-	}
-	canonical, err := cvMaterializedAggRLOWitnessV1CanonicalBytes(rlo)
-	if err != nil || !bytes.Equal(canonical, wire) {
-		return nil, fmt.Errorf("non-canonical CV-sAPVSS materialized AggRLO witness")
-	}
-	return rlo, nil
-}
-
-func cvRunMaterializedAgreementV1(
-	ctx context.Context,
-	cfg Config,
-	localRLO *AggRLO,
-) (*AggRLO, time.Duration, error) {
-	if localRLO == nil {
-		return nil, 0, fmt.Errorf("missing local CV-sAPVSS materialized AggRLO")
-	}
-	wire, err := cvMaterializedAggRLOWitnessV1CanonicalBytes(localRLO)
-	if err != nil {
-		return nil, 0, err
-	}
-	predicate := func(_ int, payload []byte) bool {
-		_, decodeErr := cvDecodeMaterializedAggRLOWitnessV1(payload, cfg)
-		return decodeErr == nil
-	}
-	payloads, peerWait, err := runArladkrMVBATCPInstance(
-		ctx, cfg, "cv-materialized-aggrlo-v1", wire, predicate,
-	)
-	if err != nil {
-		return nil, peerWait, err
-	}
-	if len(payloads) == 0 {
-		return nil, peerWait, fmt.Errorf("CV-sAPVSS materialized agreement returned no witness")
-	}
-	decided, err := cvDecodeMaterializedAggRLOWitnessV1(payloads[0], cfg)
-	return decided, peerWait, err
 }
 
 func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
@@ -270,7 +216,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	perfStart := cvPerfSnapshotNow()
 	defer traceCVPerfCounters(localNode, perfStart)
 	traceCVEpochPhase(cfg, localNode, "runtime_ready")
-	material, err := cvLoadReceiverKeyMaterialV1(
+	material, err := cvLoadReceiverKeyMaterial(
 		cfg.CVPublicKeyDir,
 		cfg.CVLocalSecretDir,
 		cfg.SID,
@@ -281,7 +227,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		return nil, err
 	}
 	traceCVEpochPhase(cfg, localNode, "keys_loaded")
-	leafContext, err := cvBuildEpochLeafContextV1(cfg, material)
+	leafContext, err := cvBuildEpochLeafContext(cfg, material)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +252,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	for receiverID := range material.localReceiverSecrets {
 		localActors = append(localActors, receiverID)
 	}
-	router, err := newCVSAPVSSRouterWithReceiversV1(
+	router, err := newCVSAPVSSRouterWithReceivers(
 		ctx, transport, cfg.SID, cfg.Epoch,
 		cfg.runtime.oldOrder, material.receiverOrder, sortedUnique(localActors),
 		(len(cfg.runtime.oldOrder)+len(material.receiverOrder))*64,
@@ -316,11 +262,11 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	}
 	traceCVEpochPhase(cfg, localNode, "component_service_ready")
 	defer router.Close()
-	store, err := newCVComponentLeafStoreV1(cfg.ArtifactCacheDir)
+	store, err := newCVComponentLeafStore(cfg.ArtifactCacheDir)
 	if err != nil {
 		return nil, err
 	}
-	service, err := newCVComponentServiceWithReceiversV1(
+	service, err := newCVComponentServiceWithReceivers(
 		ctx, cfg, &leafContext, localNode, transport, router, store,
 		material.receiverOrder, material.localReceiverSecrets,
 	)
@@ -331,7 +277,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	setupLatency := time.Since(start)
 
 	leafBuildStart := time.Now()
-	leaf, witness, err := cvRandomDealerLeafWithWitnessV1(leafContext, localNode)
+	leaf, witness, err := cvRandomDealerLeafWithWitness(leafContext, localNode)
 	if err != nil {
 		return nil, err
 	}
@@ -339,11 +285,11 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	proofBytes, err := apvssProofMaterialBytesV1(prototype)
+	proofBytes, err := apvssProofMaterialBytes(prototype)
 	if err != nil {
 		return nil, err
 	}
-	prototypeWire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	prototypeWire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +324,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 
 	cfg.runtime.setCommPhase("aggregate_agreement")
 	phaseStart = time.Now()
-	decidedRLO, aggregatePeerWait, err := cvRunMaterializedAgreementV1(ctx, cfg, materialized.rlo)
+	decidedRLO, aggregatePeerWait, err := cvRunMaterializedAgreement(ctx, cfg, materialized.rlo)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +339,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	}
 	traceCVEpochPhase(cfg, localNode, "aggregate_recovered")
 	recoverLatency := time.Since(phaseStart)
-	recoveredWire, err := cvAggregateV1CanonicalBytes(recovered)
+	recoveredWire, err := cvAggregateCanonicalBytes(recovered)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +377,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVComponentDisperseLatency: componentLatency, CVCommonCandidateLatency: commonLatency,
 		CVAggregateDisperseLatency: aggregateLatency, CVAggregateAgreementLatency: aggregateAgreementLatency,
 		CVRecoverShardLatency: recoverLatency, CVReceiptLatency: receiptLatency,
-		CVAPVSSACKCount: len(prototype.acks), CVAPVSSFallbackCount: apvssPrototypeFallbackCountV1(prototype),
+		CVAPVSSACKCount: len(prototype.acks), CVAPVSSFallbackCount: apvssPrototypeFallbackCount(prototype),
 		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: len(prototypeWire),
 		CVAggregateGateWaitLatency:    materialized.metrics.gateWait,
 		CVAggregateLeafLoadLatency:    materialized.metrics.leafLoad,

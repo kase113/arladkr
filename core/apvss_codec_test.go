@@ -6,7 +6,7 @@ import (
 )
 
 func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
+	fixture := apvssFixture(t, 7, 2)
 	for _, profile := range []struct {
 		name     string
 		fallback []int
@@ -16,7 +16,7 @@ func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
 		{name: "I_f", fallback: []int{1, 2}},
 	} {
 		t.Run(profile.name, func(t *testing.T) {
-			prototype, err := apvssBuildPrototypeV1(
+			prototype, err := apvssBuildPrototype(
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
@@ -26,15 +26,15 @@ func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+			wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 			if err != nil {
 				t.Fatal(err)
 			}
-			decoded, err := apvssDecodeLeafPrototypeV1(wire, &fixture.context)
+			decoded, err := apvssDecodeLeafPrototype(wire, &fixture.context)
 			if err != nil {
 				t.Fatalf("decode APVSS leaf: %v", err)
 			}
-			encodedAgain, err := apvssLeafPrototypeV1CanonicalBytes(decoded)
+			encodedAgain, err := apvssLeafPrototypeCanonicalBytes(decoded)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,8 +50,8 @@ func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
 }
 
 func TestAPVSSLeafPrototypeCodecLegacyExactFallbackV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
-	prototype, err := apvssBuildPrototypeV1(
+	fixture := apvssFixture(t, 7, 2)
+	prototype, err := apvssBuildPrototype(
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
@@ -62,26 +62,26 @@ func TestAPVSSLeafPrototypeCodecLegacyExactFallbackV1(t *testing.T) {
 		t.Fatal(err)
 	}
 	prototype.fallbackProfile = ""
-	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := apvssDecodeLeafPrototypeV1(wire, &fixture.context)
+	decoded, err := apvssDecodeLeafPrototype(wire, &fixture.context)
 	if err != nil {
 		t.Fatalf("decode legacy exact fallback wire: %v", err)
 	}
 	if decoded.fallbackProfile != "" {
 		t.Fatalf("legacy exact fallback profile changed to %q", decoded.fallbackProfile)
 	}
-	encodedAgain, err := apvssLeafPrototypeV1CanonicalBytes(decoded)
+	encodedAgain, err := apvssLeafPrototypeCanonicalBytes(decoded)
 	if err != nil || !bytes.Equal(encodedAgain, wire) {
 		t.Fatal("legacy exact fallback wire was not preserved")
 	}
 }
 
 func TestAPVSSLeafPrototypeCodecRejectsUnknownFallbackProfileV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
-	prototype, err := apvssBuildPrototypeV1(
+	fixture := apvssFixture(t, 7, 2)
+	prototype, err := apvssBuildPrototype(
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
@@ -91,28 +91,28 @@ func TestAPVSSLeafPrototypeCodecRejectsUnknownFallbackProfileV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil {
 		t.Fatal(err)
 	}
-	offset := bytes.Index(wire, []byte(apvssFallbackExactLaneProfileV1))
+	offset := bytes.Index(wire, []byte(apvssFallbackExactLaneProfile))
 	if offset < 0 {
 		t.Fatal("explicit fallback profile is absent from canonical wire")
 	}
 	unknown := []byte("unknown-v1xxx")
-	if len(unknown) != len(apvssFallbackExactLaneProfileV1) {
+	if len(unknown) != len(apvssFallbackExactLaneProfile) {
 		t.Fatal("test unknown profile must preserve canonical field length")
 	}
 	bad := append([]byte(nil), wire...)
 	copy(bad[offset:offset+len(unknown)], unknown)
-	if _, err := apvssDecodeLeafPrototypeV1(bad, &fixture.context); err == nil {
+	if _, err := apvssDecodeLeafPrototype(bad, &fixture.context); err == nil {
 		t.Fatal("decoded APVSS leaf with an unknown fallback profile")
 	}
 }
 
 func TestAPVSSLeafPrototypeCodecRejectsMutationV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
-	prototype, err := apvssBuildPrototypeV1(
+	fixture := apvssFixture(t, 7, 2)
+	prototype, err := apvssBuildPrototype(
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
@@ -122,58 +122,58 @@ func TestAPVSSLeafPrototypeCodecRejectsMutationV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("trailing bytes", func(t *testing.T) {
 		bad := append(append([]byte(nil), wire...), 0)
-		if _, err := apvssDecodeLeafPrototypeV1(bad, &fixture.context); err == nil {
+		if _, err := apvssDecodeLeafPrototype(bad, &fixture.context); err == nil {
 			t.Fatal("accepted APVSS leaf with trailing bytes")
 		}
 	})
 	t.Run("signature response", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(prototype)
+		bad := apvssClonePrototypeForTest(prototype)
 		one := cvTestScalar(1)
 		bad.acks[0].signature.z.Add(&bad.acks[0].signature.z, &one)
-		badWire, err := apvssLeafPrototypeV1CanonicalBytes(bad)
+		badWire, err := apvssLeafPrototypeCanonicalBytes(bad)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := apvssDecodeLeafPrototypeV1(badWire, &fixture.context); err == nil {
+		if _, err := apvssDecodeLeafPrototype(badWire, &fixture.context); err == nil {
 			t.Fatal("accepted APVSS leaf with a mutated ACK response")
 		}
 	})
 	t.Run("wrong context", func(t *testing.T) {
-		other := cvCloneLeafContextV1(fixture.context)
+		other := cvCloneLeafContext(fixture.context)
 		other.epoch++
-		if _, err := apvssDecodeLeafPrototypeV1(wire, &other); err == nil {
+		if _, err := apvssDecodeLeafPrototype(wire, &other); err == nil {
 			t.Fatal("accepted APVSS leaf in another epoch")
 		}
 	})
 	t.Run("fallback response", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(prototype)
-		proxy := &cvLeafV1{proof: bad.fallbackProofs[0].proof}
-		bad.fallbackProofs[0].proof = cvCloneLeafV1ForTest(proxy).proof
+		bad := apvssClonePrototypeForTest(prototype)
+		proxy := &cvLeaf{proof: bad.fallbackProofs[0].proof}
+		bad.fallbackProofs[0].proof = cvCloneLeafForTest(proxy).proof
 		one := cvTestScalar(1)
 		bad.fallbackProofs[0].proof.sharing.zScalar.Add(
 			&bad.fallbackProofs[0].proof.sharing.zScalar,
 			&one,
 		)
-		badWire, err := apvssLeafPrototypeV1CanonicalBytes(bad)
+		badWire, err := apvssLeafPrototypeCanonicalBytes(bad)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := apvssDecodeLeafPrototypeV1(badWire, &fixture.context); err == nil {
+		if _, err := apvssDecodeLeafPrototype(badWire, &fixture.context); err == nil {
 			t.Fatal("accepted APVSS leaf with a mutated fallback proof")
 		}
 	})
 }
 
 func TestAPVSSLaneACKMessageCodecV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 4, 1)
-	ack, err := apvssIssueLaneACKV1(
+	fixture := apvssFixture(t, 4, 1)
+	ack, err := apvssIssueLaneACK(
 		&fixture.context,
 		fixture.leaf,
 		1,
@@ -182,28 +182,28 @@ func TestAPVSSLaneACKMessageCodecV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := &apvssLaneACKMessageV1{
+	message := &apvssLaneACKMessage{
 		dealerID:   fixture.leaf.dealerID,
 		leafDigest: append([]byte(nil), fixture.leaf.digest...),
 		ack:        ack,
 	}
-	wire, err := apvssLaneACKMessageV1CanonicalBytes(message)
+	wire, err := apvssLaneACKMessageCanonicalBytes(message)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := apvssDecodeLaneACKMessageV1(wire, fixture.leaf)
+	decoded, err := apvssDecodeLaneACKMessage(wire, fixture.leaf)
 	if err != nil {
 		t.Fatalf("decode ACK message: %v", err)
 	}
-	encodedAgain, err := apvssLaneACKMessageV1CanonicalBytes(decoded)
+	encodedAgain, err := apvssLaneACKMessageCanonicalBytes(decoded)
 	if err != nil || !bytes.Equal(encodedAgain, wire) {
 		t.Fatal("ACK message codec changed canonical bytes")
 	}
 
-	badLeaf := cvCloneLeafV1ForTest(fixture.leaf)
+	badLeaf := cvCloneLeafForTest(fixture.leaf)
 	badLeaf.dealerID++
-	badLeaf.digest = cvLeafV1Digest(badLeaf)
-	if _, err := apvssDecodeLaneACKMessageV1(wire, badLeaf); err == nil {
+	badLeaf.digest = cvLeafDigest(badLeaf)
+	if _, err := apvssDecodeLaneACKMessage(wire, badLeaf); err == nil {
 		t.Fatal("ACK message replayed for another dealer leaf")
 	}
 }

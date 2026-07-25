@@ -16,15 +16,15 @@ const (
 	cvChunkChallengeBits    = 8
 	cvChunkChallengeMask    = (1 << cvChunkChallengeBits) - 1
 
-	cvSharingBatchDomain     = "ARL-CV-sAPVSS-v1/share-batch"
-	cvSharingChallengeDomain = "ARL-CV-sAPVSS-v1/share-challenge"
-	cvChunkFirstDomain       = "ARL-CV-sAPVSS-v1/chunk-first"
-	cvChunkSecondDomain      = "ARL-CV-sAPVSS-v1/chunk-second"
-	cvChunkY0Domain          = "ARL-CV-sAPVSS-v1/chunk-y0"
-	cvExactRangeDomain       = "ARL-CV-sAPVSS-v1/exact-range"
+	cvSharingBatchDomain     = "ARL-CV-sAPVSS/share-batch"
+	cvSharingChallengeDomain = "ARL-CV-sAPVSS/share-challenge"
+	cvChunkFirstDomain       = "ARL-CV-sAPVSS/chunk-first"
+	cvChunkSecondDomain      = "ARL-CV-sAPVSS/chunk-second"
+	cvChunkY0Domain          = "ARL-CV-sAPVSS/chunk-y0"
+	cvExactRangeDomain       = "ARL-CV-sAPVSS/exact-range"
 )
 
-type cvSharingProofV1 struct {
+type cvSharingProof struct {
 	fScalar, fBlinding         bls12381.G1Affine
 	a                          bls12381.G1Affine
 	yScalar, yBlinding         bls12381.G1Affine
@@ -32,12 +32,12 @@ type cvSharingProofV1 struct {
 	zScalarCoin, zBlindingCoin fr.Element
 }
 
-type cvBitProofV1 struct {
+type cvBitProof struct {
 	t0, t1     bls12381.G1Affine
 	e0, z0, z1 fr.Element
 }
 
-type cvRangeLinkProofV1 struct {
+type cvRangeLinkProof struct {
 	tCoin        bls12381.G1Affine
 	tCommitments []bls12381.G1Affine
 	tCiphertexts []bls12381.G1Affine
@@ -46,24 +46,24 @@ type cvRangeLinkProofV1 struct {
 	zRhos        []fr.Element
 }
 
-type cvExactRangeProofV1 struct {
+type cvExactRangeProof struct {
 	commitments []bls12381.G1Affine
-	bits        []cvBitProofV1
-	links       []cvRangeLinkProofV1
+	bits        []cvBitProof
+	links       []cvRangeLinkProof
 }
 
-type cvChunkingProofV1 struct {
+type cvChunkingProof struct {
 	y0              bls12381.G1Affine
 	b, c, d         []bls12381.G1Affine
 	y               bls12381.G1Affine
 	zCoins, zDigits []fr.Element
 	zBeta           fr.Element
-	exactRange      cvExactRangeProofV1
+	exactRange      cvExactRangeProof
 }
 
-type cvLeafProofV1 struct {
-	sharing  cvSharingProofV1
-	chunking cvChunkingProofV1
+type cvLeafProof struct {
+	sharing  cvSharingProof
+	chunking cvChunkingProof
 }
 
 type cvChunkChallenges [][][]uint16
@@ -100,7 +100,7 @@ func cvWriteScalarVector(buffer *bytes.Buffer, scalars []fr.Element) error {
 	return nil
 }
 
-func cvWriteExactRangeProof(buffer *bytes.Buffer, proof *cvExactRangeProofV1) error {
+func cvWriteExactRangeProof(buffer *bytes.Buffer, proof *cvExactRangeProof) error {
 	if proof == nil {
 		return fmt.Errorf("nil CV-sAPVSS exact range proof")
 	}
@@ -148,9 +148,9 @@ func cvWriteExactRangeProof(buffer *bytes.Buffer, proof *cvExactRangeProofV1) er
 	return nil
 }
 
-func cvLeafProofV1CanonicalBytes(proof *cvLeafProofV1) ([]byte, error) {
+func cvLeafProofCanonicalBytes(proof *cvLeafProof) ([]byte, error) {
 	if proof == nil {
-		return nil, fmt.Errorf("nil CV-sAPVSS LeafV1 proof")
+		return nil, fmt.Errorf("nil CV-sAPVSS Leaf proof")
 	}
 	var wire bytes.Buffer
 	for _, point := range []*bls12381.G1Affine{
@@ -162,7 +162,7 @@ func cvLeafProofV1CanonicalBytes(proof *cvLeafProofV1) ([]byte, error) {
 		&proof.chunking.y0,
 	} {
 		if !cvValidG1(point, point != &proof.chunking.y0) {
-			return nil, fmt.Errorf("invalid CV-sAPVSS LeafV1 proof point")
+			return nil, fmt.Errorf("invalid CV-sAPVSS Leaf proof point")
 		}
 		cvWritePoint(&wire, point)
 	}
@@ -208,7 +208,7 @@ func cvTranscriptBytes(parts ...[]byte) []byte {
 	return wire.Bytes()
 }
 
-func cvHashToFrV1(domain string, parts ...[]byte) (fr.Element, error) {
+func cvHashToFr(domain string, parts ...[]byte) (fr.Element, error) {
 	elements, err := fr.Hash(cvTranscriptBytes(parts...), []byte(domain), 1)
 	if err != nil {
 		return fr.Element{}, fmt.Errorf("hash CV-sAPVSS transcript to fr: %w", err)
@@ -216,12 +216,12 @@ func cvHashToFrV1(domain string, parts ...[]byte) (fr.Element, error) {
 	return elements[0], nil
 }
 
-func cvLeafV1StatementDigest(leaf *cvLeafV1) ([]byte, error) {
-	wire, err := cvLeafV1StatementBytes(leaf)
+func cvLeafStatementDigest(leaf *cvLeaf) ([]byte, error) {
+	wire, err := cvLeafStatementBytes(leaf)
 	if err != nil {
 		return nil, err
 	}
-	return hashBytes([]byte(cvLeafV1StatementDigestDomain), wire), nil
+	return hashBytes([]byte(cvLeafStatementDigestDomain), wire), nil
 }
 
 func cvFrPowers(base fr.Element, count int) []fr.Element {
@@ -291,7 +291,7 @@ func cvAffineOffsetEqualsTwoScalarSum(
 	return result.Z.IsZero()
 }
 
-func cvReconstructedCiphertexts(leaf *cvLeafV1) (bls12381.G1Affine, []bls12381.G1Affine, error) {
+func cvReconstructedCiphertexts(leaf *cvLeaf) (bls12381.G1Affine, []bls12381.G1Affine, error) {
 	base, _, chunks, err := cvProfile(leaf.context.profile)
 	if err != nil {
 		return bls12381.G1Affine{}, nil, err
@@ -331,7 +331,7 @@ func cvReconstructedCiphertexts(leaf *cvLeafV1) (bls12381.G1Affine, []bls12381.G
 	return first, seconds, nil
 }
 
-type cvSharingInstanceV1 struct {
+type cvSharingProofInstance struct {
 	statementDigest    []byte
 	scalarCoinBase     bls12381.G1Affine
 	blindingCoinBase   bls12381.G1Affine
@@ -342,12 +342,12 @@ type cvSharingInstanceV1 struct {
 	weights            []fr.Element
 }
 
-func cvSharingInstance(leaf *cvLeafV1) (*cvSharingInstanceV1, error) {
-	statementDigest, err := cvLeafV1StatementDigest(leaf)
+func cvBuildSharingProofInstance(leaf *cvLeaf) (*cvSharingProofInstance, error) {
+	statementDigest, err := cvLeafStatementDigest(leaf)
 	if err != nil {
 		return nil, err
 	}
-	eta, err := cvHashToFrV1(cvSharingBatchDomain, statementDigest)
+	eta, err := cvHashToFr(cvSharingBatchDomain, statementDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +368,7 @@ func cvSharingInstance(leaf *cvLeafV1) (*cvSharingInstanceV1, error) {
 		scalarCiphertextsWeighted[i] = scalarCiphertexts[i]
 		blindingCiphertexts[i] = leaf.receivers[i].encryptedShare.blinding.c
 	}
-	return &cvSharingInstanceV1{
+	return &cvSharingProofInstance{
 		statementDigest:    statementDigest,
 		scalarCoinBase:     chunkCoinBase,
 		blindingCoinBase:   blindingCoinBase,
@@ -380,29 +380,29 @@ func cvSharingInstance(leaf *cvLeafV1) (*cvSharingInstanceV1, error) {
 	}, nil
 }
 
-func cvSharingChallenge(statementDigest []byte, proof *cvSharingProofV1) (fr.Element, error) {
+func cvSharingChallenge(statementDigest []byte, proof *cvSharingProof) (fr.Element, error) {
 	var points bytes.Buffer
 	cvWritePoint(&points, &proof.fScalar)
 	cvWritePoint(&points, &proof.fBlinding)
 	cvWritePoint(&points, &proof.a)
 	cvWritePoint(&points, &proof.yScalar)
 	cvWritePoint(&points, &proof.yBlinding)
-	return cvHashToFrV1(cvSharingChallengeDomain, statementDigest, points.Bytes())
+	return cvHashToFr(cvSharingChallengeDomain, statementDigest, points.Bytes())
 }
 
-func cvProveSharingV1(
-	leaf *cvLeafV1,
+func cvProveSharing(
+	leaf *cvLeaf,
 	scalars, blindings, scalarCoins []fr.Element,
 	blindingCoin fr.Element,
-) (cvSharingProofV1, error) {
-	instance, err := cvSharingInstance(leaf)
+) (cvSharingProof, error) {
+	instance, err := cvBuildSharingProofInstance(leaf)
 	if err != nil {
-		return cvSharingProofV1{}, err
+		return cvSharingProof{}, err
 	}
 	base, _, chunks, _ := cvProfile(leaf.context.profile)
 	if len(scalars) != len(instance.weights) || len(blindings) != len(instance.weights) ||
 		len(scalarCoins) != chunks {
-		return cvSharingProofV1{}, fmt.Errorf("invalid CV-sAPVSS sharing witness shape")
+		return cvSharingProof{}, fmt.Errorf("invalid CV-sAPVSS sharing witness shape")
 	}
 	var baseScalar fr.Element
 	baseScalar.SetUint64(base)
@@ -413,14 +413,14 @@ func cvProveSharingV1(
 	var randomScalar, randomBlinding, randomScalarCoin, randomBlindingCoin fr.Element
 	for _, value := range []*fr.Element{&randomScalar, &randomBlinding, &randomScalarCoin, &randomBlindingCoin} {
 		if _, err := value.SetRandom(); err != nil {
-			return cvSharingProofV1{}, fmt.Errorf("sample CV-sAPVSS sharing proof randomness: %w", err)
+			return cvSharingProof{}, fmt.Errorf("sample CV-sAPVSS sharing proof randomness: %w", err)
 		}
 	}
 	h, err := cvPedersenBase()
 	if err != nil {
-		return cvSharingProofV1{}, err
+		return cvSharingProof{}, err
 	}
-	proof := cvSharingProofV1{}
+	proof := cvSharingProof{}
 	proof.fScalar.ScalarMultiplication(&genG1, randomScalarCoin.BigInt(new(big.Int)))
 	proof.fBlinding.ScalarMultiplication(&genG1, randomBlindingCoin.BigInt(new(big.Int)))
 	proof.a = cvPointSum(
@@ -437,7 +437,7 @@ func cvProveSharingV1(
 	)
 	challenge, err := cvSharingChallenge(instance.statementDigest, &proof)
 	if err != nil {
-		return cvSharingProofV1{}, err
+		return cvSharingProof{}, err
 	}
 	proof.zScalar.Mul(&challenge, &aggregateScalar).Add(&proof.zScalar, &randomScalar)
 	proof.zBlinding.Mul(&challenge, &aggregateBlinding).Add(&proof.zBlinding, &randomBlinding)
@@ -451,15 +451,15 @@ func pointPtr(point bls12381.G1Affine) *bls12381.G1Affine {
 	return &point
 }
 
-func cvVerifySharingV1(leaf *cvLeafV1, proof *cvSharingProofV1) error {
-	return cvVerifySharingPointsV1(leaf, proof, true)
+func cvVerifySharing(leaf *cvLeaf, proof *cvSharingProof) error {
+	return cvVerifySharingPoints(leaf, proof, true)
 }
 
-func cvVerifySharingValidatedPointsV1(leaf *cvLeafV1, proof *cvSharingProofV1) error {
-	return cvVerifySharingPointsV1(leaf, proof, false)
+func cvVerifySharingValidatedPoints(leaf *cvLeaf, proof *cvSharingProof) error {
+	return cvVerifySharingPoints(leaf, proof, false)
 }
 
-func cvVerifySharingPointsV1(leaf *cvLeafV1, proof *cvSharingProofV1, validatePoints bool) error {
+func cvVerifySharingPoints(leaf *cvLeaf, proof *cvSharingProof, validatePoints bool) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.sharingVerifyCalls.Add(1)
 	}
@@ -472,7 +472,7 @@ func cvVerifySharingPointsV1(leaf *cvLeafV1, proof *cvSharingProofV1, validatePo
 			}
 		}
 	}
-	instance, err := cvSharingInstance(leaf)
+	instance, err := cvBuildSharingProofInstance(leaf)
 	if err != nil {
 		return err
 	}
@@ -545,7 +545,7 @@ func cvRangeBitIndex(chunks, bits, receiver, chunk, bit int) int {
 	return (receiver*chunks+chunk)*bits + bit
 }
 
-func cvRangeCommitmentPoint(proof *cvExactRangeProofV1, receiver, chunk, chunks, bits int) bls12381.G1Affine {
+func cvRangeCommitmentPoint(proof *cvExactRangeProof, receiver, chunk, chunks, bits int) bls12381.G1Affine {
 	var result bls12381.G1Affine
 	result.ScalarMultiplication(&genG1, big.NewInt(0))
 	for bit := 0; bit < bits; bit++ {
@@ -557,7 +557,7 @@ func cvRangeCommitmentPoint(proof *cvExactRangeProofV1, receiver, chunk, chunks,
 	return result
 }
 
-func cvExactRangeFirstBytes(proof *cvExactRangeProofV1, validatePoints bool) ([]byte, error) {
+func cvExactRangeFirstBytes(proof *cvExactRangeProof, validatePoints bool) ([]byte, error) {
 	var wire bytes.Buffer
 	if err := cvWritePointVectorMode(&wire, proof.commitments, validatePoints); err != nil {
 		return nil, err
@@ -590,19 +590,19 @@ func cvExactRangeFirstBytes(proof *cvExactRangeProofV1, validatePoints bool) ([]
 	return wire.Bytes(), nil
 }
 
-func cvExactRangeChallenge(statementDigest []byte, proof *cvExactRangeProofV1) (fr.Element, error) {
+func cvExactRangeChallenge(statementDigest []byte, proof *cvExactRangeProof) (fr.Element, error) {
 	return cvExactRangeChallengeMode(statementDigest, proof, true)
 }
 
-func cvExactRangeChallengeMode(statementDigest []byte, proof *cvExactRangeProofV1, validatePoints bool) (fr.Element, error) {
+func cvExactRangeChallengeMode(statementDigest []byte, proof *cvExactRangeProof, validatePoints bool) (fr.Element, error) {
 	first, err := cvExactRangeFirstBytes(proof, validatePoints)
 	if err != nil {
 		return fr.Element{}, err
 	}
-	return cvHashToFrV1(cvExactRangeDomain, statementDigest, first)
+	return cvHashToFr(cvExactRangeDomain, statementDigest, first)
 }
 
-type cvExactRangeBitWitnessV1 struct {
+type cvExactRangeBitWitness struct {
 	rho        fr.Element
 	bit        uint8
 	actualT    fr.Element
@@ -610,39 +610,39 @@ type cvExactRangeBitWitnessV1 struct {
 	simulatedZ fr.Element
 }
 
-func cvProveExactRangeV1(
-	leaf *cvLeafV1,
+func cvProveExactRange(
+	leaf *cvLeaf,
 	digits [][]uint64,
 	scalarCoins []fr.Element,
-) (cvExactRangeProofV1, error) {
-	statementDigest, err := cvLeafV1StatementDigest(leaf)
+) (cvExactRangeProof, error) {
+	statementDigest, err := cvLeafStatementDigest(leaf)
 	if err != nil {
-		return cvExactRangeProofV1{}, err
+		return cvExactRangeProof{}, err
 	}
 	_, _, chunks, err := cvProfile(leaf.context.profile)
 	if err != nil {
-		return cvExactRangeProofV1{}, err
+		return cvExactRangeProof{}, err
 	}
 	receivers := len(leaf.receivers)
 	bits := int(leaf.context.profile.chunkBits)
 	if len(digits) != receivers || len(scalarCoins) != chunks {
-		return cvExactRangeProofV1{}, fmt.Errorf("invalid CV-sAPVSS exact range witness shape")
+		return cvExactRangeProof{}, fmt.Errorf("invalid CV-sAPVSS exact range witness shape")
 	}
 	for receiver := range digits {
 		if len(digits[receiver]) != chunks {
-			return cvExactRangeProofV1{}, fmt.Errorf("invalid CV-sAPVSS exact range digit count")
+			return cvExactRangeProof{}, fmt.Errorf("invalid CV-sAPVSS exact range digit count")
 		}
 	}
 	h, err := cvPedersenBase()
 	if err != nil {
-		return cvExactRangeProofV1{}, err
+		return cvExactRangeProof{}, err
 	}
-	proof := cvExactRangeProofV1{
+	proof := cvExactRangeProof{
 		commitments: make([]bls12381.G1Affine, receivers*chunks*bits),
-		bits:        make([]cvBitProofV1, receivers*chunks*bits),
-		links:       make([]cvRangeLinkProofV1, chunks),
+		bits:        make([]cvBitProof, receivers*chunks*bits),
+		links:       make([]cvRangeLinkProof, chunks),
 	}
-	witnesses := make([]cvExactRangeBitWitnessV1, len(proof.bits))
+	witnesses := make([]cvExactRangeBitWitness, len(proof.bits))
 	for receiver := 0; receiver < receivers; receiver++ {
 		for chunk := 0; chunk < chunks; chunk++ {
 			for bit := 0; bit < bits; bit++ {
@@ -650,7 +650,7 @@ func cvProveExactRangeV1(
 				w := &witnesses[index]
 				w.bit = uint8((digits[receiver][chunk] >> uint(bit)) & 1)
 				if _, err := w.rho.SetRandom(); err != nil {
-					return cvExactRangeProofV1{}, err
+					return cvExactRangeProof{}, err
 				}
 				var bitPoint bls12381.G1Affine
 				bitPoint.ScalarMultiplication(&genG1, big.NewInt(int64(w.bit)))
@@ -659,13 +659,13 @@ func cvProveExactRangeV1(
 					pointPtr(cvPointTimes(&h, &w.rho)),
 				)
 				if _, err := w.actualT.SetRandom(); err != nil {
-					return cvExactRangeProofV1{}, err
+					return cvExactRangeProof{}, err
 				}
 				if _, err := w.simulatedE.SetRandom(); err != nil {
-					return cvExactRangeProofV1{}, err
+					return cvExactRangeProof{}, err
 				}
 				if _, err := w.simulatedZ.SetRandom(); err != nil {
-					return cvExactRangeProofV1{}, err
+					return cvExactRangeProof{}, err
 				}
 				bitProof := &proof.bits[index]
 				if w.bit == 0 {
@@ -692,7 +692,7 @@ func cvProveExactRangeV1(
 	for chunk := 0; chunk < chunks; chunk++ {
 		link := &proof.links[chunk]
 		if _, err := linkRandomCoin[chunk].SetRandom(); err != nil {
-			return cvExactRangeProofV1{}, err
+			return cvExactRangeProof{}, err
 		}
 		link.tCoin.ScalarMultiplication(&genG1, linkRandomCoin[chunk].BigInt(new(big.Int)))
 		link.tCommitments = make([]bls12381.G1Affine, receivers)
@@ -701,10 +701,10 @@ func cvProveExactRangeV1(
 		linkRandomRho[chunk] = make([]fr.Element, receivers)
 		for receiver := 0; receiver < receivers; receiver++ {
 			if _, err := linkRandomDigit[chunk][receiver].SetRandom(); err != nil {
-				return cvExactRangeProofV1{}, err
+				return cvExactRangeProof{}, err
 			}
 			if _, err := linkRandomRho[chunk][receiver].SetRandom(); err != nil {
-				return cvExactRangeProofV1{}, err
+				return cvExactRangeProof{}, err
 			}
 			pk := &leaf.receivers[receiver].receiverPublicKey
 			link.tCommitments[receiver] = cvPointSum(
@@ -719,7 +719,7 @@ func cvProveExactRangeV1(
 	}
 	challenge, err := cvExactRangeChallengeMode(statementDigest, &proof, false)
 	if err != nil {
-		return cvExactRangeProofV1{}, err
+		return cvExactRangeProof{}, err
 	}
 	for index := range proof.bits {
 		w := &witnesses[index]
@@ -740,7 +740,7 @@ func cvProveExactRangeV1(
 	for chunk := 0; chunk < chunks; chunk++ {
 		link := &proof.links[chunk]
 		if _, err := link.zCoin.SetRandom(); err != nil {
-			return cvExactRangeProofV1{}, err
+			return cvExactRangeProof{}, err
 		}
 		link.zCoin.Mul(&challenge, &scalarCoins[chunk]).Add(&link.zCoin, &linkRandomCoin[chunk])
 		link.zDigits = make([]fr.Element, receivers)
@@ -768,15 +768,15 @@ func cvProveExactRangeV1(
 	return proof, nil
 }
 
-func cvVerifyExactRangeV1(leaf *cvLeafV1, proof *cvExactRangeProofV1) error {
-	return cvVerifyExactRangePointsV1(leaf, proof, true)
+func cvVerifyExactRange(leaf *cvLeaf, proof *cvExactRangeProof) error {
+	return cvVerifyExactRangePoints(leaf, proof, true)
 }
 
-func cvVerifyExactRangeValidatedPointsV1(leaf *cvLeafV1, proof *cvExactRangeProofV1) error {
-	return cvVerifyExactRangePointsV1(leaf, proof, false)
+func cvVerifyExactRangeValidatedPoints(leaf *cvLeaf, proof *cvExactRangeProof) error {
+	return cvVerifyExactRangePoints(leaf, proof, false)
 }
 
-func cvVerifyExactRangePointsV1(leaf *cvLeafV1, proof *cvExactRangeProofV1, validatePoints bool) error {
+func cvVerifyExactRangePoints(leaf *cvLeaf, proof *cvExactRangeProof, validatePoints bool) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.exactRangeVerifyCalls.Add(1)
 	}
@@ -801,7 +801,7 @@ func cvVerifyExactRangePointsV1(leaf *cvLeafV1, proof *cvExactRangeProofV1, vali
 			return fmt.Errorf("invalid CV-sAPVSS exact range link shape %d", chunk)
 		}
 	}
-	statementDigest, err := cvLeafV1StatementDigest(leaf)
+	statementDigest, err := cvLeafStatementDigest(leaf)
 	if err != nil {
 		return err
 	}
@@ -916,7 +916,7 @@ func cvChunkSecondChallenge(
 		return fr.Element{}, err
 	}
 	cvWritePoint(&secondMove, y)
-	return cvHashToFrV1(cvChunkSecondDomain, statementDigest, firstChallengeDigest, secondMove.Bytes())
+	return cvHashToFr(cvChunkSecondDomain, statementDigest, firstChallengeDigest, secondMove.Bytes())
 }
 
 func cvChallengeWeight(challenges cvChunkChallenges, powers []fr.Element, receiver, chunk int) fr.Element {
@@ -939,43 +939,43 @@ func cvRandomSigned(s, z *big.Int) (*big.Int, error) {
 	return value.Sub(value, s), nil
 }
 
-func cvProveChunkingV1(
-	leaf *cvLeafV1,
+func cvProveChunking(
+	leaf *cvLeaf,
 	digits [][]uint64,
 	scalarCoins []fr.Element,
-) (cvChunkingProofV1, error) {
-	statementDigest, err := cvLeafV1StatementDigest(leaf)
+) (cvChunkingProof, error) {
+	statementDigest, err := cvLeafStatementDigest(leaf)
 	if err != nil {
-		return cvChunkingProofV1{}, err
+		return cvChunkingProof{}, err
 	}
 	_, _, chunks, _ := cvProfile(leaf.context.profile)
 	receivers := len(leaf.receivers)
 	if len(digits) != receivers || len(scalarCoins) != chunks {
-		return cvChunkingProofV1{}, fmt.Errorf("invalid CV-sAPVSS chunk witness shape")
+		return cvChunkingProof{}, fmt.Errorf("invalid CV-sAPVSS chunk witness shape")
 	}
 	for i := range digits {
 		if len(digits[i]) != chunks {
-			return cvChunkingProofV1{}, fmt.Errorf("invalid CV-sAPVSS digit count")
+			return cvChunkingProof{}, fmt.Errorf("invalid CV-sAPVSS digit count")
 		}
 	}
 	s, z, err := cvChunkProofBounds(leaf.context.profile, receivers)
 	if err != nil {
-		return cvChunkingProofV1{}, err
+		return cvChunkingProof{}, err
 	}
 
 	y0, err := bls12381.HashToG1(statementDigest, []byte(cvChunkY0Domain))
 	if err != nil {
-		return cvChunkingProofV1{}, err
+		return cvChunkingProof{}, err
 	}
 	if !cvValidG1(&y0, false) || y0.Equal(&genG1) {
-		return cvChunkingProofV1{}, fmt.Errorf("invalid statement-derived CV-sAPVSS chunk base")
+		return cvChunkingProof{}, fmt.Errorf("invalid statement-derived CV-sAPVSS chunk base")
 	}
 
 	beta := make([]fr.Element, cvChunkProofRepetitions)
 	b := make([]bls12381.G1Affine, cvChunkProofRepetitions)
 	for i := range beta {
 		if _, err := beta[i].SetRandom(); err != nil {
-			return cvChunkingProofV1{}, err
+			return cvChunkingProof{}, err
 		}
 		b[i].ScalarMultiplication(&genG1, beta[i].BigInt(new(big.Int)))
 	}
@@ -991,7 +991,7 @@ func cvProveChunkingV1(
 		for repetition := 0; repetition < cvChunkProofRepetitions; repetition++ {
 			sigma[repetition], err = cvRandomSigned(s, z)
 			if err != nil {
-				return cvChunkingProofV1{}, err
+				return cvChunkingProof{}, err
 			}
 			var sigmaScalar fr.Element
 			sigmaScalar.SetBigInt(sigma[repetition])
@@ -1009,7 +1009,7 @@ func cvProveChunkingV1(
 			chunks,
 		)
 		if err != nil {
-			return cvChunkingProofV1{}, err
+			return cvChunkingProof{}, err
 		}
 		zDigits = make([]fr.Element, cvChunkProofRepetitions)
 		accepted = true
@@ -1030,14 +1030,14 @@ func cvProveChunkingV1(
 		}
 	}
 	if !accepted {
-		return cvChunkingProofV1{}, fmt.Errorf("CV-sAPVSS chunk proof rejection sampling exhausted")
+		return cvChunkingProof{}, fmt.Errorf("CV-sAPVSS chunk proof rejection sampling exhausted")
 	}
 
 	delta := make([]fr.Element, receivers+1)
 	d := make([]bls12381.G1Affine, len(delta))
 	for i := range delta {
 		if _, err := delta[i].SetRandom(); err != nil {
-			return cvChunkingProofV1{}, err
+			return cvChunkingProof{}, err
 		}
 		d[i].ScalarMultiplication(&genG1, delta[i].BigInt(new(big.Int)))
 	}
@@ -1048,7 +1048,7 @@ func cvProveChunkingV1(
 	}
 	x, err := cvChunkSecondChallenge(statementDigest, firstChallengeDigest, zDigits, d, &y)
 	if err != nil {
-		return cvChunkingProofV1{}, err
+		return cvChunkingProof{}, err
 	}
 	xPowers := cvFrPowers(x, cvChunkProofRepetitions)
 	zCoins := make([]fr.Element, receivers)
@@ -1067,7 +1067,7 @@ func cvProveChunkingV1(
 		term.Mul(&beta[repetition], &xPowers[repetition])
 		zBeta.Add(&zBeta, &term)
 	}
-	return cvChunkingProofV1{
+	return cvChunkingProof{
 		y0:      y0,
 		b:       b,
 		c:       c,
@@ -1079,15 +1079,15 @@ func cvProveChunkingV1(
 	}, nil
 }
 
-func cvVerifyChunkingV1(leaf *cvLeafV1, proof *cvChunkingProofV1) error {
-	return cvVerifyChunkingPointsV1(leaf, proof, true)
+func cvVerifyChunking(leaf *cvLeaf, proof *cvChunkingProof) error {
+	return cvVerifyChunkingPoints(leaf, proof, true)
 }
 
-func cvVerifyChunkingValidatedPointsV1(leaf *cvLeafV1, proof *cvChunkingProofV1) error {
-	return cvVerifyChunkingPointsV1(leaf, proof, false)
+func cvVerifyChunkingValidatedPoints(leaf *cvLeaf, proof *cvChunkingProof) error {
+	return cvVerifyChunkingPoints(leaf, proof, false)
 }
 
-func cvVerifyChunkingPointsV1(leaf *cvLeafV1, proof *cvChunkingProofV1, validatePoints bool) error {
+func cvVerifyChunkingPoints(leaf *cvLeaf, proof *cvChunkingProof, validatePoints bool) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.chunkingVerifyCalls.Add(1)
 	}
@@ -1122,7 +1122,7 @@ func cvVerifyChunkingPointsV1(leaf *cvLeafV1, proof *cvChunkingProofV1, validate
 			return fmt.Errorf("CV-sAPVSS chunk response outside statistical range")
 		}
 	}
-	statementDigest, err := cvLeafV1StatementDigest(leaf)
+	statementDigest, err := cvLeafStatementDigest(leaf)
 	if err != nil {
 		return err
 	}
@@ -1205,12 +1205,12 @@ func cvVerifyChunkingPointsV1(leaf *cvLeafV1, proof *cvChunkingProofV1, validate
 	return nil
 }
 
-func cvProveLeafV1(
-	leaf *cvLeafV1,
+func cvProveLeaf(
+	leaf *cvLeaf,
 	scalars, blindings, scalarCoins []fr.Element,
 	blindingCoin fr.Element,
-) (*cvLeafProofV1, error) {
-	if leaf == nil || leaf.context.proofProfile != cvLeafV1GrothProofProfile {
+) (*cvLeafProof, error) {
+	if leaf == nil || leaf.context.proofProfile != cvLeafGrothProofProfile {
 		return nil, fmt.Errorf("invalid CV-sAPVSS M1-B proof request")
 	}
 	digits := make([][]uint64, len(scalars))
@@ -1221,30 +1221,30 @@ func cvProveLeafV1(
 			return nil, err
 		}
 	}
-	sharing, err := cvProveSharingV1(leaf, scalars, blindings, scalarCoins, blindingCoin)
+	sharing, err := cvProveSharing(leaf, scalars, blindings, scalarCoins, blindingCoin)
 	if err != nil {
 		return nil, err
 	}
-	chunking, err := cvProveChunkingV1(leaf, digits, scalarCoins)
+	chunking, err := cvProveChunking(leaf, digits, scalarCoins)
 	if err != nil {
 		return nil, err
 	}
-	chunking.exactRange, err = cvProveExactRangeV1(leaf, digits, scalarCoins)
+	chunking.exactRange, err = cvProveExactRange(leaf, digits, scalarCoins)
 	if err != nil {
 		return nil, err
 	}
-	return &cvLeafProofV1{sharing: sharing, chunking: chunking}, nil
+	return &cvLeafProof{sharing: sharing, chunking: chunking}, nil
 }
 
-func cvVerifyLeafProofV1(leaf *cvLeafV1) error {
-	if leaf == nil || leaf.proof == nil || leaf.context.proofProfile != cvLeafV1GrothProofProfile {
+func cvVerifyLeafProof(leaf *cvLeaf) error {
+	if leaf == nil || leaf.proof == nil || leaf.context.proofProfile != cvLeafGrothProofProfile {
 		return fmt.Errorf("missing CV-sAPVSS M1-B leaf proof")
 	}
-	if err := cvVerifySharingValidatedPointsV1(leaf, &leaf.proof.sharing); err != nil {
+	if err := cvVerifySharingValidatedPoints(leaf, &leaf.proof.sharing); err != nil {
 		return err
 	}
-	if err := cvVerifyChunkingValidatedPointsV1(leaf, &leaf.proof.chunking); err != nil {
+	if err := cvVerifyChunkingValidatedPoints(leaf, &leaf.proof.chunking); err != nil {
 		return err
 	}
-	return cvVerifyExactRangeValidatedPointsV1(leaf, &leaf.proof.chunking.exactRange)
+	return cvVerifyExactRangeValidatedPoints(leaf, &leaf.proof.chunking.exactRange)
 }

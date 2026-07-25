@@ -11,26 +11,26 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-func TestCVReceiverKeyMaterialV1GenerateAndLoadLocalOnly(t *testing.T) {
+func TestCVReceiverKeyMaterialGenerateAndLoadLocalOnly(t *testing.T) {
 	root := t.TempDir()
 	publicDir := filepath.Join(root, "public")
 	secretDir := filepath.Join(root, "private")
 	const sid = "cv-keys-session"
 	receiverIDs := []int{10, 11, 12}
-	if err := cvGenerateReceiverKeyMaterialV1(publicDir, secretDir, sid, receiverIDs); err != nil {
+	if err := cvGenerateReceiverKeyMaterial(publicDir, secretDir, sid, receiverIDs); err != nil {
 		t.Fatal(err)
 	}
 
-	registryPath := filepath.Join(publicDir, cvReceiverRegistryFilenameV1)
+	registryPath := filepath.Join(publicDir, cvReceiverRegistryFilename)
 	registryRaw, err := os.ReadFile(registryPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var registry cvReceiverRegistryV1
+	var registry cvReceiverRegistry
 	if err := json.Unmarshal(registryRaw, &registry); err != nil {
 		t.Fatal(err)
 	}
-	if registry.Version != cvReceiverRegistryVersionV1 || registry.SID != sid {
+	if registry.Version != cvReceiverRegistryVersion || registry.SID != sid {
 		t.Fatalf("registry version/SID = %d/%q", registry.Version, registry.SID)
 	}
 	if len(registry.Receivers) != len(receiverIDs) {
@@ -47,15 +47,15 @@ func TestCVReceiverKeyMaterialV1GenerateAndLoadLocalOnly(t *testing.T) {
 	}
 	assertCVKeyFileMode(t, registryPath, 0o644)
 	for _, id := range receiverIDs {
-		assertCVKeyFileMode(t, cvReceiverSecretPathV1(secretDir, id), 0o600)
+		assertCVKeyFileMode(t, cvReceiverSecretPath(secretDir, id), 0o600)
 	}
 
 	// A corrupt non-local secret must not affect this process: strict loading
 	// opens only the receiver IDs explicitly assigned to it.
-	if err := os.WriteFile(cvReceiverSecretPathV1(secretDir, 12), []byte("not-a-scalar"), 0o600); err != nil {
+	if err := os.WriteFile(cvReceiverSecretPath(secretDir, 12), []byte("not-a-scalar"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	keys, err := cvLoadReceiverKeyMaterialV1(publicDir, secretDir, sid, receiverIDs, []int{11, 10})
+	keys, err := cvLoadReceiverKeyMaterial(publicDir, secretDir, sid, receiverIDs, []int{11, 10})
 	if err != nil {
 		t.Fatalf("load local receiver keys: %v", err)
 	}
@@ -82,14 +82,14 @@ func TestCVReceiverKeyMaterialV1GenerateAndLoadLocalOnly(t *testing.T) {
 	secondRoot := t.TempDir()
 	secondPublicDir := filepath.Join(secondRoot, "public")
 	secondSecretDir := filepath.Join(secondRoot, "private")
-	if err := cvGenerateReceiverKeyMaterialV1(secondPublicDir, secondSecretDir, sid, receiverIDs); err != nil {
+	if err := cvGenerateReceiverKeyMaterial(secondPublicDir, secondSecretDir, sid, receiverIDs); err != nil {
 		t.Fatal(err)
 	}
-	firstSecret, err := os.ReadFile(cvReceiverSecretPathV1(secretDir, 10))
+	firstSecret, err := os.ReadFile(cvReceiverSecretPath(secretDir, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSecret, err := os.ReadFile(cvReceiverSecretPathV1(secondSecretDir, 10))
+	secondSecret, err := os.ReadFile(cvReceiverSecretPath(secondSecretDir, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,27 +98,27 @@ func TestCVReceiverKeyMaterialV1GenerateAndLoadLocalOnly(t *testing.T) {
 	}
 }
 
-func TestCVReceiverKeyMaterialV1RejectsMismatchedRegistryAndSecrets(t *testing.T) {
+func TestCVReceiverKeyMaterialRejectsMismatchedRegistryAndSecrets(t *testing.T) {
 	const sid = "cv-keys-validation"
 	receiverIDs := []int{20, 21, 22}
 
 	t.Run("SID", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, "other-session", receiverIDs, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, "other-session", receiverIDs, []int{20}); err == nil {
 			t.Fatal("accepted registry from another SID")
 		}
 	})
 
 	t.Run("receiver order", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, []int{21, 20, 22}, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, []int{21, 20, 22}, []int{20}); err == nil {
 			t.Fatal("accepted a registry with the wrong receiver order")
 		}
 	})
 
 	t.Run("unknown local receiver", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{23}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{23}); err == nil {
 			t.Fatal("accepted a local receiver outside the registry")
 		}
 	})
@@ -126,34 +126,34 @@ func TestCVReceiverKeyMaterialV1RejectsMismatchedRegistryAndSecrets(t *testing.T
 	t.Run("noncanonical scalar", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
 		noncanonical := fr.Modulus().FillBytes(make([]byte, fr.Bytes))
-		if err := os.WriteFile(cvReceiverSecretPathV1(dirs.secret, 20), noncanonical, 0o600); err != nil {
+		if err := os.WriteFile(cvReceiverSecretPath(dirs.secret, 20), noncanonical, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
 			t.Fatal("accepted a noncanonical receiver scalar")
 		}
 	})
 
 	t.Run("zero scalar", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		if err := os.WriteFile(cvReceiverSecretPathV1(dirs.secret, 20), make([]byte, fr.Bytes), 0o600); err != nil {
+		if err := os.WriteFile(cvReceiverSecretPath(dirs.secret, 20), make([]byte, fr.Bytes), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
 			t.Fatal("accepted a zero receiver scalar")
 		}
 	})
 
 	t.Run("secret public mismatch", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		other, err := os.ReadFile(cvReceiverSecretPathV1(dirs.secret, 21))
+		other, err := os.ReadFile(cvReceiverSecretPath(dirs.secret, 21))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(cvReceiverSecretPathV1(dirs.secret, 20), other, 0o600); err != nil {
+		if err := os.WriteFile(cvReceiverSecretPath(dirs.secret, 20), other, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
 			t.Fatal("accepted a receiver scalar for another public key")
 		}
 	})
@@ -163,7 +163,7 @@ func TestCVReceiverKeyMaterialV1RejectsMismatchedRegistryAndSecrets(t *testing.T
 		registry := readCVReceiverRegistryForTest(t, dirs.public)
 		registry.Receivers[0].ReceiverIndex = 2
 		writeCVReceiverRegistryForTest(t, dirs.public, registry)
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
 			t.Fatal("accepted a receiver with the wrong interpolation index")
 		}
 	})
@@ -173,17 +173,17 @@ func TestCVReceiverKeyMaterialV1RejectsMismatchedRegistryAndSecrets(t *testing.T
 		registry := readCVReceiverRegistryForTest(t, dirs.public)
 		registry.Receivers[0].PublicKey = "00"
 		writeCVReceiverRegistryForTest(t, dirs.public, registry)
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{20}); err == nil {
 			t.Fatal("accepted a noncanonical compressed public key")
 		}
 	})
 }
 
-func TestCVReceiverRegistryDigestV1BindsReceiverIDs(t *testing.T) {
+func TestCVReceiverRegistryDigestBindsReceiverIDs(t *testing.T) {
 	const sid = "cv-registry-digest"
 	receiverIDs := []int{30, 31, 32}
 	dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-	original, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, nil)
+	original, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestCVReceiverRegistryDigestV1BindsReceiverIDs(t *testing.T) {
 		registry.Receivers[i].ReceiverID = remappedIDs[i]
 	}
 	writeCVReceiverRegistryForTest(t, dirs.public, registry)
-	remapped, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, remappedIDs, nil)
+	remapped, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, remappedIDs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,13 +206,13 @@ func TestCVReceiverRegistryDigestV1BindsReceiverIDs(t *testing.T) {
 	}
 }
 
-func TestCVReceiverKeyMaterialV1RejectsUnsafeFiles(t *testing.T) {
+func TestCVReceiverKeyMaterialRejectsUnsafeFiles(t *testing.T) {
 	const sid = "cv-keys-files"
 	receiverIDs := []int{50, 51}
 
 	t.Run("registry symlink", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		path := filepath.Join(dirs.public, cvReceiverRegistryFilenameV1)
+		path := filepath.Join(dirs.public, cvReceiverRegistryFilename)
 		target := path + ".target"
 		if err := os.Rename(path, target); err != nil {
 			t.Fatal(err)
@@ -220,14 +220,14 @@ func TestCVReceiverKeyMaterialV1RejectsUnsafeFiles(t *testing.T) {
 		if err := os.Symlink(target, path); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
 			t.Fatal("accepted a symlinked receiver registry")
 		}
 	})
 
 	t.Run("secret symlink", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		path := cvReceiverSecretPathV1(dirs.secret, 50)
+		path := cvReceiverSecretPath(dirs.secret, 50)
 		target := path + ".target"
 		if err := os.Rename(path, target); err != nil {
 			t.Fatal(err)
@@ -235,88 +235,88 @@ func TestCVReceiverKeyMaterialV1RejectsUnsafeFiles(t *testing.T) {
 		if err := os.Symlink(target, path); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
 			t.Fatal("accepted a symlinked receiver secret")
 		}
 	})
 
 	t.Run("non-regular registry", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		path := filepath.Join(dirs.public, cvReceiverRegistryFilenameV1)
+		path := filepath.Join(dirs.public, cvReceiverRegistryFilename)
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Mkdir(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
 			t.Fatal("accepted a non-regular receiver registry")
 		}
 	})
 
 	t.Run("non-regular secret", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		path := cvReceiverSecretPathV1(dirs.secret, 50)
+		path := cvReceiverSecretPath(dirs.secret, 50)
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
 			t.Fatal("accepted a non-regular receiver secret")
 		}
 	})
 
 	t.Run("insecure secret mode", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		if err := os.Chmod(cvReceiverSecretPathV1(dirs.secret, 50), 0o644); err != nil {
+		if err := os.Chmod(cvReceiverSecretPath(dirs.secret, 50), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
 			t.Fatal("accepted an insecure receiver secret mode")
 		}
 	})
 
 	t.Run("oversized registry", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		path := filepath.Join(dirs.public, cvReceiverRegistryFilenameV1)
-		if err := os.WriteFile(path, make([]byte, cvMaxReceiverRegistryBytesV1+1), 0o644); err != nil {
+		path := filepath.Join(dirs.public, cvReceiverRegistryFilename)
+		if err := os.WriteFile(path, make([]byte, cvMaxReceiverRegistryBytes+1), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
 			t.Fatal("accepted an oversized receiver registry")
 		}
 	})
 
 	t.Run("oversized secret", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		path := cvReceiverSecretPathV1(dirs.secret, 50)
+		path := cvReceiverSecretPath(dirs.secret, 50)
 		if err := os.WriteFile(path, make([]byte, fr.Bytes+1), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, []int{50}); err == nil {
 			t.Fatal("accepted an oversized receiver secret")
 		}
 	})
 
 	t.Run("generation does not overwrite", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		if err := cvGenerateReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs); err == nil {
+		if err := cvGenerateReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs); err == nil {
 			t.Fatal("key generation overwrote existing material")
 		}
 	})
 
 	t.Run("loader requires separate directories", func(t *testing.T) {
 		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
-		secret, err := os.ReadFile(cvReceiverSecretPathV1(dirs.secret, 50))
+		secret, err := os.ReadFile(cvReceiverSecretPath(dirs.secret, 50))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(cvReceiverSecretPathV1(dirs.public, 50), secret, 0o600); err != nil {
+		if err := os.WriteFile(cvReceiverSecretPath(dirs.public, 50), secret, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cvLoadReceiverKeyMaterialV1(dirs.public, dirs.public, sid, receiverIDs, []int{50}); err == nil {
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.public, sid, receiverIDs, []int{50}); err == nil {
 			t.Fatal("loader accepted one directory for public and local-secret material")
 		}
 	})
@@ -327,10 +327,10 @@ func TestCVOldLockKeyMaterialLoadsOnlyLocalSigningShare(t *testing.T) {
 	publicDir := filepath.Join(root, "public")
 	secretDir := filepath.Join(root, "private")
 	members := []int{0, 1, 2, 3}
-	if err := cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, "cv-old-lock", members, 3); err != nil {
+	if err := cvGenerateOldLockKeyMaterial(publicDir, secretDir, "cv-old-lock", members, 3); err != nil {
 		t.Fatal(err)
 	}
-	material, err := cvLoadOldLockKeyMaterialV1(publicDir, secretDir, "cv-old-lock", members, 3, []int{1})
+	material, err := cvLoadOldLockKeyMaterial(publicDir, secretDir, "cv-old-lock", members, 3, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestCVOldLockKeyMaterialLoadsOnlyLocalSigningShare(t *testing.T) {
 	if len(material.localShares) != 1 {
 		t.Fatalf("loaded old-node secrets = %d, want 1", len(material.localShares))
 	}
-	peerMaterial, err := cvLoadOldLockKeyMaterialV1(publicDir, secretDir, "cv-old-lock", members, 3, []int{0})
+	peerMaterial, err := cvLoadOldLockKeyMaterial(publicDir, secretDir, "cv-old-lock", members, 3, []int{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,10 +369,10 @@ func TestCVRuntimeUsesRegistryBoundOldLockSigner(t *testing.T) {
 	secretDir := filepath.Join(root, "private")
 	oldMembers := []int{0, 1, 2, 3}
 	newMembers := []int{4, 5, 6, 7}
-	if err := cvGenerateReceiverKeyMaterialV1(publicDir, secretDir, "cv-runtime-lock", newMembers); err != nil {
+	if err := cvGenerateReceiverKeyMaterial(publicDir, secretDir, "cv-runtime-lock", newMembers); err != nil {
 		t.Fatal(err)
 	}
-	if err := cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, "cv-runtime-lock", oldMembers, 3); err != nil {
+	if err := cvGenerateOldLockKeyMaterial(publicDir, secretDir, "cv-runtime-lock", oldMembers, 3); err != nil {
 		t.Fatal(err)
 	}
 	cfg := NormalizeConfig(Config{
@@ -404,32 +404,32 @@ func generateCVReceiverKeysForTest(t testing.TB, sid string, receiverIDs []int) 
 		public: filepath.Join(root, "public"),
 		secret: filepath.Join(root, "private"),
 	}
-	if err := cvGenerateReceiverKeyMaterialV1(dirs.public, dirs.secret, sid, receiverIDs); err != nil {
+	if err := cvGenerateReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs); err != nil {
 		t.Fatal(err)
 	}
 	return dirs
 }
 
-func readCVReceiverRegistryForTest(t testing.TB, dir string) cvReceiverRegistryV1 {
+func readCVReceiverRegistryForTest(t testing.TB, dir string) cvReceiverRegistry {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dir, cvReceiverRegistryFilenameV1))
+	raw, err := os.ReadFile(filepath.Join(dir, cvReceiverRegistryFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var registry cvReceiverRegistryV1
+	var registry cvReceiverRegistry
 	if err := json.Unmarshal(raw, &registry); err != nil {
 		t.Fatal(err)
 	}
 	return registry
 }
 
-func writeCVReceiverRegistryForTest(t testing.TB, dir string, registry cvReceiverRegistryV1) {
+func writeCVReceiverRegistryForTest(t testing.TB, dir string, registry cvReceiverRegistry) {
 	t.Helper()
 	raw, err := json.MarshalIndent(registry, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, cvReceiverRegistryFilenameV1), raw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, cvReceiverRegistryFilename), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -15,25 +15,25 @@ import (
 )
 
 const (
-	cvOldLockRegistryFilenameV1 = "old-lock-registry.json"
-	cvOldLockRegistryVersionV1  = 1
+	cvOldLockRegistryFilename = "old-lock-registry.json"
+	cvOldLockRegistryVersion  = 1
 )
 
-type cvOldLockRegistryEntryV1 struct {
+type cvOldLockRegistryEntry struct {
 	MemberID   int    `json:"member_id"`
 	ShareIndex int    `json:"share_index"`
 	PublicKey  string `json:"public_key"`
 }
 
-type cvOldLockRegistryV1 struct {
-	Version        int                        `json:"version"`
-	SID            string                     `json:"sid"`
-	Threshold      int                        `json:"threshold"`
-	GroupPublicKey string                     `json:"group_public_key"`
-	Members        []cvOldLockRegistryEntryV1 `json:"members"`
+type cvOldLockRegistry struct {
+	Version        int                      `json:"version"`
+	SID            string                   `json:"sid"`
+	Threshold      int                      `json:"threshold"`
+	GroupPublicKey string                   `json:"group_public_key"`
+	Members        []cvOldLockRegistryEntry `json:"members"`
 }
 
-type cvOldLockKeyMaterialV1 struct {
+type cvOldLockKeyMaterial struct {
 	members      []int
 	threshold    int
 	groupPublic  bls12381.G2Affine
@@ -42,21 +42,21 @@ type cvOldLockKeyMaterialV1 struct {
 }
 
 func GenerateCVOldLockKeyMaterial(publicDir, secretDir, sid string, members []int, threshold int) error {
-	return cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, sid, members, threshold)
+	return cvGenerateOldLockKeyMaterial(publicDir, secretDir, sid, members, threshold)
 }
 
-func cvOldLockSecretPathV1(dir string, member int) string {
+func cvOldLockSecretPath(dir string, member int) string {
 	return filepath.Join(dir, fmt.Sprintf("old-node-%d-lock.scalar", member))
 }
 
-func cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, sid string, members []int, threshold int) error {
+func cvGenerateOldLockKeyMaterial(publicDir, secretDir, sid string, members []int, threshold int) error {
 	if publicDir == "" || secretDir == "" || sid == "" || threshold <= 0 || threshold > len(members) {
 		return fmt.Errorf("invalid CV old-lock key generation parameters")
 	}
-	if err := cvRequireSeparateKeyDirsV1(publicDir, secretDir); err != nil {
+	if err := cvRequireSeparateKeyDirs(publicDir, secretDir); err != nil {
 		return err
 	}
-	if err := cvValidateDistinctReceiverIDsV1(members, false); err != nil {
+	if err := cvValidateDistinctReceiverIDs(members, false); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(publicDir, 0o755); err != nil {
@@ -68,10 +68,10 @@ func cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, sid string, members []
 	if err := os.Chmod(secretDir, 0o700); err != nil {
 		return err
 	}
-	registryPath := filepath.Join(publicDir, cvOldLockRegistryFilenameV1)
+	registryPath := filepath.Join(publicDir, cvOldLockRegistryFilename)
 	paths := []string{registryPath}
 	for _, member := range members {
-		paths = append(paths, cvOldLockSecretPathV1(secretDir, member))
+		paths = append(paths, cvOldLockSecretPath(secretDir, member))
 	}
 	for _, path := range paths {
 		if _, err := os.Lstat(path); err == nil {
@@ -108,16 +108,16 @@ func cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, sid string, members []
 	var groupPublic bls12381.G2Affine
 	groupPublic.ScalarMultiplication(&genG2, coefficients[0].BigInt(new(big.Int)))
 	groupBytes := groupPublic.Bytes()
-	registry := cvOldLockRegistryV1{
-		Version: cvOldLockRegistryVersionV1, SID: sid, Threshold: threshold,
+	registry := cvOldLockRegistry{
+		Version: cvOldLockRegistryVersion, SID: sid, Threshold: threshold,
 		GroupPublicKey: hex.EncodeToString(groupBytes[:]),
-		Members:        make([]cvOldLockRegistryEntryV1, len(members)),
+		Members:        make([]cvOldLockRegistryEntry, len(members)),
 	}
 	for i, member := range members {
 		var publicShare bls12381.G2Affine
 		publicShare.ScalarMultiplication(&genG2, shares[i].BigInt(new(big.Int)))
 		encoded := publicShare.Bytes()
-		registry.Members[i] = cvOldLockRegistryEntryV1{
+		registry.Members[i] = cvOldLockRegistryEntry{
 			MemberID: member, ShareIndex: i + 1, PublicKey: hex.EncodeToString(encoded[:]),
 		}
 	}
@@ -134,43 +134,43 @@ func cvGenerateOldLockKeyMaterialV1(publicDir, secretDir, sid string, members []
 	}
 	for i, member := range members {
 		encoded := shares[i].Bytes()
-		path := cvOldLockSecretPathV1(secretDir, member)
-		if err := cvWriteExclusiveKeyFileV1(path, encoded[:], 0o600); err != nil {
+		path := cvOldLockSecretPath(secretDir, member)
+		if err := cvWriteExclusiveKeyFile(path, encoded[:], 0o600); err != nil {
 			cleanup()
 			return err
 		}
 		created = append(created, path)
 	}
-	if err := cvWriteExclusiveKeyFileV1(registryPath, raw, 0o644); err != nil {
+	if err := cvWriteExclusiveKeyFile(registryPath, raw, 0o644); err != nil {
 		cleanup()
 		return err
 	}
 	return nil
 }
 
-func cvLoadOldLockKeyMaterialV1(
+func cvLoadOldLockKeyMaterial(
 	publicDir, secretDir, sid string,
 	expectedMembers []int,
 	threshold int,
 	localMembers []int,
-) (*cvOldLockKeyMaterialV1, error) {
+) (*cvOldLockKeyMaterial, error) {
 	if publicDir == "" || secretDir == "" || sid == "" || threshold <= 0 || threshold > len(expectedMembers) {
 		return nil, fmt.Errorf("invalid CV old-lock key loading parameters")
 	}
-	if err := cvRequireSeparateKeyDirsV1(publicDir, secretDir); err != nil {
+	if err := cvRequireSeparateKeyDirs(publicDir, secretDir); err != nil {
 		return nil, err
 	}
-	if err := cvValidateDistinctReceiverIDsV1(expectedMembers, false); err != nil {
+	if err := cvValidateDistinctReceiverIDs(expectedMembers, false); err != nil {
 		return nil, err
 	}
-	if err := cvValidateDistinctReceiverIDsV1(localMembers, false); err != nil {
+	if err := cvValidateDistinctReceiverIDs(localMembers, false); err != nil {
 		return nil, err
 	}
-	raw, err := cvReadBoundedRegularFileV1(filepath.Join(publicDir, cvOldLockRegistryFilenameV1), cvMaxReceiverRegistryBytesV1)
+	raw, err := cvReadBoundedRegularFile(filepath.Join(publicDir, cvOldLockRegistryFilename), cvMaxReceiverRegistryBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read CV old-lock registry: %w", err)
 	}
-	var registry cvOldLockRegistryV1
+	var registry cvOldLockRegistry
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&registry); err != nil {
@@ -179,15 +179,15 @@ func cvLoadOldLockKeyMaterialV1(
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("invalid CV old-lock registry suffix")
 	}
-	if registry.Version != cvOldLockRegistryVersionV1 || registry.SID != sid ||
+	if registry.Version != cvOldLockRegistryVersion || registry.SID != sid ||
 		registry.Threshold != threshold || len(registry.Members) != len(expectedMembers) {
 		return nil, fmt.Errorf("CV old-lock registry context mismatch")
 	}
-	groupPublic, err := cvDecodeCanonicalG2V1(registry.GroupPublicKey)
+	groupPublic, err := cvDecodeCanonicalG2(registry.GroupPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV old-lock group public key: %w", err)
 	}
-	material := &cvOldLockKeyMaterialV1{
+	material := &cvOldLockKeyMaterial{
 		members: append([]int(nil), expectedMembers...), threshold: threshold,
 		groupPublic: groupPublic, publicShares: make([]bls12381.G2Affine, len(expectedMembers)),
 		localShares: make(map[int]fr.Element, len(localMembers)),
@@ -197,7 +197,7 @@ func cvLoadOldLockKeyMaterialV1(
 		if entry.MemberID != expectedMembers[i] || entry.ShareIndex != i+1 {
 			return nil, fmt.Errorf("CV old-lock registry order/index mismatch")
 		}
-		publicShare, err := cvDecodeCanonicalG2V1(entry.PublicKey)
+		publicShare, err := cvDecodeCanonicalG2(entry.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("invalid CV old-lock public share %d: %w", i+1, err)
 		}
@@ -210,12 +210,12 @@ func cvLoadOldLockKeyMaterialV1(
 		baseIndices[i] = i + 1
 		basePoints[i] = material.publicShares[i]
 	}
-	constant, err := cvInterpolateG2AtV1(baseIndices, basePoints, 0)
+	constant, err := cvInterpolateG2At(baseIndices, basePoints, 0)
 	if err != nil || !constant.Equal(&material.groupPublic) {
 		return nil, fmt.Errorf("CV old-lock group key is inconsistent with public shares")
 	}
 	for i := threshold; i < len(material.publicShares); i++ {
-		expected, err := cvInterpolateG2AtV1(baseIndices, basePoints, i+1)
+		expected, err := cvInterpolateG2At(baseIndices, basePoints, i+1)
 		if err != nil || !expected.Equal(&material.publicShares[i]) {
 			return nil, fmt.Errorf("CV old-lock public shares are not a degree-%d polynomial", threshold-1)
 		}
@@ -225,7 +225,7 @@ func cvLoadOldLockKeyMaterialV1(
 		if !ok {
 			return nil, fmt.Errorf("local old-lock member %d is outside registry", member)
 		}
-		encoded, err := cvReadReceiverSecretV1(cvOldLockSecretPathV1(secretDir, member))
+		encoded, err := cvReadReceiverSecret(cvOldLockSecretPath(secretDir, member))
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +243,7 @@ func cvLoadOldLockKeyMaterialV1(
 	return material, nil
 }
 
-func cvDecodeCanonicalG2V1(encodedHex string) (bls12381.G2Affine, error) {
+func cvDecodeCanonicalG2(encodedHex string) (bls12381.G2Affine, error) {
 	encoded, err := hex.DecodeString(encodedHex)
 	if err != nil || len(encoded) != bls12381.SizeOfG2AffineCompressed || hex.EncodeToString(encoded) != encodedHex {
 		return bls12381.G2Affine{}, fmt.Errorf("invalid canonical G2 encoding")
@@ -256,7 +256,7 @@ func cvDecodeCanonicalG2V1(encodedHex string) (bls12381.G2Affine, error) {
 	return point, nil
 }
 
-func cvInterpolateG2AtV1(indices []int, points []bls12381.G2Affine, target int) (bls12381.G2Affine, error) {
+func cvInterpolateG2At(indices []int, points []bls12381.G2Affine, target int) (bls12381.G2Affine, error) {
 	if len(indices) == 0 || len(indices) != len(points) {
 		return bls12381.G2Affine{}, fmt.Errorf("invalid G2 interpolation input")
 	}

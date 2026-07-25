@@ -72,7 +72,7 @@ type Config struct {
 	// APVSSProvider is fixed to the materialized CV-sAPVSS experiment path.
 	APVSSProvider string
 	// APVSSFallbackProfile selects the proof carried for receivers outside the
-	// ACK set. compact-batch-v1 additionally requires AllowExperimentalAPVSS.
+	// ACK set. compact-batch additionally requires AllowExperimentalAPVSS.
 	APVSSFallbackProfile string
 	// AllowExperimentalAPVSS is an explicit benchmark-only admission switch for
 	// proof profiles that have not passed the production cryptographic gate.
@@ -148,7 +148,7 @@ func validateCVEpochConfig(cfg Config) error {
 	if strings.TrimSpace(c.CVLocalSecretDir) == "" {
 		return errors.New("CV epoch requires a local secret key directory")
 	}
-	if err := cvRequireSeparateKeyDirsV1(c.CVPublicKeyDir, c.CVLocalSecretDir); err != nil {
+	if err := cvRequireSeparateKeyDirs(c.CVPublicKeyDir, c.CVLocalSecretDir); err != nil {
 		return fmt.Errorf("CV epoch requires separate key directories: %w", err)
 	}
 	if len(c.CVLocalReceiverIDs) != 1 {
@@ -160,8 +160,8 @@ func validateCVEpochConfig(cfg Config) error {
 	if strings.TrimSpace(c.ArtifactCacheDir) == "" {
 		return errors.New("CV epoch requires a local artifact store")
 	}
-	if c.APVSSFallbackProfile == apvssFallbackCompactBatchProfileV1 && !c.AllowExperimentalAPVSS {
-		return apvssRequireProductionFallbackBackendV1(c.APVSSFallbackProfile)
+	if c.APVSSFallbackProfile == apvssFallbackCompactBatchProfile && !c.AllowExperimentalAPVSS {
+		return apvssRequireProductionFallbackBackend(c.APVSSFallbackProfile)
 	}
 	if c.APVSSBenchmarkFallbackCount > 0 && !c.AllowExperimentalAPVSS {
 		return errors.New("forced APVSS fallback count requires explicit experimental admission")
@@ -232,7 +232,7 @@ func NormalizeConfig(cfg Config) Config {
 	}
 	out.APVSSProvider = strings.ToLower(strings.TrimSpace(out.APVSSProvider))
 	if out.APVSSFallbackProfile == "" {
-		out.APVSSFallbackProfile = apvssFallbackExactLaneProfileV1
+		out.APVSSFallbackProfile = apvssFallbackExactLaneProfile
 	}
 	out.APVSSFallbackProfile = strings.ToLower(strings.TrimSpace(out.APVSSFallbackProfile))
 	if out.DeriveMode == "" {
@@ -313,7 +313,7 @@ func ValidateConfig(cfg Config) error {
 	if cfg.SendRetryMax <= 0 {
 		return errors.New("invalid send retry max")
 	}
-	if err := apvssRequireFallbackBackendV1(cfg.APVSSFallbackProfile); err != nil {
+	if err := apvssRequireFallbackBackend(cfg.APVSSFallbackProfile); err != nil {
 		return err
 	}
 	if cfg.APVSSBenchmarkFallbackCount < 0 || cfg.APVSSBenchmarkFallbackCount > cfg.FNew {

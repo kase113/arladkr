@@ -390,6 +390,10 @@ func validateAggRLOLock(cfg Config, rlo *AggRLO, strictShares bool) error {
 		return fmt.Errorf("AggLock threshold mismatch")
 	}
 	holders := sortedUnique(rlo.Lock.Holders)
+	if len(holders) == 0 {
+		// Certificate-only AggLocks intentionally omit signer identities.
+		holders = sortedUnique(cfg.OldCommittee)
+	}
 	if len(holders) < rlo.Lock.Threshold {
 		return fmt.Errorf("AggLock holders below threshold")
 	}
@@ -399,7 +403,7 @@ func validateAggRLOLock(cfg Config, rlo *AggRLO, strictShares bool) error {
 		}
 	}
 	lockDigest := digestAggHeaderForLock(rlo.Header)
-	if strictShares {
+	if strictShares && len(rlo.Lock.ShareSignatures) > 0 {
 		validShares := make(map[int][]byte, len(holders))
 		for _, holder := range holders {
 			sig, ok := rlo.Lock.ShareSignatures[holder]
@@ -448,8 +452,7 @@ func digestAggHeaderForLock(h AggHeader) []byte {
 }
 
 func digestAggRLO(r AggRLO) []byte {
-	holders := sortedUnique(r.Lock.Holders)
-	digestParts := make([][]byte, 0, 9+2*len(holders))
+	digestParts := make([][]byte, 0, 12)
 	digestParts = append(digestParts,
 		[]byte("aggrlo"),
 		[]byte(r.Header.SID),
@@ -463,15 +466,7 @@ func digestAggRLO(r AggRLO) []byte {
 		encodeInts(r.Aggregate.Dealers),
 		r.Aggregate.AggregateDigest,
 	)
-	digestParts = append(digestParts,
-		encodeInts(holders),
-		[]byte(fmt.Sprintf("|threshold=%d", r.Lock.Threshold)),
-		r.Lock.Certificate,
-	)
-	for _, holder := range holders {
-		digestParts = append(digestParts, []byte(fmt.Sprintf("|holder=%d", holder)))
-		digestParts = append(digestParts, r.Lock.ShareSignatures[holder])
-	}
+	digestParts = append(digestParts, []byte(fmt.Sprintf("|threshold=%d", r.Lock.Threshold)), r.Lock.Certificate)
 	return hashBytes(digestParts...)
 }
 
@@ -479,8 +474,7 @@ func fingerprintAggRLO(r *AggRLO) []byte {
 	if r == nil {
 		return nil
 	}
-	holders := sortedUnique(r.Lock.Holders)
-	parts := make([][]byte, 0, 16+2*len(holders))
+	parts := make([][]byte, 0, 16)
 	parts = append(parts,
 		[]byte("aggrlo-fingerprint"),
 		[]byte(r.Header.SID),
@@ -494,14 +488,9 @@ func fingerprintAggRLO(r *AggRLO) []byte {
 		encodeInts(r.Aggregate.Dealers),
 		r.Aggregate.AggregateDigest,
 		[]byte(fmt.Sprintf("|lock-threshold=%d", r.Lock.Threshold)),
-		encodeInts(holders),
 		r.Lock.Certificate,
 		r.Digest,
 	)
-	for _, holder := range holders {
-		parts = append(parts, []byte(fmt.Sprintf("|holder=%d", holder)))
-		parts = append(parts, r.Lock.ShareSignatures[holder])
-	}
 	if tx := r.Aggregate.ListTranscript; tx != nil {
 		dealers := sortedUnique(tx.Dealers)
 		parts = append(parts,

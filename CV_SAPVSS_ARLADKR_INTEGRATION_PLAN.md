@@ -33,10 +33,10 @@ physical deletion.
 
 **Tests:** focused cases live in the CV codec, key, component, service, store, router and epoch test files.
 
-- [x] Write `TestCVLeafCodecRoundTripAndRejectsTrailingBytes`; run it and confirm failure because `cvDecodeLeafV1` is missing.
-- [x] Implement bounded vector/scalar readers and `cvDecodeLeafProofV1`, mirroring `cvLeafProofV1CanonicalBytes`; every count is checked against context-derived exact sizes before allocation.
-- [x] Implement `cvDecodeLeafV1(wire, expectedContext)` and finish by re-encoding byte-for-byte plus `cvVerifyLeafV1`.
-- [x] Write receipt round-trip/tamper test; implement `cvDecodeReceiptV1` with canonical re-encoding and aggregate/receiver binding checks.
+- [x] Write `TestCVLeafCodecRoundTripAndRejectsTrailingBytes`; run it and confirm failure because `cvDecodeLeaf` is missing.
+- [x] Implement bounded vector/scalar readers and `cvDecodeLeafProof`, mirroring `cvLeafProofCanonicalBytes`; every count is checked against context-derived exact sizes before allocation.
+- [x] Implement `cvDecodeLeaf(wire, expectedContext)` and finish by re-encoding byte-for-byte plus `cvVerifyLeaf`.
+- [x] Write receipt round-trip/tamper test; implement `cvDecodeReceipt` with canonical re-encoding and aggregate/receiver binding checks.
 - [x] Write key-registry test; implement JSON `version`, ordered `(receiver_id, public_key)` entries, and per-receiver scalar files. Strict-network loading reads only `LocalReceiverIDs`; each scalar must canonically decode and reproduce its registry public key.
 - [x] Add key generation using `crypto/rand`, registry mode `0644`, secret mode `0600`; no new dependency.
 - [x] Generate an independent random old-lock threshold polynomial; publish every verification share but load only the local old-node scalar in strict runtime.
@@ -47,7 +47,7 @@ physical deletion.
 **Protocol messages:** `CV_COMPONENT_INIT`, `CV_COMPONENT_ACK`, `CV_COMPONENT_CERT`, `CV_COMPONENT_GET`, `CV_COMPONENT_LEAF`, `CV_COMPONENT_READY`.
 
 - [x] Write a failing state-machine test showing a node that receives a valid component certificate but missed INIT retrieves the leaf from a certified holder.
-- [x] Add random dealer construction: sample degree-\(f_n\) scalar/blinding coefficients and shared Groth coins, then call the existing `cvReferenceDealV1`.
+- [x] Add random dealer construction: sample degree-\(f_n\) scalar/blinding coefficients and shared Groth coins, then call the existing `cvReferenceDeal`.
 - [x] Dealer broadcasts canonical leaf. A holder decodes and runs `VerifyLeaf`, stores the leaf, and only then signs `RL_LOCK` for a header binding `(sid, epoch, dealer, context digest, leaf digest)`.
 - [x] Dealer collects distinct valid ACKs, recovers an \(n_o-f_o\) component certificate, and broadcasts the descriptor. Missing recipients request the leaf from `Descriptor.Lock.Holders` and verify digest/context/proof before admitting it.
 - [x] Broadcast each certified descriptor and retain the first valid descriptor per dealer in an epoch-local bounded registry.
@@ -61,11 +61,16 @@ The router starts before component dispersal and remains the sole reader until r
 
 ## Task 3: Fresh aggregate dispersal and real ARC shares
 
-**Protocol messages:** `CV_AGG_SHARD`, `CV_ARC_SHARE`.
+**Protocol messages:** `CV_AGG_MANIFEST`, `CV_ARC_SHARE`, `CV_ARC_CERTIFICATE`.
+
+The aggregate path is single-path: `CV_AGG_MANIFEST` carries the aggregate header
+and component-set root. Holders rebuild the aggregate and their deterministic
+fresh shard from the locally cached, certificate-only component descriptors;
+the retired full aggregate-offer wire is not accepted.
 
 - [x] Write a failing test that an ARC share is produced only after the holder has verified and stored its own fresh shard.
-- [x] Derive `nonce = H("ARL-CV-sAPVSS-v1/fresh-nonce", contextDigest, aggregateDigest)`; it is unique to the decided epoch/candidate and makes all honest materializers produce the same RS codeword/root.
-- [x] Run `VerifyLeaf -> Agg -> AVer`, serialize `AggregateV1`, and use existing `(n_o,n_o-2f_o)` RS/Merkle helpers.
+- [x] Derive `nonce = H("ARL-CV-sAPVSS/fresh-nonce", contextDigest, aggregateDigest)`; it is unique to the decided epoch/candidate and makes all honest materializers produce the same RS codeword/root.
+- [x] Run `VerifyLeaf -> Agg -> AVer`, serialize the aggregate transcript, and use existing `(n_o,n_o-2f_o)` RS/Merkle helpers.
 - [ ] Limit materialization to a safe proposer subset. The current implementation lets every process materialize its locally selected candidate; limiting it requires a leader/proposer schedule and RLO help dissemination that preserves liveness for the single AggRLO MVBA.
 - [x] Holder recomputes expected aggregate/root, verifies membership/index, atomically stores the shard in a holder-local directory, signs the common `AggHeader`, and broadcasts one `CV_ARC_SHARE` from its own local identity. Same-key/same-bytes retry is idempotent; same-key/different-bytes is rejected.
 - [x] Verify sender/holder equality, membership, digest, and TBLS share; collect any \(n_o-f_o\) distinct shares and recover the certificate.
@@ -79,7 +84,7 @@ The router starts before component dispersal and remains the sole reader until r
 - [x] Write a failing test where only \(n_o-2f_o\) of the decided ARC holders respond and recovery succeeds without dealer responses.
 - [x] Request the decided root from `AggRLO.Lock.Holders`. A holder responds only if its locally stored shard matches the decided root and holder-to-index mapping.
 - [x] Accept distinct authenticated indices only; verify Merkle branch/root/header before counting.
-- [x] Stop after \(n_o-2f_o\) valid shards, reconstruct with existing RS code, check payload digest and aggregate digest, then canonical-decode `AggregateV1`.
+- [x] Stop after \(n_o-2f_o\) valid shards, reconstruct with existing RS code, check payload digest and aggregate digest, then canonical-decode the aggregate transcript.
 - [x] Broadcast DONE and keep servicing requests until \(n_o-f_o\) DONE notices or context cancellation, preventing early successful nodes from starving peers.
 - [x] Run only recovery tests.
 
@@ -88,7 +93,7 @@ The router starts before component dispersal and remains the sole reader until r
 **Protocol messages:** `CV_RECEIPT`, `CV_RECEIPT_DONE`.
 
 - [x] Write a failing test that two/three valid receipt subsets interpolate the identical threshold public key, while a tampered receipt is rejected.
-- [x] For each local receiver secret call existing `cvDecShareV1`, immediately call `cvVerifyShareV1`, store canonical 32-byte `fr` share, and broadcast canonical receipt.
+- [x] For each local receiver secret call existing `cvDecShare`, immediately call `cvVerifyShare`, store canonical 32-byte `fr` share, and broadcast canonical receipt.
 - [x] Decode and verify every remote receipt against the recovered aggregate; count each receiver once.
 - [x] Interpolate any \(f_n+1\) verified `receipt.publicScalar` values at zero in BLS12-381 G1. Return compressed canonical G1 as `NewPublicKey`; return only locally held scalar shares in `NewShares`.
 - [x] Add canonical receipts and verified count to `EpochResult`; do not hash recovered bytes into a fake key.

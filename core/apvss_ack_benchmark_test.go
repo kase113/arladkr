@@ -4,14 +4,14 @@ import "testing"
 
 func BenchmarkAPVSSFullExactLeafBaselineV1(b *testing.B) {
 	context, leaves := cvBenchmarkFixture(b, 7, 2, 3)
-	proofWire, err := cvLeafProofV1CanonicalBytes(leaves[0].proof)
+	proofWire, err := cvLeafProofCanonicalBytes(leaves[0].proof)
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := cvVerifyLeafV1(&context, leaves[0]); err != nil {
+		if err := cvVerifyLeaf(&context, leaves[0]); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -35,9 +35,9 @@ func benchmarkAPVSSFallbackSetsV1(b *testing.B, run func(*testing.B, []int)) {
 }
 
 func BenchmarkAPVSSPrototypeBuildV1(b *testing.B) {
-	fixture := apvssFixtureV1(b, 7, 2)
+	fixture := apvssFixture(b, 7, 2)
 	benchmarkAPVSSFallbackSetsV1(b, func(b *testing.B, fallback []int) {
-		prototype, err := apvssBuildPrototypeV1(
+		prototype, err := apvssBuildPrototype(
 			&fixture.context,
 			fixture.leaf,
 			fixture.receiverSecrets,
@@ -47,14 +47,14 @@ func BenchmarkAPVSSPrototypeBuildV1(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		proofBytes, err := apvssProofMaterialBytesV1(prototype)
+		proofBytes, err := apvssProofMaterialBytes(prototype)
 		if err != nil {
 			b.Fatal(err)
 		}
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := apvssBuildPrototypeV1(
+			if _, err := apvssBuildPrototype(
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
@@ -69,9 +69,9 @@ func BenchmarkAPVSSPrototypeBuildV1(b *testing.B) {
 }
 
 func BenchmarkAPVSSPrototypeVerifyV1(b *testing.B) {
-	fixture := apvssFixtureV1(b, 7, 2)
+	fixture := apvssFixture(b, 7, 2)
 	benchmarkAPVSSFallbackSetsV1(b, func(b *testing.B, fallback []int) {
-		prototype, err := apvssBuildPrototypeV1(
+		prototype, err := apvssBuildPrototype(
 			&fixture.context,
 			fixture.leaf,
 			fixture.receiverSecrets,
@@ -81,14 +81,14 @@ func BenchmarkAPVSSPrototypeVerifyV1(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		proofBytes, err := apvssProofMaterialBytesV1(prototype)
+		proofBytes, err := apvssProofMaterialBytes(prototype)
 		if err != nil {
 			b.Fatal(err)
 		}
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := apvssVerifyPrototypeV1(&fixture.context, prototype); err != nil {
+			if err := apvssVerifyPrototype(&fixture.context, prototype); err != nil {
 				b.Fatal(err)
 			}
 		}

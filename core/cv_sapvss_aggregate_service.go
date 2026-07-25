@@ -10,106 +10,147 @@ import (
 )
 
 const (
-	cvNetworkAggHeaderDomainV1   = "ARL-CV-sAPVSS-v1/network-aggregate-header"
-	cvFreshShardArtifactDomainV1 = "ARL-CV-sAPVSS-v1/fresh-shard-artifact"
-	cvAggregateOfferDomainV1     = "ARL-CV-sAPVSS-v1/aggregate-offer"
-	cvARCShareDomainV1           = "ARL-CV-sAPVSS-v1/arc-share"
-	cvRecoverGetDomainV1         = "ARL-CV-sAPVSS-v1/recover-get"
+	cvNetworkAggHeaderDomain   = "ARL-CV-sAPVSS/network-aggregate-header"
+	cvFreshShardArtifactDomain = "ARL-CV-sAPVSS/fresh-shard-artifact"
+	cvAggregateOfferDomain     = "ARL-CV-sAPVSS/aggregate-manifest-offer"
+	cvARCShareDomain           = "ARL-CV-sAPVSS/arc-share"
+	cvARCCertificateDomain     = "ARL-CV-sAPVSS/arc-certificate"
+	cvRecoverGetDomain         = "ARL-CV-sAPVSS/recover-get"
+	cvMaxAggregateShards       = 1 << 16
 )
 
-type cvFreshShardArtifactV1 struct {
+type cvFreshShardArtifact struct {
 	headerDigest  []byte
 	nonce         []byte
 	dataShards    int
 	totalShards   int
 	payloadDigest []byte
 	root          []byte
-	shard         cvAggregateShardV1
+	shard         cvAggregateShard
 }
 
-type cvAggregateOfferV1 struct {
+// cvAggregateManifestOffer carries only the aggregate header and compact
+// component references. The receiver reconstructs the aggregate and its own
+// deterministic RS shard from its verified leaf cache.
+type cvAggregateManifestOffer struct {
 	header      AggHeader
-	descriptors []*cvComponentDescriptorV1
-	aggregate   *cvAggregateV1
-	shard       cvFreshShardArtifactV1
+	descriptors []*cvComponentDescriptor
+	root        []byte
 }
 
-type cvARCShareV1 struct {
+func cvComponentManifestRoot(descriptors []*cvComponentDescriptor) ([]byte, error) {
+	if len(descriptors) == 0 {
+		return nil, fmt.Errorf("empty CV-sAPVSS component manifest")
+	}
+	parts := make([][]byte, 0, 1+2*len(descriptors))
+	parts = append(parts, []byte("ARL-CV-sAPVSS/component-manifest-root"))
+	last := -1
+	for _, descriptor := range descriptors {
+		if descriptor == nil || descriptor.dealer <= last || len(descriptor.leafDigest) != 32 {
+			return nil, fmt.Errorf("invalid CV-sAPVSS component manifest entry")
+		}
+		last = descriptor.dealer
+		parts = append(parts, []byte(fmt.Sprintf("|dealer=%d", descriptor.dealer)), descriptor.leafDigest)
+	}
+	return hashBytes(parts...), nil
+}
+
+func cvAggregateManifestOfferCanonicalBytes(offer *cvAggregateManifestOffer) ([]byte, error) {
+	if offer == nil || len(offer.root) != 32 || (len(offer.descriptors) > 0 && len(offer.descriptors) != len(offer.header.Dealers)) {
+		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest offer")
+	}
+	headerWire, err := cvNetworkAggHeaderCanonicalBytes(offer.header)
+	if err != nil {
+		return nil, err
+	}
+	if len(offer.descriptors) > 0 {
+		wantRoot, rootErr := cvComponentManifestRoot(offer.descriptors)
+		if rootErr != nil || !bytes.Equal(wantRoot, offer.root) {
+			return nil, fmt.Errorf("CV-sAPVSS aggregate manifest root mismatch")
+		}
+	}
+	var wire bytes.Buffer
+	_ = cvWriteBytes(&wire, []byte(cvAggregateOfferDomain))
+	_ = cvWriteBytes(&wire, headerWire)
+	_ = cvWriteBytes(&wire, offer.root)
+	return wire.Bytes(), nil
+}
+
+func cvDecodeAggregateManifestOffer(wire []byte, cfg Config) (*cvAggregateManifestOffer, error) {
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(cvAggregateOfferDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvAggregateOfferDomain)) {
+		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest offer domain")
+	}
+	headerWire, err := r.bytes(1 << 20)
+	if err != nil {
+		return nil, err
+	}
+	header, err := cvDecodeNetworkAggHeader(headerWire, cfg)
+	if err != nil {
+		return nil, err
+	}
+	root, err := r.bytes(32)
+	if err != nil || len(root) != 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest root")
+	}
+	if r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest framing")
+	}
+	offer := &cvAggregateManifestOffer{header: header, root: append([]byte(nil), root...)}
+	canonical, err := cvAggregateManifestOfferCanonicalBytes(offer)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical CV-sAPVSS aggregate manifest offer")
+	}
+	return offer, nil
+}
+
+type cvARCShare struct {
 	holder       int
 	headerDigest []byte
 	signature    []byte
 }
 
-type cvVerifiedAggregateOfferTokenV1 struct {
-	headerWire      []byte
-	descriptorWires [][]byte
-	aggregateWire   []byte
+func cvARCCertificateCanonicalBytes(headerDigest, certificate []byte) ([]byte, error) {
+	if len(headerDigest) != 32 || len(certificate) == 0 || len(certificate) > cvMaxComponentSignatureBytes {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS ARC certificate")
+	}
+	var wire bytes.Buffer
+	_ = cvWriteBytes(&wire, []byte(cvARCCertificateDomain))
+	_ = cvWriteBytes(&wire, headerDigest)
+	_ = cvWriteBytes(&wire, certificate)
+	return wire.Bytes(), nil
 }
 
-func cvBuildVerifiedAggregateOfferTokenV1(
-	header AggHeader,
-	descriptors []*cvComponentDescriptorV1,
-	aggregate *cvAggregateV1,
-) (*cvVerifiedAggregateOfferTokenV1, error) {
-	if aggregate == nil || len(descriptors) == 0 || len(descriptors) != len(header.Dealers) ||
-		len(descriptors) != len(aggregate.dealerIDs) || len(descriptors) != len(aggregate.leafDigests) ||
-		!bytes.Equal(header.AggregateDigest, aggregate.digest) {
-		return nil, fmt.Errorf("invalid verified CV-sAPVSS aggregate offer")
+func cvDecodeARCCertificate(wire []byte) ([]byte, []byte, error) {
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(cvARCCertificateDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvARCCertificateDomain)) {
+		return nil, nil, fmt.Errorf("invalid CV-sAPVSS ARC certificate domain")
 	}
-	headerWire, err := cvNetworkAggHeaderV1CanonicalBytes(header)
-	if err != nil {
-		return nil, err
+	headerDigest, err := r.bytes(32)
+	if err != nil || len(headerDigest) != 32 {
+		return nil, nil, fmt.Errorf("invalid CV-sAPVSS ARC certificate digest")
 	}
-	aggregateWire, err := cvAggregateV1CanonicalBytes(aggregate)
-	if err != nil || !bytes.Equal(aggregateWire, aggregate.digestWire) ||
-		!bytes.Equal(aggregate.digest, hashBytes([]byte(cvAggregateV1Domain), aggregateWire)) {
-		return nil, fmt.Errorf("invalid verified CV-sAPVSS aggregate wire")
+	certificate, err := r.bytes(cvMaxComponentSignatureBytes)
+	if err != nil || len(certificate) == 0 || r.reader.Len() != 0 {
+		return nil, nil, fmt.Errorf("invalid CV-sAPVSS ARC certificate")
 	}
-	token := &cvVerifiedAggregateOfferTokenV1{
-		headerWire: append([]byte(nil), headerWire...), aggregateWire: append([]byte(nil), aggregateWire...),
-		descriptorWires: make([][]byte, len(descriptors)),
+	canonical, err := cvARCCertificateCanonicalBytes(headerDigest, certificate)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, nil, fmt.Errorf("non-canonical CV-sAPVSS ARC certificate")
 	}
-	for i, descriptor := range descriptors {
-		if descriptor == nil || descriptor.dealer != header.Dealers[i] ||
-			uint64(descriptor.dealer) != aggregate.dealerIDs[i] ||
-			!bytes.Equal(descriptor.leafDigest, aggregate.leafDigests[i]) {
-			return nil, fmt.Errorf("verified CV-sAPVSS aggregate manifest mismatch")
-		}
-		descriptorWire, encodeErr := cvComponentDescriptorV1CanonicalBytes(descriptor)
-		if encodeErr != nil {
-			return nil, encodeErr
-		}
-		token.descriptorWires[i] = append([]byte(nil), descriptorWire...)
-	}
-	return token, nil
+	return headerDigest, certificate, nil
 }
 
-func (token *cvVerifiedAggregateOfferTokenV1) matches(offer *cvAggregateOfferV1) error {
-	if token == nil || offer == nil {
-		return fmt.Errorf("missing verified CV-sAPVSS aggregate offer token")
-	}
-	candidate, err := cvBuildVerifiedAggregateOfferTokenV1(offer.header, offer.descriptors, offer.aggregate)
-	if err != nil || !bytes.Equal(token.headerWire, candidate.headerWire) ||
-		!bytes.Equal(token.aggregateWire, candidate.aggregateWire) ||
-		len(token.descriptorWires) != len(candidate.descriptorWires) {
-		return fmt.Errorf("CV-sAPVSS aggregate offer does not match verified token")
-	}
-	for i := range token.descriptorWires {
-		if !bytes.Equal(token.descriptorWires[i], candidate.descriptorWires[i]) {
-			return fmt.Errorf("CV-sAPVSS aggregate descriptor does not match verified token")
-		}
-	}
-	return nil
-}
-
-func cvBuildNetworkAggHeaderV1(cfg Config, agg *cvAggregateV1, dispersal *cvAggregateDispersalV1) (AggHeader, error) {
-	if err := cvValidateAggregateErasureDimensionsV1(cfg, dispersal); err != nil {
+func cvBuildNetworkAggHeader(cfg Config, agg *cvAggregateTranscript, dispersal *cvAggregateDispersal) (AggHeader, error) {
+	if err := cvValidateAggregateErasureDimensions(cfg, dispersal); err != nil {
 		return AggHeader{}, err
 	}
-	if err := cvVerifyAggregateDispersalV1(agg, dispersal); err != nil {
+	if err := cvVerifyAggregateDispersal(agg, dispersal); err != nil {
 		return AggHeader{}, err
 	}
-	dealers, err := cvDealerIDsToIntsV1(agg.dealerIDs)
+	dealers, err := cvDealerIDsToInts(agg.dealerIDs)
 	if err != nil {
 		return AggHeader{}, err
 	}
@@ -132,7 +173,7 @@ func cvBuildNetworkAggHeaderV1(cfg Config, agg *cvAggregateV1, dispersal *cvAggr
 	return header, nil
 }
 
-func cvNetworkAggHeaderV1CanonicalBytes(header AggHeader) ([]byte, error) {
+func cvNetworkAggHeaderCanonicalBytes(header AggHeader) ([]byte, error) {
 	if header.SID == "" || header.Epoch < 0 || len(header.Dealers) == 0 ||
 		len(header.AggregateDigest) != 32 || len(header.PayloadDigest) != 32 ||
 		len(header.FreshShardRoot) != 32 || len(header.MetadataHash) != 32 ||
@@ -153,7 +194,7 @@ func cvNetworkAggHeaderV1CanonicalBytes(header AggHeader) ([]byte, error) {
 		return nil, fmt.Errorf("CV-sAPVSS aggregate header metadata mismatch")
 	}
 	var wire bytes.Buffer
-	_ = cvWriteBytes(&wire, []byte(cvNetworkAggHeaderDomainV1))
+	_ = cvWriteBytes(&wire, []byte(cvNetworkAggHeaderDomain))
 	_ = cvWriteBytes(&wire, []byte(header.SID))
 	cvWriteUint64(&wire, uint64(header.Epoch))
 	_ = cvWriteUint32(&wire, len(header.Dealers))
@@ -166,13 +207,13 @@ func cvNetworkAggHeaderV1CanonicalBytes(header AggHeader) ([]byte, error) {
 	return wire.Bytes(), nil
 }
 
-func cvDecodeNetworkAggHeaderV1(wire []byte, cfg Config) (AggHeader, error) {
+func cvDecodeNetworkAggHeader(wire []byte, cfg Config) (AggHeader, error) {
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvNetworkAggHeaderDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvNetworkAggHeaderDomainV1)) {
+	domain, err := r.bytes(len(cvNetworkAggHeaderDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvNetworkAggHeaderDomain)) {
 		return AggHeader{}, fmt.Errorf("invalid CV-sAPVSS aggregate header domain")
 	}
-	sid, err := r.bytes(cvMaxNetworkEnvelopeSIDBytesV1)
+	sid, err := r.bytes(cvMaxNetworkEnvelopeSIDBytes)
 	if err != nil || string(sid) != cfg.SID {
 		return AggHeader{}, fmt.Errorf("CV-sAPVSS aggregate header SID mismatch")
 	}
@@ -208,24 +249,24 @@ func cvDecodeNetworkAggHeaderV1(wire []byte, cfg Config) (AggHeader, error) {
 	}
 	header := AggHeader{SID: string(sid), Epoch: int(epoch), Dealers: dealers,
 		AggregateDigest: fields[0], PayloadDigest: fields[1], FreshShardRoot: fields[2], MetadataHash: fields[3]}
-	canonical, err := cvNetworkAggHeaderV1CanonicalBytes(header)
+	canonical, err := cvNetworkAggHeaderCanonicalBytes(header)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return AggHeader{}, fmt.Errorf("non-canonical CV-sAPVSS aggregate header")
 	}
 	return header, nil
 }
 
-func cvFreshShardArtifactV1CanonicalBytes(artifact *cvFreshShardArtifactV1) ([]byte, error) {
+func cvFreshShardArtifactCanonicalBytes(artifact *cvFreshShardArtifact) ([]byte, error) {
 	if artifact == nil || len(artifact.headerDigest) != 32 || len(artifact.nonce) != 32 ||
 		artifact.dataShards <= 0 || artifact.totalShards < artifact.dataShards ||
-		artifact.totalShards > cvMaxComponentHoldersV1 || len(artifact.payloadDigest) != 32 ||
+		artifact.totalShards > cvMaxAggregateShards || len(artifact.payloadDigest) != 32 ||
 		len(artifact.root) != 32 || artifact.shard.index < 0 ||
 		artifact.shard.index >= artifact.totalShards || len(artifact.shard.payload) == 0 ||
-		len(artifact.shard.payload) > cvMaxNetworkPayloadBytesV1 {
+		len(artifact.shard.payload) > cvMaxNetworkPayloadBytes {
 		return nil, fmt.Errorf("invalid CV-sAPVSS fresh shard artifact")
 	}
 	var wire bytes.Buffer
-	_ = cvWriteBytes(&wire, []byte(cvFreshShardArtifactDomainV1))
+	_ = cvWriteBytes(&wire, []byte(cvFreshShardArtifactDomain))
 	for _, field := range [][]byte{artifact.headerDigest, artifact.nonce, artifact.payloadDigest, artifact.root} {
 		_ = cvWriteBytes(&wire, field)
 	}
@@ -243,10 +284,10 @@ func cvFreshShardArtifactV1CanonicalBytes(artifact *cvFreshShardArtifactV1) ([]b
 	return wire.Bytes(), nil
 }
 
-func cvDecodeFreshShardArtifactV1(wire []byte, cfg Config, header AggHeader) (*cvFreshShardArtifactV1, error) {
+func cvDecodeFreshShardArtifact(wire []byte, cfg Config, header AggHeader) (*cvFreshShardArtifact, error) {
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvFreshShardArtifactDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvFreshShardArtifactDomainV1)) {
+	domain, err := r.bytes(len(cvFreshShardArtifactDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvFreshShardArtifactDomain)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS fresh shard artifact domain")
 	}
 	fields := make([][]byte, 4)
@@ -268,7 +309,7 @@ func cvDecodeFreshShardArtifactV1(wire []byte, cfg Config, header AggHeader) (*c
 	if err != nil {
 		return nil, err
 	}
-	payload, err := r.bytes(cvMaxNetworkPayloadBytesV1)
+	payload, err := r.bytes(cvMaxNetworkPayloadBytes)
 	if err != nil || len(payload) == 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS fresh shard payload")
 	}
@@ -286,20 +327,20 @@ func cvDecodeFreshShardArtifactV1(wire []byte, cfg Config, header AggHeader) (*c
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV-sAPVSS fresh shard artifact bytes")
 	}
-	artifact := &cvFreshShardArtifactV1{headerDigest: fields[0], nonce: fields[1],
+	artifact := &cvFreshShardArtifact{headerDigest: fields[0], nonce: fields[1],
 		payloadDigest: fields[2], root: fields[3], dataShards: dataShards,
-		totalShards: totalShards, shard: cvAggregateShardV1{index: index, payload: payload, siblings: siblings}}
-	if err := cvVerifyFreshShardArtifactV1(cfg, header, artifact); err != nil {
+		totalShards: totalShards, shard: cvAggregateShard{index: index, payload: payload, siblings: siblings}}
+	if err := cvVerifyFreshShardArtifact(cfg, header, artifact); err != nil {
 		return nil, err
 	}
-	canonical, err := cvFreshShardArtifactV1CanonicalBytes(artifact)
+	canonical, err := cvFreshShardArtifactCanonicalBytes(artifact)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS fresh shard artifact")
 	}
 	return artifact, nil
 }
 
-func cvVerifyFreshShardArtifactV1(cfg Config, header AggHeader, artifact *cvFreshShardArtifactV1) error {
+func cvVerifyFreshShardArtifact(cfg Config, header AggHeader, artifact *cvFreshShardArtifact) error {
 	n := len(sortedUnique(cfg.OldCommittee))
 	if artifact == nil || artifact.totalShards != n || artifact.dataShards != n-2*cfg.FOld ||
 		!bytes.Equal(artifact.headerDigest, digestAggHeaderForLock(header)) ||
@@ -307,99 +348,14 @@ func cvVerifyFreshShardArtifactV1(cfg Config, header AggHeader, artifact *cvFres
 		!bytes.Equal(artifact.root, header.FreshShardRoot) {
 		return fmt.Errorf("CV-sAPVSS fresh shard does not match aggregate header")
 	}
-	dispersal := &cvAggregateDispersalV1{nonce: artifact.nonce, dataShards: artifact.dataShards,
-		payloadDigest: artifact.payloadDigest, root: artifact.root, shards: make([]cvAggregateShardV1, n)}
+	dispersal := &cvAggregateDispersal{nonce: artifact.nonce, dataShards: artifact.dataShards,
+		payloadDigest: artifact.payloadDigest, root: artifact.root, shards: make([]cvAggregateShard, n)}
 	dispersal.shards[artifact.shard.index] = artifact.shard
-	return cvVerifyAggregateShardV1(dispersal, &artifact.shard)
+	return cvVerifyAggregateShard(dispersal, &artifact.shard)
 }
 
-func cvAggregateOfferV1CanonicalBytes(offer *cvAggregateOfferV1) ([]byte, error) {
-	if offer == nil || offer.aggregate == nil || len(offer.descriptors) == 0 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate offer")
-	}
-	headerWire, err := cvNetworkAggHeaderV1CanonicalBytes(offer.header)
-	if err != nil {
-		return nil, err
-	}
-	aggregateWire, err := cvAggregateV1CanonicalBytes(offer.aggregate)
-	if err != nil {
-		return nil, err
-	}
-	shardWire, err := cvFreshShardArtifactV1CanonicalBytes(&offer.shard)
-	if err != nil {
-		return nil, err
-	}
-	var wire bytes.Buffer
-	_ = cvWriteBytes(&wire, []byte(cvAggregateOfferDomainV1))
-	_ = cvWriteBytes(&wire, headerWire)
-	_ = cvWriteUint32(&wire, len(offer.descriptors))
-	for _, descriptor := range offer.descriptors {
-		descriptorWire, encodeErr := cvComponentDescriptorV1CanonicalBytes(descriptor)
-		if encodeErr != nil {
-			return nil, encodeErr
-		}
-		_ = cvWriteBytes(&wire, descriptorWire)
-	}
-	_ = cvWriteBytes(&wire, aggregateWire)
-	_ = cvWriteBytes(&wire, shardWire)
-	return wire.Bytes(), nil
-}
-
-func cvDecodeAggregateOfferV1(wire []byte, cfg Config) (*cvAggregateOfferV1, error) {
-	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvAggregateOfferDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvAggregateOfferDomainV1)) {
-		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate offer domain")
-	}
-	headerWire, err := r.bytes(1 << 20)
-	if err != nil {
-		return nil, err
-	}
-	header, err := cvDecodeNetworkAggHeaderV1(headerWire, cfg)
-	if err != nil {
-		return nil, err
-	}
-	count, err := r.uint32()
-	if err != nil || count != cfg.FOld+1 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate offer descriptor count")
-	}
-	descriptors := make([]*cvComponentDescriptorV1, count)
-	for i := range descriptors {
-		descriptorWire, readErr := r.bytes(cvMaxCanonicalFieldBytes)
-		if readErr != nil {
-			return nil, readErr
-		}
-		descriptors[i], readErr = cvDecodeAndValidateComponentDescriptorV1(cfg, descriptorWire)
-		if readErr != nil || descriptors[i].dealer != header.Dealers[i] {
-			return nil, fmt.Errorf("CV-sAPVSS aggregate offer descriptor mismatch")
-		}
-	}
-	aggregateWire, err := r.bytes(cvMaxCanonicalFieldBytes)
-	if err != nil {
-		return nil, err
-	}
-	aggregate, err := cvDecodeAggregateV1(aggregateWire)
-	if err != nil || !bytes.Equal(aggregate.digest, header.AggregateDigest) {
-		return nil, fmt.Errorf("CV-sAPVSS aggregate offer payload mismatch")
-	}
-	shardWire, err := r.bytes(cvMaxNetworkPayloadBytesV1)
-	if err != nil || r.reader.Len() != 0 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate offer framing")
-	}
-	shard, err := cvDecodeFreshShardArtifactV1(shardWire, cfg, header)
-	if err != nil {
-		return nil, err
-	}
-	offer := &cvAggregateOfferV1{header: header, descriptors: descriptors, aggregate: aggregate, shard: *shard}
-	canonical, err := cvAggregateOfferV1CanonicalBytes(offer)
-	if err != nil || !bytes.Equal(canonical, wire) {
-		return nil, fmt.Errorf("non-canonical CV-sAPVSS aggregate offer")
-	}
-	return offer, nil
-}
-
-func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, descriptors []*cvComponentDescriptorV1) (*cvMaterializedAggregateV1, error) {
-	metrics := cvAggregateMaterializeMetricsV1{}
+func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descriptors []*cvComponentDescriptor) (*cvMaterializedAggregate, error) {
+	metrics := cvAggregateMaterializeMetrics{}
 	want := s.cfg.FOld + 1
 	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
 	if ctx == nil || len(descriptors) < want || len(descriptors) > ready {
@@ -414,19 +370,19 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 			s.aggregateBuildMu.Unlock()
 		}
 	}()
-	selectedDescriptors := make([]*cvComponentDescriptorV1, 0, want)
-	leaves := make([]*cvVerifiedLeafV1, 0, want)
+	selectedDescriptors := make([]*cvComponentDescriptor, 0, want)
+	leaves := make([]*cvVerifiedLeaf, 0, want)
 	phaseStart = time.Now()
 	lastDealer := -1
 	for _, descriptor := range descriptors {
-		if descriptor == nil || descriptor.dealer <= lastDealer || cvValidateComponentDescriptorV1(s.cfg, descriptor) != nil {
+		if descriptor == nil || descriptor.dealer <= lastDealer || cvValidateNetworkComponentDescriptor(s.cfg, descriptor) != nil {
 			return nil, fmt.Errorf("invalid CV-sAPVSS materializer descriptor set")
 		}
 		lastDealer = descriptor.dealer
 	}
 	type loadResult struct {
 		index int
-		leaf  *cvVerifiedLeafV1
+		leaf  *cvVerifiedLeaf
 	}
 	for cursor := 0; len(leaves) < want && cursor < len(descriptors); {
 		batchSize := want - len(leaves)
@@ -442,7 +398,7 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 				results <- loadResult{index: index, leaf: leaf}
 			}(index)
 		}
-		loaded := make([]*cvVerifiedLeafV1, end-cursor)
+		loaded := make([]*cvVerifiedLeaf, end-cursor)
 		for range loaded {
 			result := <-results
 			loaded[result.index-cursor] = result.leaf
@@ -461,49 +417,43 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 	}
 	metrics.leafLoad = time.Since(phaseStart)
 	phaseStart = time.Now()
-	agg, err := cvAggVerifiedV1(s.leafCtx, leaves)
+	agg, err := cvAggVerified(s.leafCtx, leaves)
 	if err != nil {
 		return nil, err
 	}
 	metrics.aggregate = time.Since(phaseStart)
 	n := len(s.cfg.OldCommittee)
 	phaseStart = time.Now()
-	dispersal, err := cvDisperseAggregateV1(agg, n, n-2*s.cfg.FOld)
+	dispersal, err := cvDisperseAggregate(agg, n, n-2*s.cfg.FOld)
 	if err != nil {
 		return nil, err
 	}
 	metrics.rsDisperse = time.Since(phaseStart)
 	phaseStart = time.Now()
-	header, err := cvBuildNetworkAggHeaderV1(s.cfg, agg, dispersal)
+	header, err := cvBuildNetworkAggHeader(s.cfg, agg, dispersal)
 	if err != nil {
 		return nil, err
 	}
 	headerDigest := digestAggHeaderForLock(header)
 	key := fmt.Sprintf("%x", headerDigest)
-	token, err := cvBuildVerifiedAggregateOfferTokenV1(header, selectedDescriptors, agg)
-	if err != nil {
-		return nil, err
-	}
 	s.mu.Lock()
-	if existing := s.verifiedAggregateOffers[key]; existing != nil {
-		if matchErr := existing.matches(&cvAggregateOfferV1{
-			header: header, descriptors: selectedDescriptors, aggregate: agg,
-		}); matchErr != nil {
+	if existing := s.verifiedAggregates[key]; existing != nil {
+		if !bytes.Equal(existing.digest, agg.digest) {
 			s.mu.Unlock()
-			return nil, fmt.Errorf("conflicting verified CV-sAPVSS aggregate offer")
+			return nil, fmt.Errorf("conflicting verified CV-sAPVSS aggregate cache entry")
 		}
 	} else {
-		if len(s.verifiedAggregateOffers) >= ready {
+		if len(s.verifiedAggregates) >= ready {
 			s.mu.Unlock()
-			return nil, fmt.Errorf("verified CV-sAPVSS aggregate offer cache is full")
+			return nil, fmt.Errorf("verified CV-sAPVSS aggregate cache is full")
 		}
-		s.verifiedAggregateOffers[key] = token
+		s.verifiedAggregates[key] = agg
 	}
 	s.mu.Unlock()
 	metrics.headerToken = time.Since(phaseStart)
 	s.aggregateBuildMu.Unlock()
 	aggregateBuildLocked = false
-	pending := &cvPendingARCShareV1{values: make(chan cvARCShareV1, n)}
+	pending := &cvPendingARCShare{values: make(chan cvARCShare, n)}
 	s.mu.Lock()
 	if _, exists := s.pendingARCs[key]; exists {
 		s.mu.Unlock()
@@ -517,22 +467,42 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 		s.mu.Unlock()
 	}()
 	oldOrder := sortedUnique(s.cfg.OldCommittee)
+	manifestRoot, err := cvComponentManifestRoot(selectedDescriptors)
+	if err != nil {
+		return nil, err
+	}
+	offerWire, err := cvAggregateManifestOfferCanonicalBytes(&cvAggregateManifestOffer{
+		header: header, descriptors: selectedDescriptors, root: manifestRoot,
+	})
+	if err != nil {
+		return nil, err
+	}
 	s.cfg.runtime.setCommPhase("aggregate_disperse")
 	phaseStart = time.Now()
 	sent := 0
-	for index, holder := range oldOrder {
-		artifact := cvFreshShardArtifactV1{headerDigest: append([]byte(nil), headerDigest...),
+	for _, holder := range oldOrder {
+		if holder == s.localNode {
+			// The collector materializes its own shard below.
+			sent++
+			continue
+		}
+		if s.send(holder, cvTagAggregateManifest, offerWire) == nil {
+			sent++
+		}
+	}
+	// The collector is itself an old-committee holder. Some transports do not
+	// loop a self-directed offer through the router, so record its verified
+	// shard/share locally instead of waiting for a self-message.
+	if selfIndex := sort.SearchInts(oldOrder, s.localNode); selfIndex < len(oldOrder) && oldOrder[selfIndex] == s.localNode {
+		selfArtifact := cvFreshShardArtifact{headerDigest: append([]byte(nil), headerDigest...),
 			nonce: append([]byte(nil), dispersal.nonce...), dataShards: dispersal.dataShards,
 			totalShards: len(dispersal.shards), payloadDigest: append([]byte(nil), dispersal.payloadDigest...),
-			root: append([]byte(nil), dispersal.root...), shard: dispersal.shards[index]}
-		offerWire, encodeErr := cvAggregateOfferV1CanonicalBytes(&cvAggregateOfferV1{
-			header: header, descriptors: selectedDescriptors, aggregate: agg, shard: artifact,
-		})
-		if encodeErr != nil {
-			return nil, encodeErr
+			root: append([]byte(nil), dispersal.root...), shard: dispersal.shards[selfIndex]}
+		if selfWire, selfErr := cvFreshShardArtifactCanonicalBytes(&selfArtifact); selfErr == nil {
+			_ = s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, headerDigest, s.localNode, selfWire)
 		}
-		if s.send(holder, cvTagAggregateShardV1, offerWire) == nil {
-			sent++
+		if selfSig, selfErr := s.cfg.runtime.lockSigner.SignShare(s.localNode, "RL_AGG_LOCK", headerDigest); selfErr == nil {
+			pending.values <- cvARCShare{holder: s.localNode, headerDigest: append([]byte(nil), headerDigest...), signature: selfSig}
 		}
 	}
 	threshold := n - s.cfg.FOld
@@ -566,6 +536,11 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 	if err != nil {
 		return nil, err
 	}
+	if certificateWire, certErr := cvARCCertificateCanonicalBytes(headerDigest, certificate); certErr == nil {
+		for _, node := range oldOrder {
+			_ = s.send(node, cvTagARCCertificate, certificateWire)
+		}
+	}
 	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold, Holders: holders,
 		ShareSignatures: shares, Certificate: certificate}, Aggregate: APVSSAggregate{
 		Provider: "cv-sapvss", Dealers: append([]int(nil), header.Dealers...),
@@ -579,119 +554,154 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 		return nil, err
 	}
 	metrics.certificate = time.Since(phaseStart)
-	return &cvMaterializedAggregateV1{
+	return &cvMaterializedAggregate{
 		rlo: rlo, aggregate: agg, dispersal: dispersal, metrics: metrics,
 	}, nil
 }
 
-func (s *cvComponentServiceV1) handleAggregateOffer(msg Message) {
+func (s *cvComponentService) handleAggregateOffer(msg Message) {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.aggregateOffers.Add(1)
 	}
 	go func() {
-		offer, err := cvDecodeAggregateOfferV1(msg.Body, s.cfg)
+		manifest, err := cvDecodeAggregateManifestOffer(msg.Body, s.cfg)
 		if err != nil {
 			return
 		}
-		key := fmt.Sprintf("%x", offer.shard.headerDigest)
-		s.mu.Lock()
-		if prior, exists := s.candidateByMaterializer[msg.From]; exists && prior != key {
-			s.mu.Unlock()
-			return
-		}
-		s.candidateByMaterializer[msg.From] = key
-		if _, exists := s.processingOffers[key]; exists {
-			s.mu.Unlock()
-			return
-		}
-		s.processingOffers[key] = struct{}{}
-		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			delete(s.processingOffers, key)
-			s.mu.Unlock()
-		}()
-		oldOrder := sortedUnique(s.cfg.OldCommittee)
-		index := sort.SearchInts(oldOrder, s.localNode)
-		if index >= len(oldOrder) || oldOrder[index] != s.localNode || offer.shard.shard.index != index {
-			return
-		}
-		if err := s.verifyAggregateOfferForARC(offer); err != nil {
-			return
-		}
-		shardWire, err := cvFreshShardArtifactV1CanonicalBytes(&offer.shard)
-		if err != nil || s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, offer.shard.headerDigest, s.localNode, shardWire) != nil {
-			return
-		}
-		sig, err := s.cfg.runtime.lockSigner.SignShare(s.localNode, "RL_AGG_LOCK", offer.shard.headerDigest)
-		if err != nil {
-			return
-		}
-		shareWire, err := cvARCShareV1CanonicalBytes(&cvARCShareV1{
-			holder: s.localNode, headerDigest: offer.shard.headerDigest, signature: sig,
-		})
-		if err == nil {
-			// Multiple materializers produce the same deterministic header. Every
-			// local collector must observe the holder's share, not only the sender
-			// of the first offer that reached this holder.
-			for _, node := range sortedUnique(s.cfg.OldCommittee) {
-				_ = s.send(node, cvTagARCShareV1, shareWire)
-			}
-		}
+		s.handleAggregateManifestOffer(msg, manifest)
 	}()
 }
 
-func (s *cvComponentServiceV1) verifyAggregateOfferForARC(offer *cvAggregateOfferV1) error {
+func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cvAggregateManifestOffer) {
 	if offer == nil {
-		return fmt.Errorf("nil CV-sAPVSS aggregate offer")
+		return
 	}
-	s.aggregateBuildMu.Lock()
-	defer s.aggregateBuildMu.Unlock()
 	key := fmt.Sprintf("%x", digestAggHeaderForLock(offer.header))
+	processingKey := fmt.Sprintf("%s/%d", key, msg.From)
 	s.mu.Lock()
-	cached := s.verifiedAggregateOffers[key]
+	if prior, exists := s.candidateByMaterializer[msg.From]; exists && prior != key {
+		s.mu.Unlock()
+		return
+	}
+	s.candidateByMaterializer[msg.From] = key
+	if _, exists := s.processingOffers[processingKey]; exists {
+		s.mu.Unlock()
+		return
+	}
+	s.processingOffers[processingKey] = struct{}{}
 	s.mu.Unlock()
-	if cached != nil {
-		if err := cached.matches(offer); err != nil {
-			return err
-		}
-		if cvPerfCountersEnabled {
-			cvPerfCounters.verifiedAggregateOfferCacheHits.Add(1)
-		}
-		return nil
+	defer func() {
+		s.mu.Lock()
+		delete(s.processingOffers, processingKey)
+		s.mu.Unlock()
+	}()
+	oldOrder := sortedUnique(s.cfg.OldCommittee)
+	index := sort.SearchInts(oldOrder, s.localNode)
+	if index >= len(oldOrder) || oldOrder[index] != s.localNode {
+		return
 	}
-	if cvPerfCountersEnabled {
-		cvPerfCounters.verifiedAggregateOfferCacheMiss.Add(1)
+	if err := s.resolveAggregateManifestDescriptors(offer); err != nil {
+		return
 	}
-	leaves := make([]*cvVerifiedLeafV1, len(offer.descriptors))
-	for i, descriptor := range offer.descriptors {
-		leaf, err := s.loadOrRetrieveComponent(s.ctx, descriptor)
-		if err != nil {
-			return err
-		}
-		leaves[i] = leaf
-	}
-	if cvPerfCountersEnabled {
-		cvPerfCounters.aggregateOfferAVers.Add(1)
-	}
-	if err := cvAVerVerifiedV1(s.leafCtx, offer.aggregate, leaves); err != nil {
-		return err
-	}
-	token, err := cvBuildVerifiedAggregateOfferTokenV1(offer.header, offer.descriptors, offer.aggregate)
+	agg, dispersal, err := s.verifyAggregateManifestForARC(offer)
 	if err != nil {
-		return err
+		return
+	}
+	headerDigest := digestAggHeaderForLock(offer.header)
+	artifact := cvFreshShardArtifact{headerDigest: headerDigest,
+		nonce: append([]byte(nil), dispersal.nonce...), dataShards: dispersal.dataShards,
+		totalShards: len(dispersal.shards), payloadDigest: append([]byte(nil), dispersal.payloadDigest...),
+		root: append([]byte(nil), dispersal.root...), shard: dispersal.shards[index]}
+	if _, err := cvFreshShardArtifactCanonicalBytes(&artifact); err != nil {
+		return
+	}
+	shardWire, err := cvFreshShardArtifactCanonicalBytes(&artifact)
+	if err != nil || s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, artifact.headerDigest, s.localNode, shardWire) != nil {
+		return
+	}
+	_ = agg // aggregate verification is included in verifyAggregateManifestForARC.
+	sig, err := s.cfg.runtime.lockSigner.SignShare(s.localNode, "RL_AGG_LOCK", artifact.headerDigest)
+	if err != nil {
+		return
+	}
+	shareWire, err := cvARCShareCanonicalBytes(&cvARCShare{holder: s.localNode, headerDigest: artifact.headerDigest, signature: sig})
+	if err == nil {
+		_ = s.send(msg.From, cvTagARCShare, shareWire)
+	}
+}
+
+func (s *cvComponentService) resolveAggregateManifestDescriptors(offer *cvAggregateManifestOffer) error {
+	if offer == nil || len(offer.header.Dealers) == 0 || len(offer.root) != 32 {
+		return fmt.Errorf("invalid CV-sAPVSS aggregate manifest reference")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.verifiedAggregateOffers) >= len(s.cfg.OldCommittee)-s.cfg.FOld {
-		return fmt.Errorf("verified CV-sAPVSS aggregate offer cache is full")
+	descriptors := make([]*cvComponentDescriptor, len(offer.header.Dealers))
+	for i, dealer := range offer.header.Dealers {
+		descriptor := s.componentDescriptors[dealer]
+		if descriptor == nil {
+			s.mu.Unlock()
+			return fmt.Errorf("missing cached component descriptor for dealer=%d", dealer)
+		}
+		descriptors[i] = descriptor
 	}
-	s.verifiedAggregateOffers[key] = token
+	s.mu.Unlock()
+	root, err := cvComponentManifestRoot(descriptors)
+	if err != nil || !bytes.Equal(root, offer.root) {
+		return fmt.Errorf("CV-sAPVSS aggregate manifest root does not match local cache")
+	}
+	offer.descriptors = descriptors
 	return nil
 }
 
-func (s *cvComponentServiceV1) handleARCShare(msg Message) {
-	share, err := cvDecodeARCShareV1(msg.Body)
+func (s *cvComponentService) verifyAggregateManifestForARC(offer *cvAggregateManifestOffer) (*cvAggregateTranscript, *cvAggregateDispersal, error) {
+	if offer == nil {
+		return nil, nil, fmt.Errorf("nil CV-sAPVSS aggregate manifest offer")
+	}
+	s.aggregateBuildMu.Lock()
+	defer s.aggregateBuildMu.Unlock()
+	wantRoot, err := cvComponentManifestRoot(offer.descriptors)
+	if err != nil || !bytes.Equal(offer.root, wantRoot) {
+		return nil, nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest references")
+	}
+	key := fmt.Sprintf("%x", digestAggHeaderForLock(offer.header))
+	s.mu.Lock()
+	agg := s.verifiedAggregates[key]
+	s.mu.Unlock()
+	if agg == nil {
+		leaves := make([]*cvVerifiedLeaf, len(offer.descriptors))
+		for i, descriptor := range offer.descriptors {
+			leaf, loadErr := s.loadOrRetrieveComponent(s.ctx, descriptor)
+			if loadErr != nil {
+				return nil, nil, loadErr
+			}
+			leaves[i] = leaf
+		}
+		var buildErr error
+		agg, buildErr = cvAggVerified(s.leafCtx, leaves)
+		if buildErr != nil {
+			return nil, nil, buildErr
+		}
+		s.mu.Lock()
+		s.verifiedAggregates[key] = agg
+		s.mu.Unlock()
+	}
+	if !bytes.Equal(agg.digest, offer.header.AggregateDigest) {
+		return nil, nil, fmt.Errorf("aggregate manifest digest mismatch")
+	}
+	// The manifest contains no remote aggregate object. Rebuilding the
+	// canonical aggregate once is therefore both AVer and local materialization.
+	dispersal, err := cvDisperseAggregate(agg, len(s.cfg.OldCommittee), len(s.cfg.OldCommittee)-2*s.cfg.FOld)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !bytes.Equal(dispersal.root, offer.header.FreshShardRoot) || !bytes.Equal(dispersal.payloadDigest, offer.header.PayloadDigest) {
+		return nil, nil, fmt.Errorf("aggregate manifest RS binding mismatch")
+	}
+	return agg, dispersal, nil
+}
+
+func (s *cvComponentService) handleARCShare(msg Message) {
+	share, err := cvDecodeARCShare(msg.Body)
 	if err != nil || share.holder != msg.From || !s.cfg.runtime.lockSigner.VerifyShare(
 		share.holder, "RL_AGG_LOCK", share.headerDigest, share.signature,
 	) {
@@ -709,13 +719,26 @@ func (s *cvComponentServiceV1) handleARCShare(msg Message) {
 	}
 }
 
-func (s *cvComponentServiceV1) loadOrRetrieveComponent(ctx context.Context, descriptor *cvComponentDescriptorV1) (*cvVerifiedLeafV1, error) {
-	key := cvComponentKeyV1(descriptor.dealer, descriptor.leafDigest)
+func (s *cvComponentService) handleARCCertificate(msg Message) {
+	headerDigest, certificate, err := cvDecodeARCCertificate(msg.Body)
+	if err != nil || !s.cfg.runtime.lockSigner.VerifyRecovered("RL_AGG_LOCK", headerDigest, certificate) {
+		return
+	}
+	key := fmt.Sprintf("%x", headerDigest)
+	s.mu.Lock()
+	if existing := s.aggregateCertificates[key]; existing == nil {
+		s.aggregateCertificates[key] = append([]byte(nil), certificate...)
+	}
+	s.mu.Unlock()
+}
+
+func (s *cvComponentService) loadOrRetrieveComponent(ctx context.Context, descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {
+	key := cvComponentKey(descriptor.dealer, descriptor.leafDigest)
 	s.mu.Lock()
 	cached := s.verifiedLeaves[key]
 	s.mu.Unlock()
 	if cached != nil {
-		if err := cvValidateAcceptedLeafV1(s.leafCtx, cached); err != nil {
+		if err := cvValidateAcceptedLeaf(s.leafCtx, cached); err != nil {
 			return nil, err
 		}
 		if cvPerfCountersEnabled {
@@ -750,7 +773,7 @@ func (s *cvComponentServiceV1) loadOrRetrieveComponent(ctx context.Context, desc
 	return accepted, nil
 }
 
-func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO) (*cvAggregateV1, error) {
+func (s *cvComponentService) RecoverAggregate(ctx context.Context, rlo *AggRLO) (*cvAggregateTranscript, error) {
 	if ctx == nil || rlo == nil {
 		return nil, fmt.Errorf("invalid CV-sAPVSS network recovery input")
 	}
@@ -765,8 +788,12 @@ func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO
 	}
 	headerDigest := digestAggHeaderForLock(rlo.Header)
 	key := fmt.Sprintf("%x", headerDigest)
-	pending := &cvPendingRecoveryV1{rlo: cloneAggRLO(rlo), allowed: nodeSet(rlo.Lock.Holders),
-		values: make(chan cvFreshShardArtifactV1, len(rlo.Lock.Holders))}
+	requestTargets := sortedUnique(rlo.Lock.Holders)
+	if len(requestTargets) == 0 {
+		requestTargets = sortedUnique(s.cfg.OldCommittee)
+	}
+	pending := &cvPendingRecovery{rlo: cloneAggRLO(rlo), allowed: nodeSet(requestTargets),
+		values: make(chan cvFreshShardArtifact, len(requestTargets))}
 	s.mu.Lock()
 	if _, exists := s.pendingRecoveries[key]; exists {
 		s.mu.Unlock()
@@ -779,12 +806,12 @@ func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO
 		delete(s.pendingRecoveries, key)
 		s.mu.Unlock()
 	}()
-	requestWire, _ := cvRecoverGetV1CanonicalBytes(headerDigest)
-	for _, holder := range rlo.Lock.Holders {
-		_ = s.send(holder, cvTagRecoverGetV1, requestWire)
+	requestWire, _ := cvRecoverGetCanonicalBytes(headerDigest)
+	for _, holder := range requestTargets {
+		_ = s.send(holder, cvTagRecoverGet, requestWire)
 	}
 	need := len(s.cfg.OldCommittee) - 2*s.cfg.FOld
-	artifacts := make(map[int]cvFreshShardArtifactV1, need)
+	artifacts := make(map[int]cvFreshShardArtifact, need)
 	for len(artifacts) < need {
 		select {
 		case <-ctx.Done():
@@ -796,7 +823,7 @@ func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO
 		}
 	}
 	n := len(s.cfg.OldCommittee)
-	dispersal := &cvAggregateDispersalV1{dataShards: need, shards: make([]cvAggregateShardV1, n)}
+	dispersal := &cvAggregateDispersal{dataShards: need, shards: make([]cvAggregateShard, n)}
 	available := make([]int, 0, len(artifacts))
 	for index, artifact := range artifacts {
 		if dispersal.nonce == nil {
@@ -809,15 +836,15 @@ func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO
 		dispersal.shards[index] = artifact.shard
 		available = append(available, index)
 	}
-	wire, err := cvRecoverAggregateWireV1(dispersal, available)
+	wire, err := cvRecoverAggregateWire(dispersal, available)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(hashBytes([]byte(cvAggregatePayloadDomain), wire), rlo.Header.PayloadDigest) ||
-		!bytes.Equal(hashBytes([]byte(cvAggregateV1Domain), wire), rlo.Header.AggregateDigest) {
+		!bytes.Equal(hashBytes([]byte(cvAggregateDomain), wire), rlo.Header.AggregateDigest) {
 		return nil, fmt.Errorf("recovered CV-sAPVSS aggregate digest mismatch")
 	}
-	agg, err := cvDecodeAggregateV1(wire)
+	agg, err := cvDecodeAggregate(wire)
 	if err != nil {
 		return nil, err
 	}
@@ -832,19 +859,19 @@ func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO
 	return agg, nil
 }
 
-func (s *cvComponentServiceV1) handleRecoverGet(msg Message) {
-	headerDigest, err := cvDecodeRecoverGetV1(msg.Body)
+func (s *cvComponentService) handleRecoverGet(msg Message) {
+	headerDigest, err := cvDecodeRecoverGet(msg.Body)
 	if err != nil {
 		return
 	}
 	shardWire, err := s.freshStore.Read(s.cfg.SID, s.cfg.Epoch, headerDigest, s.localNode)
 	if err == nil {
-		_ = s.send(msg.From, cvTagRecoverShardV1, shardWire)
+		_ = s.send(msg.From, cvTagRecoverShard, shardWire)
 	}
 }
 
-func (s *cvComponentServiceV1) handleRecoverShard(msg Message) {
-	headerDigest, err := cvFreshShardArtifactHeaderDigestV1(msg.Body)
+func (s *cvComponentService) handleRecoverShard(msg Message) {
+	headerDigest, err := cvFreshShardArtifactHeaderDigest(msg.Body)
 	if err != nil {
 		return
 	}
@@ -858,7 +885,7 @@ func (s *cvComponentServiceV1) handleRecoverShard(msg Message) {
 	if _, ok := pending.allowed[msg.From]; !ok {
 		return
 	}
-	artifact, err := cvDecodeFreshShardArtifactV1(msg.Body, s.cfg, pending.rlo.Header)
+	artifact, err := cvDecodeFreshShardArtifact(msg.Body, s.cfg, pending.rlo.Header)
 	if err != nil {
 		return
 	}
@@ -873,23 +900,23 @@ func (s *cvComponentServiceV1) handleRecoverShard(msg Message) {
 	}
 }
 
-func cvARCShareV1CanonicalBytes(share *cvARCShareV1) ([]byte, error) {
+func cvARCShareCanonicalBytes(share *cvARCShare) ([]byte, error) {
 	if share == nil || share.holder < 0 || len(share.headerDigest) != 32 || len(share.signature) == 0 ||
-		len(share.signature) > cvMaxComponentSignatureBytesV1 {
+		len(share.signature) > cvMaxComponentSignatureBytes {
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC share")
 	}
 	var wire bytes.Buffer
-	_ = cvWriteBytes(&wire, []byte(cvARCShareDomainV1))
+	_ = cvWriteBytes(&wire, []byte(cvARCShareDomain))
 	cvWriteUint64(&wire, uint64(share.holder))
 	_ = cvWriteBytes(&wire, share.headerDigest)
 	_ = cvWriteBytes(&wire, share.signature)
 	return wire.Bytes(), nil
 }
 
-func cvDecodeARCShareV1(wire []byte) (*cvARCShareV1, error) {
+func cvDecodeARCShare(wire []byte) (*cvARCShare, error) {
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvARCShareDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvARCShareDomainV1)) {
+	domain, err := r.bytes(len(cvARCShareDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvARCShareDomain)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC share domain")
 	}
 	holder, err := r.uint64()
@@ -900,49 +927,49 @@ func cvDecodeARCShareV1(wire []byte) (*cvARCShareV1, error) {
 	if err != nil || len(digest) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC digest")
 	}
-	sig, err := r.bytes(cvMaxComponentSignatureBytesV1)
+	sig, err := r.bytes(cvMaxComponentSignatureBytes)
 	if err != nil || len(sig) == 0 || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC signature")
 	}
-	share := &cvARCShareV1{holder: int(holder), headerDigest: digest, signature: sig}
-	canonical, err := cvARCShareV1CanonicalBytes(share)
+	share := &cvARCShare{holder: int(holder), headerDigest: digest, signature: sig}
+	canonical, err := cvARCShareCanonicalBytes(share)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS ARC share")
 	}
 	return share, nil
 }
 
-func cvRecoverGetV1CanonicalBytes(headerDigest []byte) ([]byte, error) {
+func cvRecoverGetCanonicalBytes(headerDigest []byte) ([]byte, error) {
 	if len(headerDigest) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS recovery request")
 	}
 	var wire bytes.Buffer
-	_ = cvWriteBytes(&wire, []byte(cvRecoverGetDomainV1))
+	_ = cvWriteBytes(&wire, []byte(cvRecoverGetDomain))
 	_ = cvWriteBytes(&wire, headerDigest)
 	return wire.Bytes(), nil
 }
 
-func cvDecodeRecoverGetV1(wire []byte) ([]byte, error) {
+func cvDecodeRecoverGet(wire []byte) ([]byte, error) {
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvRecoverGetDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvRecoverGetDomainV1)) {
+	domain, err := r.bytes(len(cvRecoverGetDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvRecoverGetDomain)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS recovery request domain")
 	}
 	digest, err := r.bytes(32)
 	if err != nil || len(digest) != 32 || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS recovery request digest")
 	}
-	canonical, _ := cvRecoverGetV1CanonicalBytes(digest)
+	canonical, _ := cvRecoverGetCanonicalBytes(digest)
 	if !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS recovery request")
 	}
 	return digest, nil
 }
 
-func cvFreshShardArtifactHeaderDigestV1(wire []byte) ([]byte, error) {
+func cvFreshShardArtifactHeaderDigest(wire []byte) ([]byte, error) {
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvFreshShardArtifactDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(cvFreshShardArtifactDomainV1)) {
+	domain, err := r.bytes(len(cvFreshShardArtifactDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvFreshShardArtifactDomain)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS fresh shard artifact domain")
 	}
 	digest, err := r.bytes(32)

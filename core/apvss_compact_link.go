@@ -9,11 +9,11 @@ import (
 )
 
 const (
-	apvssCompactLinkChallengeDomainV1 = "ARL-APVSS-v1/compact-link/challenge"
-	apvssCompactLinkProofDomainV1     = "ARL-APVSS-v1/compact-link/proof"
+	apvssCompactLinkChallengeDomain = "ARL-APVSS/compact-link/challenge"
+	apvssCompactLinkProofDomain     = "ARL-APVSS/compact-link/proof"
 )
 
-type apvssCompactLinkDigitProofV1 struct {
+type apvssCompactLinkDigitProof struct {
 	commitment  bls12381.G1Affine
 	tCommitment bls12381.G1Affine
 	tCoin       bls12381.G1Affine
@@ -23,9 +23,9 @@ type apvssCompactLinkDigitProofV1 struct {
 	zCoin       fr.Element
 }
 
-type apvssCompactLinkLaneProofV1 struct {
+type apvssCompactLinkLaneProof struct {
 	receiverIndex int
-	digits        []apvssCompactLinkDigitProofV1
+	digits        []apvssCompactLinkDigitProof
 	tEvaluation   bls12381.G1Affine
 	tBlindingCoin bls12381.G1Affine
 	tBlinding     bls12381.G1Affine
@@ -33,24 +33,24 @@ type apvssCompactLinkLaneProofV1 struct {
 	zBlindingCoin fr.Element
 }
 
-// apvssCompactLinkProofV1 is only the joint representation/link layer. A
+// apvssCompactLinkProof is only the joint representation/link layer. A
 // compact range proof over every digit commitment is still required before
-// compact-batch-v1 can be enabled by the APVSS backend gate.
-type apvssCompactLinkProofV1 struct {
-	lanes []apvssCompactLinkLaneProofV1
+// compact-batch can be enabled by the APVSS backend gate.
+type apvssCompactLinkProof struct {
+	lanes []apvssCompactLinkLaneProof
 }
 
-type apvssCompactLinkDigitMaskV1 struct {
+type apvssCompactLinkDigitMask struct {
 	digit, commitment, coin fr.Element
 }
 
-type apvssCompactLinkLaneMaskV1 struct {
-	digits                      []apvssCompactLinkDigitMaskV1
+type apvssCompactLinkLaneMask struct {
+	digits                      []apvssCompactLinkDigitMask
 	blinding, blindingCoin      fr.Element
 	digitValues, commitmentRhos []fr.Element
 }
 
-func apvssRandomFrV1() (fr.Element, error) {
+func apvssRandomFr() (fr.Element, error) {
 	var scalar fr.Element
 	if _, err := scalar.SetRandom(); err != nil {
 		return fr.Element{}, fmt.Errorf("sample APVSS compact-link randomness: %w", err)
@@ -58,7 +58,7 @@ func apvssRandomFrV1() (fr.Element, error) {
 	return scalar, nil
 }
 
-func apvssCompactLinkReceiverIndicesV1(proof *apvssCompactLinkProofV1) []int {
+func apvssCompactLinkReceiverIndices(proof *apvssCompactLinkProof) []int {
 	if proof == nil {
 		return nil
 	}
@@ -69,9 +69,9 @@ func apvssCompactLinkReceiverIndicesV1(proof *apvssCompactLinkProofV1) []int {
 	return indices
 }
 
-func apvssValidateCompactLinkShapeV1(
-	leaf *cvLeafV1,
-	proof *apvssCompactLinkProofV1,
+func apvssValidateCompactLinkShape(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
 ) error {
 	if leaf == nil || proof == nil || len(proof.lanes) == 0 ||
 		len(proof.lanes) > leaf.context.sharingDegree {
@@ -115,23 +115,23 @@ func apvssValidateCompactLinkShapeV1(
 	return nil
 }
 
-func apvssCompactLinkFirstMoveBytesV1(
-	leaf *cvLeafV1,
-	proof *apvssCompactLinkProofV1,
+func apvssCompactLinkFirstMoveBytes(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
 ) ([]byte, error) {
-	if err := apvssValidateCompactLinkShapeV1(leaf, proof); err != nil {
+	if err := apvssValidateCompactLinkShape(leaf, proof); err != nil {
 		return nil, err
 	}
-	statementDigest, err := apvssFallbackSetStatementDigestV1(
+	statementDigest, err := apvssFallbackSetStatementDigest(
 		leaf,
-		apvssCompactLinkReceiverIndicesV1(proof),
-		apvssFallbackCompactBatchProfileV1,
+		apvssCompactLinkReceiverIndices(proof),
+		apvssFallbackCompactBatchProfile,
 	)
 	if err != nil {
 		return nil, err
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(apvssCompactLinkProofDomainV1)); err != nil {
+	if err := cvWriteBytes(&wire, []byte(apvssCompactLinkProofDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, statementDigest); err != nil {
@@ -166,22 +166,22 @@ func apvssCompactLinkFirstMoveBytesV1(
 	return wire.Bytes(), nil
 }
 
-func apvssCompactLinkChallengeV1(
-	leaf *cvLeafV1,
-	proof *apvssCompactLinkProofV1,
+func apvssCompactLinkChallenge(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
 ) (fr.Element, error) {
-	firstMove, err := apvssCompactLinkFirstMoveBytesV1(leaf, proof)
+	firstMove, err := apvssCompactLinkFirstMoveBytes(leaf, proof)
 	if err != nil {
 		return fr.Element{}, err
 	}
-	return cvHashToFrV1(apvssCompactLinkChallengeDomainV1, firstMove)
+	return cvHashToFr(apvssCompactLinkChallengeDomain, firstMove)
 }
 
-func apvssCompactLinkProofV1CanonicalBytes(
-	leaf *cvLeafV1,
-	proof *apvssCompactLinkProofV1,
+func apvssCompactLinkProofCanonicalBytes(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
 ) ([]byte, error) {
-	wire, err := apvssCompactLinkFirstMoveBytesV1(leaf, proof)
+	wire, err := apvssCompactLinkFirstMoveBytes(leaf, proof)
 	if err != nil {
 		return nil, err
 	}
@@ -200,21 +200,21 @@ func apvssCompactLinkProofV1CanonicalBytes(
 	return buffer.Bytes(), nil
 }
 
-func apvssProveCompactLinkV1(
-	leaf *cvLeafV1,
-	witness *apvssDealerWitnessV1,
+func apvssProveCompactLink(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
 	receiverIndices []int,
-) (*apvssCompactLinkProofV1, error) {
-	return apvssProveCompactLinkWithOpeningsV1(leaf, witness, receiverIndices, nil, nil)
+) (*apvssCompactLinkProof, error) {
+	return apvssProveCompactLinkWithOpenings(leaf, witness, receiverIndices, nil, nil)
 }
 
-func apvssProveCompactLinkWithOpeningsV1(
-	leaf *cvLeafV1,
-	witness *apvssDealerWitnessV1,
+func apvssProveCompactLinkWithOpenings(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
 	receiverIndices []int,
 	digitValues *[]uint64,
 	commitmentBlindings *[]fr.Element,
-) (*apvssCompactLinkProofV1, error) {
+) (*apvssCompactLinkProof, error) {
 	if leaf == nil || witness == nil || len(receiverIndices) == 0 ||
 		len(witness.scalars) != len(leaf.receivers) ||
 		len(witness.blindings) != len(leaf.receivers) ||
@@ -222,10 +222,10 @@ func apvssProveCompactLinkWithOpeningsV1(
 		len(witness.blindingCoins) != len(leaf.receivers) {
 		return nil, fmt.Errorf("invalid APVSS compact-link witness shape")
 	}
-	if _, err := apvssFallbackSetStatementDigestV1(
+	if _, err := apvssFallbackSetStatementDigest(
 		leaf,
 		receiverIndices,
-		apvssFallbackCompactBatchProfileV1,
+		apvssFallbackCompactBatchProfile,
 	); err != nil {
 		return nil, err
 	}
@@ -237,17 +237,17 @@ func apvssProveCompactLinkWithOpeningsV1(
 	if err != nil {
 		return nil, err
 	}
-	proof := &apvssCompactLinkProofV1{lanes: make([]apvssCompactLinkLaneProofV1, len(receiverIndices))}
+	proof := &apvssCompactLinkProof{lanes: make([]apvssCompactLinkLaneProof, len(receiverIndices))}
 	if digitValues != nil {
 		*digitValues = (*digitValues)[:0]
 	}
 	if commitmentBlindings != nil {
 		*commitmentBlindings = (*commitmentBlindings)[:0]
 	}
-	masks := make([]apvssCompactLinkLaneMaskV1, len(receiverIndices))
+	masks := make([]apvssCompactLinkLaneMask, len(receiverIndices))
 	for laneIndex, receiverIndex := range receiverIndices {
 		witnessIndex := receiverIndex - 1
-		if err := apvssValidateFallbackLaneWitnessV1(
+		if err := apvssValidateFallbackLaneWitness(
 			leaf,
 			receiverIndex,
 			witness.scalars[witnessIndex],
@@ -261,15 +261,15 @@ func apvssProveCompactLinkWithOpeningsV1(
 		if err != nil {
 			return nil, err
 		}
-		lane, err := apvssLaneV1(leaf, receiverIndex)
+		lane, err := apvssLane(leaf, receiverIndex)
 		if err != nil {
 			return nil, err
 		}
 		proofLane := &proof.lanes[laneIndex]
 		proofLane.receiverIndex = receiverIndex
-		proofLane.digits = make([]apvssCompactLinkDigitProofV1, chunks)
+		proofLane.digits = make([]apvssCompactLinkDigitProof, chunks)
 		maskLane := &masks[laneIndex]
-		maskLane.digits = make([]apvssCompactLinkDigitMaskV1, chunks)
+		maskLane.digits = make([]apvssCompactLinkDigitMask, chunks)
 		maskLane.digitValues = make([]fr.Element, chunks)
 		maskLane.commitmentRhos = make([]fr.Element, chunks)
 
@@ -281,19 +281,19 @@ func apvssProveCompactLinkWithOpeningsV1(
 			digitProof := &proofLane.digits[chunk]
 			digitMask := &maskLane.digits[chunk]
 			maskLane.digitValues[chunk].SetUint64(digits[chunk])
-			maskLane.commitmentRhos[chunk], err = apvssRandomFrV1()
+			maskLane.commitmentRhos[chunk], err = apvssRandomFr()
 			if err != nil {
 				return nil, err
 			}
-			digitMask.digit, err = apvssRandomFrV1()
+			digitMask.digit, err = apvssRandomFr()
 			if err != nil {
 				return nil, err
 			}
-			digitMask.commitment, err = apvssRandomFrV1()
+			digitMask.commitment, err = apvssRandomFr()
 			if err != nil {
 				return nil, err
 			}
-			digitMask.coin, err = apvssRandomFrV1()
+			digitMask.coin, err = apvssRandomFr()
 			if err != nil {
 				return nil, err
 			}
@@ -322,11 +322,11 @@ func apvssProveCompactLinkWithOpeningsV1(
 			evaluationMask.Add(&evaluationMask, &weightedMask)
 			power.Mul(&power, &baseScalar)
 		}
-		maskLane.blinding, err = apvssRandomFrV1()
+		maskLane.blinding, err = apvssRandomFr()
 		if err != nil {
 			return nil, err
 		}
-		maskLane.blindingCoin, err = apvssRandomFrV1()
+		maskLane.blindingCoin, err = apvssRandomFr()
 		if err != nil {
 			return nil, err
 		}
@@ -341,7 +341,7 @@ func apvssProveCompactLinkWithOpeningsV1(
 		)
 	}
 
-	challenge, err := apvssCompactLinkChallengeV1(leaf, proof)
+	challenge, err := apvssCompactLinkChallenge(leaf, proof)
 	if err != nil {
 		return nil, err
 	}
@@ -377,11 +377,11 @@ func apvssProveCompactLinkWithOpeningsV1(
 	return proof, nil
 }
 
-func apvssVerifyCompactLinkV1(leaf *cvLeafV1, proof *apvssCompactLinkProofV1) error {
-	if err := apvssValidateCompactLinkShapeV1(leaf, proof); err != nil {
+func apvssVerifyCompactLink(leaf *cvLeaf, proof *apvssCompactLinkProof) error {
+	if err := apvssValidateCompactLinkShape(leaf, proof); err != nil {
 		return err
 	}
-	challenge, err := apvssCompactLinkChallengeV1(leaf, proof)
+	challenge, err := apvssCompactLinkChallenge(leaf, proof)
 	if err != nil {
 		return err
 	}
@@ -395,7 +395,7 @@ func apvssVerifyCompactLinkV1(leaf *cvLeafV1, proof *apvssCompactLinkProofV1) er
 	}
 	for laneIndex := range proof.lanes {
 		proofLane := &proof.lanes[laneIndex]
-		lane, err := apvssLaneV1(leaf, proofLane.receiverIndex)
+		lane, err := apvssLane(leaf, proofLane.receiverIndex)
 		if err != nil {
 			return err
 		}
@@ -475,19 +475,19 @@ func apvssVerifyCompactLinkV1(leaf *cvLeafV1, proof *apvssCompactLinkProofV1) er
 	return nil
 }
 
-func apvssCompactLinkProofBytesV1(leaf *cvLeafV1, proof *apvssCompactLinkProofV1) (int, error) {
-	wire, err := apvssCompactLinkProofV1CanonicalBytes(leaf, proof)
+func apvssCompactLinkProofBytes(leaf *cvLeaf, proof *apvssCompactLinkProof) (int, error) {
+	wire, err := apvssCompactLinkProofCanonicalBytes(leaf, proof)
 	if err != nil {
 		return 0, err
 	}
 	return len(wire), nil
 }
 
-func apvssDecodeCompactLinkProofV1(
+func apvssDecodeCompactLinkProof(
 	wire []byte,
-	leaf *cvLeafV1,
-) (*apvssCompactLinkProofV1, error) {
-	if leaf == nil || len(wire) == 0 || len(wire) > cvMaxLeafWireBytesV1 {
+	leaf *cvLeaf,
+) (*apvssCompactLinkProof, error) {
+	if leaf == nil || len(wire) == 0 || len(wire) > cvMaxLeafWireBytes {
 		return nil, fmt.Errorf("invalid APVSS compact-link wire")
 	}
 	_, _, chunks, err := cvProfile(leaf.context.profile)
@@ -495,8 +495,8 @@ func apvssDecodeCompactLinkProofV1(
 		return nil, err
 	}
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(apvssCompactLinkProofDomainV1))
-	if err != nil || !bytes.Equal(domain, []byte(apvssCompactLinkProofDomainV1)) {
+	domain, err := r.bytes(len(apvssCompactLinkProofDomain))
+	if err != nil || !bytes.Equal(domain, []byte(apvssCompactLinkProofDomain)) {
 		return nil, fmt.Errorf("invalid APVSS compact-link domain")
 	}
 	statementDigest, err := r.bytes(32)
@@ -507,7 +507,7 @@ func apvssDecodeCompactLinkProofV1(
 	if err != nil || laneCount <= 0 || laneCount > leaf.context.sharingDegree {
 		return nil, fmt.Errorf("invalid APVSS compact-link lane count")
 	}
-	proof := &apvssCompactLinkProofV1{lanes: make([]apvssCompactLinkLaneProofV1, laneCount)}
+	proof := &apvssCompactLinkProof{lanes: make([]apvssCompactLinkLaneProof, laneCount)}
 	for laneIndex := range proof.lanes {
 		lane := &proof.lanes[laneIndex]
 		lane.receiverIndex, err = r.uint32()
@@ -518,7 +518,7 @@ func apvssDecodeCompactLinkProofV1(
 		if err != nil || digitCount != chunks {
 			return nil, fmt.Errorf("invalid APVSS compact-link digit count %d", laneIndex)
 		}
-		lane.digits = make([]apvssCompactLinkDigitProofV1, digitCount)
+		lane.digits = make([]apvssCompactLinkDigitProof, digitCount)
 		for digitIndex := range lane.digits {
 			digit := &lane.digits[digitIndex]
 			for _, point := range []*bls12381.G1Affine{
@@ -562,19 +562,19 @@ func apvssDecodeCompactLinkProofV1(
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing APVSS compact-link bytes")
 	}
-	expectedStatement, err := apvssFallbackSetStatementDigestV1(
+	expectedStatement, err := apvssFallbackSetStatementDigest(
 		leaf,
-		apvssCompactLinkReceiverIndicesV1(proof),
-		apvssFallbackCompactBatchProfileV1,
+		apvssCompactLinkReceiverIndices(proof),
+		apvssFallbackCompactBatchProfile,
 	)
 	if err != nil || !bytes.Equal(statementDigest, expectedStatement) {
 		return nil, fmt.Errorf("APVSS compact-link statement mismatch")
 	}
-	canonical, err := apvssCompactLinkProofV1CanonicalBytes(leaf, proof)
+	canonical, err := apvssCompactLinkProofCanonicalBytes(leaf, proof)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical APVSS compact-link proof")
 	}
-	if err := apvssVerifyCompactLinkV1(leaf, proof); err != nil {
+	if err := apvssVerifyCompactLink(leaf, proof); err != nil {
 		return nil, err
 	}
 	return proof, nil

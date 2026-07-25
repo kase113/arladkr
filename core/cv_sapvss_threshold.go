@@ -9,17 +9,17 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-func cvCreateLocalDecryptionOutputsV1(
-	context *cvLeafContextV1,
-	agg *cvAggregateV1,
+func cvCreateLocalDecryptionOutputs(
+	context *cvLeafContext,
+	agg *cvAggregateTranscript,
 	receiverOrder []int,
 	localSecrets map[int]fr.Element,
 ) (map[int][]byte, map[int][]byte, error) {
-	indices, err := cvReceiverIndicesV1(context, receiverOrder)
+	indices, err := cvReceiverIndices(context, receiverOrder)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := cvCheckAggregateDigestV1(agg); err != nil {
+	if err := cvCheckAggregateDigest(agg); err != nil {
 		return nil, nil, err
 	}
 	shares := make(map[int][]byte, len(localSecrets))
@@ -29,16 +29,16 @@ func cvCreateLocalDecryptionOutputsV1(
 		if !ok {
 			return nil, nil, fmt.Errorf("local CV-sAPVSS receiver %d is outside the roster", receiverID)
 		}
-		decrypted, receipt, err := cvDecShareV1(agg, secret, index)
+		decrypted, receipt, err := cvDecShare(agg, secret, index)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := cvVerifyShareV1(context, agg, index, receipt); err != nil {
+		if err := cvVerifyShare(context, agg, index, receipt); err != nil {
 			return nil, nil, err
 		}
 		encodedShare := decrypted.scalar.Bytes()
 		shares[receiverID] = append([]byte(nil), encodedShare[:]...)
-		receiptWire, err := cvReceiptV1CanonicalBytes(receipt)
+		receiptWire, err := cvReceiptCanonicalBytes(receipt)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -47,17 +47,17 @@ func cvCreateLocalDecryptionOutputsV1(
 	return shares, receipts, nil
 }
 
-func cvThresholdPublicKeyFromReceiptsV1(
-	context *cvLeafContextV1,
-	agg *cvAggregateV1,
+func cvThresholdPublicKeyFromReceipts(
+	context *cvLeafContext,
+	agg *cvAggregateTranscript,
 	receiverOrder []int,
 	receiptWires map[int][]byte,
 ) ([]byte, error) {
-	indices, err := cvReceiverIndicesV1(context, receiverOrder)
+	indices, err := cvReceiverIndices(context, receiverOrder)
 	if err != nil {
 		return nil, err
 	}
-	if err := cvCheckAggregateDigestV1(agg); err != nil {
+	if err := cvCheckAggregateDigest(agg); err != nil {
 		return nil, err
 	}
 	threshold := context.sharingDegree + 1
@@ -66,7 +66,7 @@ func cvThresholdPublicKeyFromReceiptsV1(
 	}
 	type verifiedReceipt struct {
 		index   int
-		receipt *cvReceiptV1
+		receipt *cvReceipt
 	}
 	verified := make([]verifiedReceipt, 0, len(receiptWires))
 	for receiverID, wire := range receiptWires {
@@ -74,7 +74,7 @@ func cvThresholdPublicKeyFromReceiptsV1(
 		if !ok {
 			return nil, fmt.Errorf("CV-sAPVSS receipt receiver %d is outside the roster", receiverID)
 		}
-		receipt, err := cvDecodeReceiptV1(wire, context, agg, index)
+		receipt, err := cvDecodeReceipt(wire, context, agg, index)
 		if err != nil {
 			return nil, err
 		}
@@ -89,11 +89,11 @@ func cvThresholdPublicKeyFromReceiptsV1(
 		publicShares[i] = verified[i].receipt.publicScalar
 		blindingShares[i] = verified[i].receipt.blindingOpening
 	}
-	publicKey, err := cvInterpolateG1AtZeroV1(indicesAtZero, publicShares)
+	publicKey, err := cvInterpolateG1AtZero(indicesAtZero, publicShares)
 	if err != nil {
 		return nil, err
 	}
-	blindingConstant, err := cvInterpolateG1AtZeroV1(indicesAtZero, blindingShares)
+	blindingConstant, err := cvInterpolateG1AtZero(indicesAtZero, blindingShares)
 	if err != nil {
 		return nil, err
 	}
@@ -109,8 +109,8 @@ func cvThresholdPublicKeyFromReceiptsV1(
 	return append([]byte(nil), encoded[:]...), nil
 }
 
-func cvReceiverIndicesV1(context *cvLeafContextV1, receiverOrder []int) (map[int]int, error) {
-	if err := cvValidateLeafContextV1(context); err != nil {
+func cvReceiverIndices(context *cvLeafContext, receiverOrder []int) (map[int]int, error) {
+	if err := cvValidateLeafContext(context); err != nil {
 		return nil, err
 	}
 	if len(receiverOrder) != len(context.receiverPublicKeys) {
@@ -126,7 +126,7 @@ func cvReceiverIndicesV1(context *cvLeafContextV1, receiverOrder []int) (map[int
 	return indices, nil
 }
 
-func cvInterpolateG1AtZeroV1(indices []int, points []bls12381.G1Affine) (bls12381.G1Affine, error) {
+func cvInterpolateG1AtZero(indices []int, points []bls12381.G1Affine) (bls12381.G1Affine, error) {
 	if len(indices) == 0 || len(indices) != len(points) {
 		return bls12381.G1Affine{}, fmt.Errorf("invalid CV-sAPVSS interpolation input")
 	}

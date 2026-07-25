@@ -83,14 +83,14 @@ func TestSelectAgreedPayloadChoosesFirstNonEmptyVectorEntry(t *testing.T) {
 
 func TestSelectAgreedPayloadsAppliesPredicateAndPreservesProposerOrder(t *testing.T) {
 	vec := []*dmvba.ProposalValue{
-		{Payload: []byte("bad"), Round: 1, Hint: "cv-component-candidate-v1"},
+		{Payload: []byte("bad"), Round: 1, Hint: "cv-component-candidate"},
 		nil,
-		{Payload: []byte("two"), Round: 1, Hint: "cv-component-candidate-v1"},
-		{Payload: []byte("wrong-round"), Round: 2, Hint: "cv-component-candidate-v1"},
+		{Payload: []byte("two"), Round: 1, Hint: "cv-component-candidate"},
+		{Payload: []byte("wrong-round"), Round: 2, Hint: "cv-component-candidate"},
 		{Payload: []byte("wrong-hint"), Round: 1, Hint: "other-instance"},
-		{Payload: []byte("five"), Round: 1, Hint: "cv-component-candidate-v1"},
+		{Payload: []byte("five"), Round: 1, Hint: "cv-component-candidate"},
 	}
-	got := selectAgreedPayloads(vec, 1, "cv-component-candidate-v1", func(_ int, payload []byte) bool {
+	got := selectAgreedPayloads(vec, 1, "cv-component-candidate", func(_ int, payload []byte) bool {
 		return string(payload) != "bad"
 	})
 	if len(got) != 2 || string(got[0]) != "two" || string(got[1]) != "five" {
@@ -99,16 +99,16 @@ func TestSelectAgreedPayloadsAppliesPredicateAndPreservesProposerOrder(t *testin
 }
 
 func TestArladkrMVBAInstanceDomainsAreDistinct(t *testing.T) {
-	component, err := arlMVBAInstanceSID("sid", "cv-component-candidate-v1", false)
+	component, err := arlMVBAInstanceSID("sid", "cv-component-candidate", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	aggregate, err := arlMVBAInstanceSID("sid", "cv-materialized-aggrlo-v1", false)
+	aggregate, err := arlMVBAInstanceSID("sid", "cv-materialized-aggrlo", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if component == aggregate || !strings.Contains(component, "cv-component-candidate-v1") ||
-		!strings.Contains(aggregate, "cv-materialized-aggrlo-v1") {
+	if component == aggregate || !strings.Contains(component, "cv-component-candidate") ||
+		!strings.Contains(aggregate, "cv-materialized-aggrlo") {
 		t.Fatalf("MVBA instance domains are not distinct: %q / %q", component, aggregate)
 	}
 }
@@ -123,7 +123,7 @@ func TestPredicateBearingMVBATCPRejectsDirectKernel(t *testing.T) {
 		AgreementKernel: "dumbomvba-direct",
 	})
 	_, _, err := runArladkrMVBATCPInstance(
-		context.Background(), cfg, "cv-component-candidate-v1", []byte("candidate"),
+		context.Background(), cfg, "cv-component-candidate", []byte("candidate"),
 		func(_ int, _ []byte) bool { return true },
 	)
 	if err == nil || !strings.Contains(err.Error(), "external predicate") {
@@ -142,7 +142,7 @@ func TestPredicateBearingMVBATCPRequiresOneLocalOldNode(t *testing.T) {
 		LocalNodeIDs:    []int{0, 1},
 	})
 	_, _, err := runArladkrMVBATCPInstance(
-		context.Background(), cfg, "cv-component-candidate-v1", []byte("candidate"),
+		context.Background(), cfg, "cv-component-candidate", []byte("candidate"),
 		func(_ int, _ []byte) bool { return true },
 	)
 	if err == nil || !strings.Contains(err.Error(), "exactly one local old node") {

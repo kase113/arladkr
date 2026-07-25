@@ -46,7 +46,7 @@ func TestBenchResultIncludesLocalNodeMetrics(t *testing.T) {
 		runs:                     1,
 		timeoutMs:                1000,
 		policy:                   "auto",
-		apvssFallbackProfile:     "compact-batch-v1",
+		apvssFallbackProfile:     "compact-batch",
 		apvssForcedFallbackCount: 1,
 		apvssWaitAllACKs:         false,
 		experimentalAPVSS:        true,
@@ -59,7 +59,7 @@ func TestBenchResultIncludesLocalNodeMetrics(t *testing.T) {
 	for _, token := range []string{
 		"local_node_count=2",
 		"required_completed_nodes=2",
-		"apvss_fallback_profile=compact-batch-v1",
+		"apvss_fallback_profile=compact-batch",
 		"apvss_forced_fallback_count=1",
 		"apvss_wait_all_acks=false",
 		"experimental_apvss=true",

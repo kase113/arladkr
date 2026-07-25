@@ -34,7 +34,7 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 		t.Fatalf("valid CV epoch config rejected: %v", err)
 	}
 	compact := base
-	compact.APVSSFallbackProfile = apvssFallbackCompactBatchProfileV1
+	compact.APVSSFallbackProfile = apvssFallbackCompactBatchProfile
 	if err := validateCVEpochConfig(compact); err == nil || !strings.Contains(err.Error(), "experimental") {
 		t.Fatalf("compact profile crossed production admission without opt-in: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestNormalizeConfigDefaultsToCVOnlyProfile(t *testing.T) {
 	if cfg.APVSSProvider != "cv-sapvss" || cfg.ARCMode != "materialized" || cfg.DeriveMode != "scalar" {
 		t.Fatalf("default profile = %s/%s/%s", cfg.APVSSProvider, cfg.ARCMode, cfg.DeriveMode)
 	}
-	if cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfileV1 || cfg.AllowExperimentalAPVSS {
+	if cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfile || cfg.AllowExperimentalAPVSS {
 		t.Fatalf("default APVSS fallback profile = %q experimental=%t",
 			cfg.APVSSFallbackProfile, cfg.AllowExperimentalAPVSS)
 	}
@@ -110,24 +110,24 @@ func TestCVReceiptExchangeReturnsCommonKeyAndLocalShares(t *testing.T) {
 	if err := ensureRuntime(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
 	nodes := sortedUnique(cfg.OldCommittee)
 	transport := newCVRouterTestTransport(nodes, 128)
-	router, err := newCVSAPVSSRouterV1(context.Background(), transport, cfg.SID, cfg.Epoch, nodes, nodes, 64)
+	router, err := newCVSAPVSSRouter(context.Background(), transport, cfg.SID, cfg.Epoch, nodes, nodes, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = router.Close() })
-	services := make([]*cvComponentServiceV1, len(nodes))
+	services := make([]*cvComponentService, len(nodes))
 	for i, node := range nodes {
-		store, storeErr := newCVComponentLeafStoreV1(t.TempDir())
+		store, storeErr := newCVComponentLeafStore(t.TempDir())
 		if storeErr != nil {
 			t.Fatal(storeErr)
 		}
-		services[i], err = newCVComponentServiceV1(context.Background(), cfg, &leafContext, node, transport, router, store)
+		services[i], err = newCVComponentService(context.Background(), cfg, &leafContext, node, transport, router, store)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -187,15 +187,15 @@ func TestRestrictThresholdSignerToLocalMembers(t *testing.T) {
 
 func TestCVMaterializedAggRLOWitnessRoundTrip(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	materialized, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, leaves)
+	materialized, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := cvMaterializedAggRLOWitnessV1CanonicalBytes(materialized.rlo)
+	wire, err := cvMaterializedAggRLOWitnessCanonicalBytes(materialized.rlo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := cvDecodeMaterializedAggRLOWitnessV1(wire, cfg)
+	decoded, err := cvDecodeMaterializedAggRLOWitness(wire, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,46 +203,49 @@ func TestCVMaterializedAggRLOWitnessRoundTrip(t *testing.T) {
 		!bytes.Equal(digestAggHeaderForLock(decoded.Header), digestAggHeaderForLock(materialized.rlo.Header)) {
 		t.Fatal("materialized AggRLO witness changed its statement")
 	}
-	if _, err := cvDecodeMaterializedAggRLOWitnessV1(append(wire, 0), cfg); err == nil {
+	if _, err := cvDecodeMaterializedAggRLOWitness(append(wire, 0), cfg); err == nil {
 		t.Fatal("accepted materialized AggRLO witness with trailing bytes")
 	}
 
 	tampered := cloneAggRLO(materialized.rlo)
-	tampered.Lock.ShareSignatures[tampered.Lock.Holders[0]][0] ^= 1
+	tampered.Lock.Certificate[0] ^= 1
 	tampered.Digest = digestAggRLO(*tampered)
-	tamperedWire, err := cvMaterializedAggRLOWitnessV1CanonicalBytes(tampered)
+	tamperedWire, err := cvMaterializedAggRLOWitnessCanonicalBytes(tampered)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cvDecodeMaterializedAggRLOWitnessV1(tamperedWire, cfg); err == nil {
-		t.Fatal("accepted materialized AggRLO witness with an invalid holder share")
+	if _, err := cvDecodeMaterializedAggRLOWitness(tamperedWire, cfg); err == nil {
+		t.Fatal("accepted materialized AggRLO witness with an invalid certificate")
+	}
+	if len(decoded.Lock.ShareSignatures) != 0 || !bytes.Equal(decoded.Lock.Certificate, materialized.rlo.Lock.Certificate) {
+		t.Fatal("compact AggRLO witness retained individual ARC shares")
 	}
 }
 
 func TestCVBuildEpochContextAndRandomDealerLeaf(t *testing.T) {
 	cfg, _, _, _ := cvM4Fixture(t)
 	dirs := generateCVReceiverKeysForTest(t, cfg.SID, cfg.NewCommittee)
-	material, err := cvLoadReceiverKeyMaterialV1(
+	material, err := cvLoadReceiverKeyMaterial(
 		dirs.public, dirs.secret, cfg.SID, cfg.NewCommittee, []int{cfg.NewCommittee[0]},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leafContext, err := cvBuildEpochLeafContextV1(cfg, material)
+	leafContext, err := cvBuildEpochLeafContext(cfg, material)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(leafContext.dealerSetPolicy, material.registryDigest) {
 		t.Fatal("CV epoch context does not bind receiver ID registry digest")
 	}
-	leaf, err := cvRandomDealerLeafV1(leafContext, cfg.LocalNodeIDs[0])
+	leaf, err := cvRandomDealerLeaf(leafContext, cfg.LocalNodeIDs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if leaf.dealerID != uint64(cfg.LocalNodeIDs[0]) || !leaf.hasLeafNIZK {
 		t.Fatal("random CV dealer leaf has the wrong dealer or proof profile")
 	}
-	if err := cvVerifyLeafV1(&leafContext, leaf); err != nil {
+	if err := cvVerifyLeaf(&leafContext, leaf); err != nil {
 		t.Fatalf("random CV dealer leaf rejected: %v", err)
 	}
 }
@@ -264,7 +267,7 @@ func TestCVBuildEpochContextUsesNewCommitteeFaultThreshold(t *testing.T) {
 		FOld:         1,
 		FNew:         2,
 	})
-	leafContext, err := cvBuildEpochLeafContextV1(cfg, &cvReceiverKeyMaterialV1{
+	leafContext, err := cvBuildEpochLeafContext(cfg, &cvReceiverKeyMaterial{
 		receiverPublicKeys: receiverKeys,
 		registryDigest:     make([]byte, 32),
 	})
@@ -290,7 +293,7 @@ func TestRunCVEpochRejectsLegacyProfileBeforeNetwork(t *testing.T) {
 func TestCVRunMaterializedAgreementRejectsMissingLocalRLO(t *testing.T) {
 	cfg, _, _, _ := cvM4Fixture(t)
 	cfg.LocalNodeIDs = []int{0}
-	if _, _, err := cvRunMaterializedAgreementV1(context.Background(), cfg, nil); err == nil {
+	if _, _, err := cvRunMaterializedAgreement(context.Background(), cfg, nil); err == nil {
 		t.Fatal("materialized agreement accepted a missing local RLO")
 	}
 }

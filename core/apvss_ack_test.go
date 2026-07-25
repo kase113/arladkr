@@ -9,14 +9,14 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-type apvssTestFixtureV1 struct {
-	context         cvLeafContextV1
-	leaf            *cvLeafV1
+type apvssTestFixture struct {
+	context         cvLeafContext
+	leaf            *cvLeaf
 	receiverSecrets []fr.Element
-	witness         apvssDealerWitnessV1
+	witness         apvssDealerWitness
 }
 
-func apvssFixtureV1(tb testing.TB, receivers, f int) apvssTestFixtureV1 {
+func apvssFixture(tb testing.TB, receivers, f int) apvssTestFixture {
 	tb.Helper()
 	if receivers <= 0 || f < 0 || f >= receivers {
 		tb.Fatal("invalid APVSS fixture topology")
@@ -35,14 +35,14 @@ func apvssFixtureV1(tb testing.TB, receivers, f int) apvssTestFixtureV1 {
 			tb.Fatal(err)
 		}
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("apvss-ack-test-session"),
 		epoch:              17,
 		sharingDegree:      f,
 		profile:            profile,
 		receiverPublicKeys: keys,
 		dealerSetPolicy:    []byte("availability-then-local-valid-k"),
-		proofProfile:       cvLeafV1StructuralProofProfile,
+		proofProfile:       cvLeafStructuralProofProfile,
 	}
 	scalarCoefficients := make([]fr.Element, f+1)
 	blindingCoefficients := make([]fr.Element, f+1)
@@ -56,7 +56,7 @@ func apvssFixtureV1(tb testing.TB, receivers, f int) apvssTestFixtureV1 {
 		scalarCoins[i] = cvTestCoins(chunks, uint64(2001+i*(chunks+1)))
 		blindingCoins[i] = cvTestScalar(uint64(9001 + i))
 	}
-	leaf, err := cvReferenceDealV1(
+	leaf, err := cvReferenceDeal(
 		context,
 		41,
 		scalarCoefficients,
@@ -67,7 +67,7 @@ func apvssFixtureV1(tb testing.TB, receivers, f int) apvssTestFixtureV1 {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	witness := apvssDealerWitnessV1{
+	witness := apvssDealerWitness{
 		scalars:       make([]fr.Element, receivers),
 		blindings:     make([]fr.Element, receivers),
 		scalarCoins:   scalarCoins,
@@ -77,7 +77,7 @@ func apvssFixtureV1(tb testing.TB, receivers, f int) apvssTestFixtureV1 {
 		witness.scalars[i] = evalPolyInt(scalarCoefficients, int64(i+1))
 		witness.blindings[i] = evalPolyInt(blindingCoefficients, int64(i+1))
 	}
-	return apvssTestFixtureV1{
+	return apvssTestFixture{
 		context:         context,
 		leaf:            leaf,
 		receiverSecrets: secrets,
@@ -85,17 +85,17 @@ func apvssFixtureV1(tb testing.TB, receivers, f int) apvssTestFixtureV1 {
 	}
 }
 
-func apvssClonePrototypeV1ForTest(in *apvssLeafPrototypeV1) *apvssLeafPrototypeV1 {
+func apvssClonePrototypeForTest(in *apvssLeafPrototype) *apvssLeafPrototype {
 	out := *in
-	out.acks = append([]apvssLaneACKV1(nil), in.acks...)
-	out.fallbackProofs = append([]apvssFallbackProofV1(nil), in.fallbackProofs...)
+	out.acks = append([]apvssLaneACK(nil), in.acks...)
+	out.fallbackProofs = append([]apvssFallbackProof(nil), in.fallbackProofs...)
 	out.fallbackIndices = append([]int(nil), in.fallbackIndices...)
-	out.compactFallback = apvssCloneCompactFallbackProofV1ForTest(in.compactFallback)
+	out.compactFallback = apvssCloneCompactFallbackProofForTest(in.compactFallback)
 	return &out
 }
 
 func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
+	fixture := apvssFixture(t, 7, 2)
 	profiles := []struct {
 		name     string
 		fallback []int
@@ -107,7 +107,7 @@ func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
 	previousBytes := 0
 	for _, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			prototype, err := apvssBuildPrototypeV1(
+			prototype, err := apvssBuildPrototype(
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
@@ -121,10 +121,10 @@ func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
 				len(prototype.fallbackProofs) != len(profile.fallback) {
 				t.Fatalf("ACK/fallback counts = %d/%d", len(prototype.acks), len(prototype.fallbackProofs))
 			}
-			if err := apvssVerifyPrototypeV1(&fixture.context, prototype); err != nil {
+			if err := apvssVerifyPrototype(&fixture.context, prototype); err != nil {
 				t.Fatalf("valid APVSS prototype rejected: %v", err)
 			}
-			proofBytes, err := apvssProofMaterialBytesV1(prototype)
+			proofBytes, err := apvssProofMaterialBytes(prototype)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -137,33 +137,33 @@ func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
 }
 
 func TestAPVSSFallbackBackendSelectionFailsClosedV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
-	compact, err := apvssBuildPrototypeWithFallbackProfileV1(
+	fixture := apvssFixture(t, 7, 2)
+	compact, err := apvssBuildPrototypeWithFallbackProfile(
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
 		&fixture.witness,
 		[]int{1, 2},
-		apvssFallbackCompactBatchProfileV1,
+		apvssFallbackCompactBatchProfile,
 	)
 	if err != nil {
 		t.Fatalf("build experimental compact APVSS fallback: %v", err)
 	}
-	if err := apvssVerifyPrototypeV1(&fixture.context, compact); err != nil {
+	if err := apvssVerifyPrototype(&fixture.context, compact); err != nil {
 		t.Fatalf("verify experimental compact APVSS fallback: %v", err)
 	}
-	if _, err := apvssBuildPrototypeWithFallbackProfileV1(
+	if _, err := apvssBuildPrototypeWithFallbackProfile(
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
 		&fixture.witness,
 		[]int{1, 2},
-		"unknown-fallback-v1",
+		"unknown-fallback",
 	); err == nil {
 		t.Fatal("built APVSS fallback using an unknown profile")
 	}
 
-	prototype, err := apvssBuildPrototypeV1(
+	prototype, err := apvssBuildPrototype(
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
@@ -173,38 +173,38 @@ func TestAPVSSFallbackBackendSelectionFailsClosedV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, profile := range []string{apvssFallbackCompactBatchProfileV1, "unknown-fallback-v1"} {
-		bad := apvssClonePrototypeV1ForTest(prototype)
+	for _, profile := range []string{apvssFallbackCompactBatchProfile, "unknown-fallback"} {
+		bad := apvssClonePrototypeForTest(prototype)
 		bad.fallbackProfile = profile
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatalf("verified APVSS fallback after profile replay to %q", profile)
 		}
 	}
 	for _, profile := range []string{
-		apvssFallbackExactLaneProfileV1,
-		apvssFallbackCompactBatchProfileV1,
-		"unknown-fallback-v1",
+		apvssFallbackExactLaneProfile,
+		apvssFallbackCompactBatchProfile,
+		"unknown-fallback",
 	} {
-		if err := apvssRequireProductionFallbackBackendV1(profile); err == nil {
+		if err := apvssRequireProductionFallbackBackend(profile); err == nil {
 			t.Fatalf("admitted incomplete APVSS production fallback profile %q", profile)
 		}
 	}
 }
 
 func TestAPVSSFallbackSetStatementBindingV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
-	digest, err := apvssFallbackSetStatementDigestV1(
+	fixture := apvssFixture(t, 7, 2)
+	digest, err := apvssFallbackSetStatementDigest(
 		fixture.leaf,
 		[]int{1, 2},
-		apvssFallbackExactLaneProfileV1,
+		apvssFallbackExactLaneProfile,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compactDigest, err := apvssFallbackSetStatementDigestV1(
+	compactDigest, err := apvssFallbackSetStatementDigest(
 		fixture.leaf,
 		[]int{1, 2},
-		apvssFallbackCompactBatchProfileV1,
+		apvssFallbackCompactBatchProfile,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -212,10 +212,10 @@ func TestAPVSSFallbackSetStatementBindingV1(t *testing.T) {
 	if bytes.Equal(digest, compactDigest) {
 		t.Fatal("fallback statement digest did not bind proof profile")
 	}
-	otherSetDigest, err := apvssFallbackSetStatementDigestV1(
+	otherSetDigest, err := apvssFallbackSetStatementDigest(
 		fixture.leaf,
 		[]int{1},
-		apvssFallbackExactLaneProfileV1,
+		apvssFallbackExactLaneProfile,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -223,23 +223,23 @@ func TestAPVSSFallbackSetStatementBindingV1(t *testing.T) {
 	if bytes.Equal(digest, otherSetDigest) {
 		t.Fatal("fallback statement digest did not bind ordered I")
 	}
-	if _, err := apvssFallbackSetStatementDigestV1(
+	if _, err := apvssFallbackSetStatementDigest(
 		fixture.leaf,
 		[]int{2, 1},
-		apvssFallbackExactLaneProfileV1,
+		apvssFallbackExactLaneProfile,
 	); err == nil {
 		t.Fatal("fallback statement accepted a reordered I")
 	}
 
-	mutated := cvCloneLeafV1ForTest(fixture.leaf)
+	mutated := cvCloneLeafForTest(fixture.leaf)
 	mutated.receivers[0].encryptedShare.scalarChunks[0].c.Add(
 		&mutated.receivers[0].encryptedShare.scalarChunks[0].c,
 		&genG1,
 	)
-	mutatedDigest, err := apvssFallbackSetStatementDigestV1(
+	mutatedDigest, err := apvssFallbackSetStatementDigest(
 		mutated,
 		[]int{1, 2},
-		apvssFallbackExactLaneProfileV1,
+		apvssFallbackExactLaneProfile,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -250,8 +250,8 @@ func TestAPVSSFallbackSetStatementBindingV1(t *testing.T) {
 }
 
 func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 4, 1)
-	if err := apvssValidateFallbackLaneWitnessV1(
+	fixture := apvssFixture(t, 4, 1)
+	if err := apvssValidateFallbackLaneWitness(
 		fixture.leaf,
 		1,
 		fixture.witness.scalars[0],
@@ -265,7 +265,7 @@ func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
 	badScalar := fixture.witness.scalars[0]
 	one := fr.One()
 	badScalar.Add(&badScalar, &one)
-	if err := apvssValidateFallbackLaneWitnessV1(
+	if err := apvssValidateFallbackLaneWitness(
 		fixture.leaf,
 		1,
 		badScalar,
@@ -278,7 +278,7 @@ func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
 
 	badBlinding := fixture.witness.blindings[0]
 	badBlinding.Add(&badBlinding, &one)
-	if err := apvssValidateFallbackLaneWitnessV1(
+	if err := apvssValidateFallbackLaneWitness(
 		fixture.leaf,
 		1,
 		fixture.witness.scalars[0],
@@ -293,7 +293,7 @@ func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
 	badCoin.Add(&badCoin, &one)
 	badCoins := append([]fr.Element(nil), fixture.witness.scalarCoins[0]...)
 	badCoins[0] = badCoin
-	if err := apvssValidateFallbackLaneWitnessV1(
+	if err := apvssValidateFallbackLaneWitness(
 		fixture.leaf,
 		1,
 		fixture.witness.scalars[0],
@@ -306,51 +306,51 @@ func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
 }
 
 func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 4, 1)
-	ack, err := apvssIssueLaneACKV1(&fixture.context, fixture.leaf, 1, fixture.receiverSecrets[0])
+	fixture := apvssFixture(t, 4, 1)
+	ack, err := apvssIssueLaneACK(&fixture.context, fixture.leaf, 1, fixture.receiverSecrets[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := apvssVerifyLaneACKV1(fixture.leaf, &ack); err != nil {
+	if err := apvssVerifyLaneACK(fixture.leaf, &ack); err != nil {
 		t.Fatalf("valid ACK rejected: %v", err)
 	}
 
 	t.Run("ciphertext replacement after ACK", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(fixture.leaf)
+		bad := cvCloneLeafForTest(fixture.leaf)
 		bad.receivers[0].encryptedShare.scalarChunks[0].c.Add(
 			&bad.receivers[0].encryptedShare.scalarChunks[0].c,
 			&genG1,
 		)
-		bad.digest = cvLeafV1Digest(bad)
-		if err := apvssVerifyLaneACKV1(bad, &ack); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := apvssVerifyLaneACK(bad, &ack); err == nil {
 			t.Fatal("ACK accepted a replaced ciphertext")
 		}
 	})
 	t.Run("epoch replay", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(fixture.leaf)
+		bad := cvCloneLeafForTest(fixture.leaf)
 		bad.context.epoch++
-		bad.digest = cvLeafV1Digest(bad)
-		if err := apvssVerifyLaneACKV1(bad, &ack); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := apvssVerifyLaneACK(bad, &ack); err == nil {
 			t.Fatal("ACK replayed across epochs")
 		}
 	})
 	t.Run("dealer replay", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(fixture.leaf)
+		bad := cvCloneLeafForTest(fixture.leaf)
 		bad.dealerID++
-		bad.digest = cvLeafV1Digest(bad)
-		if err := apvssVerifyLaneACKV1(bad, &ack); err == nil {
+		bad.digest = cvLeafDigest(bad)
+		if err := apvssVerifyLaneACK(bad, &ack); err == nil {
 			t.Fatal("ACK replayed across dealers")
 		}
 	})
 	t.Run("receiver replay", func(t *testing.T) {
 		badACK := ack
 		badACK.receiverIndex = 2
-		if err := apvssVerifyLaneACKV1(fixture.leaf, &badACK); err == nil {
+		if err := apvssVerifyLaneACK(fixture.leaf, &badACK); err == nil {
 			t.Fatal("ACK replayed for another receiver")
 		}
 	})
 	t.Run("wrong receiver secret", func(t *testing.T) {
-		if _, err := apvssIssueLaneACKV1(
+		if _, err := apvssIssueLaneACK(
 			&fixture.context,
 			fixture.leaf,
 			1,
@@ -360,13 +360,13 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 		}
 	})
 	t.Run("wrong scalar opening", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(fixture.leaf)
+		bad := cvCloneLeafForTest(fixture.leaf)
 		bad.receivers[0].encryptedShare.scalarChunks[0].c.Add(
 			&bad.receivers[0].encryptedShare.scalarChunks[0].c,
 			&genG1,
 		)
-		bad.digest = cvLeafV1Digest(bad)
-		if _, err := apvssIssueLaneACKV1(
+		bad.digest = cvLeafDigest(bad)
+		if _, err := apvssIssueLaneACK(
 			&fixture.context,
 			bad,
 			1,
@@ -376,13 +376,13 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 		}
 	})
 	t.Run("mutated blinding ciphertext", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(fixture.leaf)
+		bad := cvCloneLeafForTest(fixture.leaf)
 		bad.receivers[0].encryptedShare.blinding.c.Add(
 			&bad.receivers[0].encryptedShare.blinding.c,
 			&genG1,
 		)
-		bad.digest = cvLeafV1Digest(bad)
-		if _, err := apvssIssueLaneACKV1(
+		bad.digest = cvLeafDigest(bad)
+		if _, err := apvssIssueLaneACK(
 			&fixture.context,
 			bad,
 			1,
@@ -392,7 +392,7 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 		}
 	})
 	t.Run("noncanonical s plus q digits", func(t *testing.T) {
-		bad := cvCloneLeafV1ForTest(fixture.leaf)
+		bad := cvCloneLeafForTest(fixture.leaf)
 		lifted := new(big.Int).Add(
 			fr.Modulus(),
 			fixture.witness.scalars[0].BigInt(new(big.Int)),
@@ -416,8 +416,8 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 		if lifted.Sign() != 0 {
 			t.Fatal("fixture chunk width did not cover s+q")
 		}
-		bad.digest = cvLeafV1Digest(bad)
-		if _, err := apvssIssueLaneACKV1(
+		bad.digest = cvLeafDigest(bad)
+		if _, err := apvssIssueLaneACK(
 			&fixture.context,
 			bad,
 			1,
@@ -429,14 +429,14 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 }
 
 func TestAPVSSACKFallbackPartitionRejectsMalformedSetsV1(t *testing.T) {
-	fixture := apvssFixtureV1(t, 7, 2)
-	allACK, err := apvssBuildPrototypeV1(
+	fixture := apvssFixture(t, 7, 2)
+	allACK, err := apvssBuildPrototype(
 		&fixture.context, fixture.leaf, fixture.receiverSecrets, &fixture.witness, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	withFallback, err := apvssBuildPrototypeV1(
+	withFallback, err := apvssBuildPrototype(
 		&fixture.context, fixture.leaf, fixture.receiverSecrets, &fixture.witness, []int{1},
 	)
 	if err != nil {
@@ -444,51 +444,51 @@ func TestAPVSSACKFallbackPartitionRejectsMalformedSetsV1(t *testing.T) {
 	}
 
 	t.Run("I empty carries proof", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(allACK)
+		bad := apvssClonePrototypeForTest(allACK)
 		bad.fallbackProofs = append(bad.fallbackProofs, withFallback.fallbackProofs[0])
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("all-ACK leaf accepted a fallback proof")
 		}
 	})
 	t.Run("I nonempty missing proof", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(withFallback)
+		bad := apvssClonePrototypeForTest(withFallback)
 		bad.fallbackProofs = nil
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("accepted an uncovered receiver")
 		}
 	})
 	t.Run("ACK and I overlap", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(withFallback)
-		bad.acks = append([]apvssLaneACKV1{allACK.acks[0]}, bad.acks...)
+		bad := apvssClonePrototypeForTest(withFallback)
+		bad.acks = append([]apvssLaneACK{allACK.acks[0]}, bad.acks...)
 		bad.acks = bad.acks[:len(bad.acks)-1]
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("accepted overlapping ACK and fallback sets")
 		}
 	})
 	t.Run("duplicate ACK", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(allACK)
+		bad := apvssClonePrototypeForTest(allACK)
 		bad.acks[1] = bad.acks[0]
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("accepted duplicate ACK receiver indices")
 		}
 	})
 	t.Run("out of order ACK", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(allACK)
+		bad := apvssClonePrototypeForTest(allACK)
 		bad.acks[0], bad.acks[1] = bad.acks[1], bad.acks[0]
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("accepted out-of-order ACK receiver indices")
 		}
 	})
 	t.Run("duplicate fallback", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(withFallback)
+		bad := apvssClonePrototypeForTest(withFallback)
 		bad.acks = bad.acks[:len(bad.acks)-1]
 		bad.fallbackProofs = append(bad.fallbackProofs, bad.fallbackProofs[0])
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("accepted duplicate fallback receiver indices")
 		}
 	})
 	t.Run("I exceeds f", func(t *testing.T) {
-		if _, err := apvssBuildPrototypeV1(
+		if _, err := apvssBuildPrototype(
 			&fixture.context,
 			fixture.leaf,
 			fixture.receiverSecrets,
@@ -499,25 +499,25 @@ func TestAPVSSACKFallbackPartitionRejectsMalformedSetsV1(t *testing.T) {
 		}
 	})
 	t.Run("fallback proof mutation", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(withFallback)
-		proxy := &cvLeafV1{proof: bad.fallbackProofs[0].proof}
-		clonedProof := cvCloneLeafV1ForTest(proxy).proof
+		bad := apvssClonePrototypeForTest(withFallback)
+		proxy := &cvLeaf{proof: bad.fallbackProofs[0].proof}
+		clonedProof := cvCloneLeafForTest(proxy).proof
 		one := fr.One()
 		clonedProof.sharing.zScalar.Add(&clonedProof.sharing.zScalar, &one)
 		bad.fallbackProofs[0].proof = clonedProof
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("accepted a mutated exact fallback proof")
 		}
 	})
 	t.Run("ciphertext replacement after fallback proof", func(t *testing.T) {
-		bad := apvssClonePrototypeV1ForTest(withFallback)
-		bad.leaf = cvCloneLeafV1ForTest(withFallback.leaf)
+		bad := apvssClonePrototypeForTest(withFallback)
+		bad.leaf = cvCloneLeafForTest(withFallback.leaf)
 		bad.leaf.receivers[0].encryptedShare.scalarChunks[0].c.Add(
 			&bad.leaf.receivers[0].encryptedShare.scalarChunks[0].c,
 			&genG1,
 		)
-		bad.leaf.digest = cvLeafV1Digest(bad.leaf)
-		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+		bad.leaf.digest = cvLeafDigest(bad.leaf)
+		if err := apvssVerifyPrototype(&fixture.context, bad); err == nil {
 			t.Fatal("fallback proof accepted a replaced ciphertext")
 		}
 	})

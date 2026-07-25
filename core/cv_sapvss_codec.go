@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	cvMaxLeafProofWireBytesV1 = 64 << 20
-	cvMaxLeafWireBytesV1      = 64 << 20
+	cvMaxLeafProofWireBytes = 64 << 20
+	cvMaxLeafWireBytes      = 64 << 20
 )
 
 func (r *cvWireReader) scalar() (fr.Element, error) {
@@ -26,84 +26,84 @@ func (r *cvWireReader) scalar() (fr.Element, error) {
 	return scalar, nil
 }
 
-func cvCheckedProductV1(left, right int, field string) (int, error) {
+func cvCheckedProduct(left, right int, field string) (int, error) {
 	if left < 0 || right < 0 || (left != 0 && right > int(^uint(0)>>1)/left) {
 		return 0, fmt.Errorf("invalid CV-sAPVSS %s size", field)
 	}
 	return left * right, nil
 }
 
-func cvCheckedAddV1(left, right int, field string) (int, error) {
+func cvCheckedAdd(left, right int, field string) (int, error) {
 	if left < 0 || right < 0 || right > int(^uint(0)>>1)-left {
 		return 0, fmt.Errorf("invalid CV-sAPVSS %s size", field)
 	}
 	return left + right, nil
 }
 
-func cvCountedVectorWireSizeV1(count, width int, field string) (int, error) {
-	payload, err := cvCheckedProductV1(count, width, field)
+func cvCountedVectorWireSize(count, width int, field string) (int, error) {
+	payload, err := cvCheckedProduct(count, width, field)
 	if err != nil {
 		return 0, err
 	}
-	return cvCheckedAddV1(4, payload, field)
+	return cvCheckedAdd(4, payload, field)
 }
 
-func cvLeafProofWireSizeV1(context *cvLeafContextV1) (int, error) {
-	if err := cvValidateLeafContextV1(context); err != nil {
+func cvLeafProofWireSize(context *cvLeafContext) (int, error) {
+	if err := cvValidateLeafContext(context); err != nil {
 		return 0, err
 	}
-	if context.proofProfile != cvLeafV1GrothProofProfile {
-		return 0, fmt.Errorf("CV-sAPVSS LeafV1 proof is not enabled by the context")
+	if context.proofProfile != cvLeafGrothProofProfile {
+		return 0, fmt.Errorf("CV-sAPVSS Leaf proof is not enabled by the context")
 	}
 	receivers := len(context.receiverPublicKeys)
 	chunks, err := cvChunkCount(context.profile)
 	if err != nil {
 		return 0, err
 	}
-	receiversPlusOne, err := cvCheckedAddV1(receivers, 1, "chunk D")
+	receiversPlusOne, err := cvCheckedAdd(receivers, 1, "chunk D")
 	if err != nil {
 		return 0, err
 	}
-	wantBits, err := cvCheckedProductV1(receivers, chunks, "exact range proof")
+	wantBits, err := cvCheckedProduct(receivers, chunks, "exact range proof")
 	if err != nil {
 		return 0, err
 	}
-	wantBits, err = cvCheckedProductV1(wantBits, int(context.profile.chunkBits), "exact range proof")
+	wantBits, err = cvCheckedProduct(wantBits, int(context.profile.chunkBits), "exact range proof")
 	if err != nil {
 		return 0, err
 	}
 
 	pointVector := func(count int, field string) (int, error) {
-		return cvCountedVectorWireSizeV1(count, bls12381.SizeOfG1AffineCompressed, field)
+		return cvCountedVectorWireSize(count, bls12381.SizeOfG1AffineCompressed, field)
 	}
 	scalarVector := func(count int, field string) (int, error) {
-		return cvCountedVectorWireSizeV1(count, fr.Bytes, field)
+		return cvCountedVectorWireSize(count, fr.Bytes, field)
 	}
 	total := 0
 	add := func(size int, field string) error {
 		var addErr error
-		total, addErr = cvCheckedAddV1(total, size, field)
+		total, addErr = cvCheckedAdd(total, size, field)
 		return addErr
 	}
 	addProduct := func(count, width int, field string) error {
-		size, productErr := cvCheckedProductV1(count, width, field)
+		size, productErr := cvCheckedProduct(count, width, field)
 		if productErr != nil {
 			return productErr
 		}
 		return add(size, field)
 	}
 	addVector := func(count, width int, field string) error {
-		size, vectorErr := cvCountedVectorWireSizeV1(count, width, field)
+		size, vectorErr := cvCountedVectorWireSize(count, width, field)
 		if vectorErr != nil {
 			return vectorErr
 		}
 		return add(size, field)
 	}
 
-	if err := addProduct(6, bls12381.SizeOfG1AffineCompressed, "LeafV1 proof points"); err != nil {
+	if err := addProduct(6, bls12381.SizeOfG1AffineCompressed, "Leaf proof points"); err != nil {
 		return 0, err
 	}
-	if err := addProduct(4, fr.Bytes, "LeafV1 sharing scalars"); err != nil {
+	if err := addProduct(4, fr.Bytes, "Leaf sharing scalars"); err != nil {
 		return 0, err
 	}
 	for _, vector := range []struct {
@@ -156,16 +156,16 @@ func cvLeafProofWireSizeV1(context *cvLeafContextV1) (int, error) {
 		scalarResponses,
 		scalarResponses,
 	} {
-		linkSize, err = cvCheckedAddV1(linkSize, size, "exact range link")
+		linkSize, err = cvCheckedAdd(linkSize, size, "exact range link")
 		if err != nil {
 			return 0, err
 		}
 	}
-	linksPayload, err := cvCheckedProductV1(chunks, linkSize, "exact range links")
+	linksPayload, err := cvCheckedProduct(chunks, linkSize, "exact range links")
 	if err != nil {
 		return 0, err
 	}
-	linksSize, err := cvCheckedAddV1(4, linksPayload, "exact range links")
+	linksSize, err := cvCheckedAdd(4, linksPayload, "exact range links")
 	if err != nil {
 		return 0, err
 	}
@@ -175,11 +175,11 @@ func cvLeafProofWireSizeV1(context *cvLeafContextV1) (int, error) {
 	return total, nil
 }
 
-func cvLeafWireSizeV1(context *cvLeafContextV1) (int, error) {
-	if err := cvValidateLeafContextV1(context); err != nil {
+func cvLeafWireSize(context *cvLeafContext) (int, error) {
+	if err := cvValidateLeafContext(context); err != nil {
 		return 0, err
 	}
-	contextWire, err := cvLeafContextV1CanonicalBytes(context)
+	contextWire, err := cvLeafContextCanonicalBytes(context)
 	if err != nil {
 		return 0, err
 	}
@@ -188,55 +188,55 @@ func cvLeafWireSizeV1(context *cvLeafContextV1) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	commitments, err := cvCheckedAddV1(context.sharingDegree, 1, "LeafV1 coefficient commitments")
+	commitments, err := cvCheckedAdd(context.sharingDegree, 1, "Leaf coefficient commitments")
 	if err != nil {
 		return 0, err
 	}
-	ciphertexts, err := cvCheckedAddV1(chunks, 1, "LeafV1 receiver ciphertexts")
+	ciphertexts, err := cvCheckedAdd(chunks, 1, "Leaf receiver ciphertexts")
 	if err != nil {
 		return 0, err
 	}
-	ciphertextBytes, err := cvCheckedProductV1(ciphertexts, 2*bls12381.SizeOfG1AffineCompressed, "LeafV1 receiver ciphertexts")
+	ciphertextBytes, err := cvCheckedProduct(ciphertexts, 2*bls12381.SizeOfG1AffineCompressed, "Leaf receiver ciphertexts")
 	if err != nil {
 		return 0, err
 	}
-	receiverSize, err := cvCheckedAddV1(4+3*bls12381.SizeOfG1AffineCompressed+4, ciphertextBytes, "LeafV1 receiver")
+	receiverSize, err := cvCheckedAdd(4+3*bls12381.SizeOfG1AffineCompressed+4, ciphertextBytes, "Leaf receiver")
 	if err != nil {
 		return 0, err
 	}
-	receiverPayload, err := cvCheckedProductV1(receivers, receiverSize, "LeafV1 receivers")
+	receiverPayload, err := cvCheckedProduct(receivers, receiverSize, "Leaf receivers")
 	if err != nil {
 		return 0, err
 	}
-	receiverVector, err := cvCheckedAddV1(4, receiverPayload, "LeafV1 receivers")
+	receiverVector, err := cvCheckedAdd(4, receiverPayload, "Leaf receivers")
 	if err != nil {
 		return 0, err
 	}
-	commitmentVector, err := cvCountedVectorWireSizeV1(commitments, bls12381.SizeOfG1AffineCompressed, "LeafV1 coefficient commitments")
+	commitmentVector, err := cvCountedVectorWireSize(commitments, bls12381.SizeOfG1AffineCompressed, "Leaf coefficient commitments")
 	if err != nil {
 		return 0, err
 	}
-	contextField, err := cvCheckedAddV1(4, len(contextWire), "LeafV1 context")
+	contextField, err := cvCheckedAdd(4, len(contextWire), "Leaf context")
 	if err != nil {
 		return 0, err
 	}
 	total := 0
 	for _, size := range []int{contextField, 8, commitmentVector, receiverVector, 1} {
-		total, err = cvCheckedAddV1(total, size, "LeafV1")
+		total, err = cvCheckedAdd(total, size, "Leaf")
 		if err != nil {
 			return 0, err
 		}
 	}
-	if context.proofProfile == cvLeafV1GrothProofProfile {
-		proofSize, proofErr := cvLeafProofWireSizeV1(context)
+	if context.proofProfile == cvLeafGrothProofProfile {
+		proofSize, proofErr := cvLeafProofWireSize(context)
 		if proofErr != nil {
 			return 0, proofErr
 		}
-		proofField, proofErr := cvCheckedAddV1(4, proofSize, "LeafV1 proof")
+		proofField, proofErr := cvCheckedAdd(4, proofSize, "Leaf proof")
 		if proofErr != nil {
 			return 0, proofErr
 		}
-		total, err = cvCheckedAddV1(total, proofField, "LeafV1")
+		total, err = cvCheckedAdd(total, proofField, "Leaf")
 		if err != nil {
 			return 0, err
 		}
@@ -244,7 +244,7 @@ func cvLeafWireSizeV1(context *cvLeafContextV1) (int, error) {
 	return total, nil
 }
 
-func cvReadExactBytesV1(r *cvWireReader, expected int, field string) ([]byte, error) {
+func cvReadExactBytes(r *cvWireReader, expected int, field string) ([]byte, error) {
 	value, err := r.bytes(expected)
 	if err != nil {
 		return nil, fmt.Errorf("decode CV-sAPVSS %s: %w", field, err)
@@ -255,8 +255,8 @@ func cvReadExactBytesV1(r *cvWireReader, expected int, field string) ([]byte, er
 	return value, nil
 }
 
-func cvRequireRemainingV1(r *cvWireReader, count, width int, field string) error {
-	required, err := cvCheckedProductV1(count, width, field)
+func cvRequireRemaining(r *cvWireReader, count, width int, field string) error {
+	required, err := cvCheckedProduct(count, width, field)
 	if err != nil {
 		return err
 	}
@@ -266,7 +266,7 @@ func cvRequireRemainingV1(r *cvWireReader, count, width int, field string) error
 	return nil
 }
 
-func cvReadExactCountV1(r *cvWireReader, expected int, field string) error {
+func cvReadExactCount(r *cvWireReader, expected int, field string) error {
 	count, err := r.uint32()
 	if err != nil {
 		return fmt.Errorf("decode CV-sAPVSS %s count: %w", field, err)
@@ -277,11 +277,11 @@ func cvReadExactCountV1(r *cvWireReader, expected int, field string) error {
 	return nil
 }
 
-func cvReadExactPointVectorV1(r *cvWireReader, expected int, field string) ([]bls12381.G1Affine, error) {
-	if err := cvReadExactCountV1(r, expected, field); err != nil {
+func cvReadExactPointVector(r *cvWireReader, expected int, field string) ([]bls12381.G1Affine, error) {
+	if err := cvReadExactCount(r, expected, field); err != nil {
 		return nil, err
 	}
-	if err := cvRequireRemainingV1(r, expected, bls12381.SizeOfG1AffineCompressed, field); err != nil {
+	if err := cvRequireRemaining(r, expected, bls12381.SizeOfG1AffineCompressed, field); err != nil {
 		return nil, err
 	}
 	points := make([]bls12381.G1Affine, expected)
@@ -295,11 +295,11 @@ func cvReadExactPointVectorV1(r *cvWireReader, expected int, field string) ([]bl
 	return points, nil
 }
 
-func cvReadExactScalarVectorV1(r *cvWireReader, expected int, field string) ([]fr.Element, error) {
-	if err := cvReadExactCountV1(r, expected, field); err != nil {
+func cvReadExactScalarVector(r *cvWireReader, expected int, field string) ([]fr.Element, error) {
+	if err := cvReadExactCount(r, expected, field); err != nil {
 		return nil, err
 	}
-	if err := cvRequireRemainingV1(r, expected, fr.Bytes, field); err != nil {
+	if err := cvRequireRemaining(r, expected, fr.Bytes, field); err != nil {
 		return nil, err
 	}
 	scalars := make([]fr.Element, expected)
@@ -313,39 +313,39 @@ func cvReadExactScalarVectorV1(r *cvWireReader, expected int, field string) ([]f
 	return scalars, nil
 }
 
-func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeafProofV1, error) {
-	if err := cvValidateLeafContextV1(expectedContext); err != nil {
+func cvDecodeLeafProof(wire []byte, expectedContext *cvLeafContext) (*cvLeafProof, error) {
+	if err := cvValidateLeafContext(expectedContext); err != nil {
 		return nil, err
 	}
-	if expectedContext.proofProfile != cvLeafV1GrothProofProfile {
-		return nil, fmt.Errorf("CV-sAPVSS LeafV1 proof is not enabled by the expected context")
+	if expectedContext.proofProfile != cvLeafGrothProofProfile {
+		return nil, fmt.Errorf("CV-sAPVSS Leaf proof is not enabled by the expected context")
 	}
-	expectedWireSize, err := cvLeafProofWireSizeV1(expectedContext)
+	expectedWireSize, err := cvLeafProofWireSize(expectedContext)
 	if err != nil {
 		return nil, err
 	}
-	if expectedWireSize > cvMaxLeafProofWireBytesV1 {
-		return nil, fmt.Errorf("CV-sAPVSS LeafV1 proof exceeds the wire safety limit")
+	if expectedWireSize > cvMaxLeafProofWireBytes {
+		return nil, fmt.Errorf("CV-sAPVSS Leaf proof exceeds the wire safety limit")
 	}
 	if len(wire) != expectedWireSize {
-		return nil, fmt.Errorf("invalid CV-sAPVSS LeafV1 proof length: got %d, want %d", len(wire), expectedWireSize)
+		return nil, fmt.Errorf("invalid CV-sAPVSS Leaf proof length: got %d, want %d", len(wire), expectedWireSize)
 	}
 	receivers := len(expectedContext.receiverPublicKeys)
 	chunks, err := cvChunkCount(expectedContext.profile)
 	if err != nil {
 		return nil, err
 	}
-	wantBits, err := cvCheckedProductV1(receivers, chunks, "exact range proof")
+	wantBits, err := cvCheckedProduct(receivers, chunks, "exact range proof")
 	if err != nil {
 		return nil, err
 	}
-	wantBits, err = cvCheckedProductV1(wantBits, int(expectedContext.profile.chunkBits), "exact range proof")
+	wantBits, err = cvCheckedProduct(wantBits, int(expectedContext.profile.chunkBits), "exact range proof")
 	if err != nil {
 		return nil, err
 	}
 
 	r := newCVWireReader(wire)
-	proof := &cvLeafProofV1{}
+	proof := &cvLeafProof{}
 	for i, point := range []*bls12381.G1Affine{
 		&proof.sharing.fScalar,
 		&proof.sharing.fBlinding,
@@ -356,7 +356,7 @@ func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeaf
 	} {
 		decoded, pointErr := r.point()
 		if pointErr != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 proof point %d: %w", i, pointErr)
+			return nil, fmt.Errorf("decode CV-sAPVSS Leaf proof point %d: %w", i, pointErr)
 		}
 		*point = decoded
 	}
@@ -368,19 +368,19 @@ func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeaf
 	} {
 		decoded, scalarErr := r.scalar()
 		if scalarErr != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 sharing scalar %d: %w", i, scalarErr)
+			return nil, fmt.Errorf("decode CV-sAPVSS Leaf sharing scalar %d: %w", i, scalarErr)
 		}
 		*scalar = decoded
 	}
-	proof.chunking.b, err = cvReadExactPointVectorV1(r, cvChunkProofRepetitions, "chunk B")
+	proof.chunking.b, err = cvReadExactPointVector(r, cvChunkProofRepetitions, "chunk B")
 	if err != nil {
 		return nil, err
 	}
-	proof.chunking.c, err = cvReadExactPointVectorV1(r, cvChunkProofRepetitions, "chunk C")
+	proof.chunking.c, err = cvReadExactPointVector(r, cvChunkProofRepetitions, "chunk C")
 	if err != nil {
 		return nil, err
 	}
-	proof.chunking.d, err = cvReadExactPointVectorV1(r, receivers+1, "chunk D")
+	proof.chunking.d, err = cvReadExactPointVector(r, receivers+1, "chunk D")
 	if err != nil {
 		return nil, err
 	}
@@ -388,11 +388,11 @@ func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeaf
 	if err != nil {
 		return nil, fmt.Errorf("decode CV-sAPVSS chunk Y: %w", err)
 	}
-	proof.chunking.zCoins, err = cvReadExactScalarVectorV1(r, receivers, "chunk coin responses")
+	proof.chunking.zCoins, err = cvReadExactScalarVector(r, receivers, "chunk coin responses")
 	if err != nil {
 		return nil, err
 	}
-	proof.chunking.zDigits, err = cvReadExactScalarVectorV1(r, cvChunkProofRepetitions, "chunk digit responses")
+	proof.chunking.zDigits, err = cvReadExactScalarVector(r, cvChunkProofRepetitions, "chunk digit responses")
 	if err != nil {
 		return nil, err
 	}
@@ -402,18 +402,18 @@ func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeaf
 	}
 
 	rangeProof := &proof.chunking.exactRange
-	rangeProof.commitments, err = cvReadExactPointVectorV1(r, wantBits, "exact range commitments")
+	rangeProof.commitments, err = cvReadExactPointVector(r, wantBits, "exact range commitments")
 	if err != nil {
 		return nil, err
 	}
-	if err := cvReadExactCountV1(r, wantBits, "exact range bit proofs"); err != nil {
+	if err := cvReadExactCount(r, wantBits, "exact range bit proofs"); err != nil {
 		return nil, err
 	}
 	const bitProofWireBytes = 2*bls12381.SizeOfG1AffineCompressed + 3*fr.Bytes
-	if err := cvRequireRemainingV1(r, wantBits, bitProofWireBytes, "exact range bit proofs"); err != nil {
+	if err := cvRequireRemaining(r, wantBits, bitProofWireBytes, "exact range bit proofs"); err != nil {
 		return nil, err
 	}
-	rangeProof.bits = make([]cvBitProofV1, wantBits)
+	rangeProof.bits = make([]cvBitProof, wantBits)
 	for i := range rangeProof.bits {
 		bit := &rangeProof.bits[i]
 		bit.t0, err = r.point()
@@ -437,21 +437,21 @@ func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeaf
 			return nil, fmt.Errorf("decode CV-sAPVSS exact range Z1 %d: %w", i, err)
 		}
 	}
-	if err := cvReadExactCountV1(r, chunks, "exact range links"); err != nil {
+	if err := cvReadExactCount(r, chunks, "exact range links"); err != nil {
 		return nil, err
 	}
-	rangeProof.links = make([]cvRangeLinkProofV1, chunks)
+	rangeProof.links = make([]cvRangeLinkProof, chunks)
 	for i := range rangeProof.links {
 		link := &rangeProof.links[i]
 		link.tCoin, err = r.point()
 		if err != nil {
 			return nil, fmt.Errorf("decode CV-sAPVSS exact range coin link %d: %w", i, err)
 		}
-		link.tCommitments, err = cvReadExactPointVectorV1(r, receivers, "exact range link commitments")
+		link.tCommitments, err = cvReadExactPointVector(r, receivers, "exact range link commitments")
 		if err != nil {
 			return nil, err
 		}
-		link.tCiphertexts, err = cvReadExactPointVectorV1(r, receivers, "exact range link ciphertexts")
+		link.tCiphertexts, err = cvReadExactPointVector(r, receivers, "exact range link ciphertexts")
 		if err != nil {
 			return nil, err
 		}
@@ -459,181 +459,181 @@ func cvDecodeLeafProofV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeaf
 		if err != nil {
 			return nil, fmt.Errorf("decode CV-sAPVSS exact range coin response %d: %w", i, err)
 		}
-		link.zDigits, err = cvReadExactScalarVectorV1(r, receivers, "exact range link digit responses")
+		link.zDigits, err = cvReadExactScalarVector(r, receivers, "exact range link digit responses")
 		if err != nil {
 			return nil, err
 		}
-		link.zRhos, err = cvReadExactScalarVectorV1(r, receivers, "exact range link rho responses")
+		link.zRhos, err = cvReadExactScalarVector(r, receivers, "exact range link rho responses")
 		if err != nil {
 			return nil, err
 		}
 	}
 	if r.reader.Len() != 0 {
-		return nil, fmt.Errorf("trailing CV-sAPVSS LeafV1 proof bytes")
+		return nil, fmt.Errorf("trailing CV-sAPVSS Leaf proof bytes")
 	}
-	canonical, err := cvLeafProofV1CanonicalBytes(proof)
+	canonical, err := cvLeafProofCanonicalBytes(proof)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, wire) {
-		return nil, fmt.Errorf("non-canonical CV-sAPVSS LeafV1 proof encoding")
+		return nil, fmt.Errorf("non-canonical CV-sAPVSS Leaf proof encoding")
 	}
 	return proof, nil
 }
 
-func cvDecodeLeafV1(wire []byte, expectedContext *cvLeafContextV1) (*cvLeafV1, error) {
-	expectedWireSize, err := cvLeafWireSizeV1(expectedContext)
+func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) {
+	expectedWireSize, err := cvLeafWireSize(expectedContext)
 	if err != nil {
 		return nil, err
 	}
-	if expectedWireSize > cvMaxLeafWireBytesV1 {
-		return nil, fmt.Errorf("CV-sAPVSS LeafV1 exceeds the wire safety limit")
+	if expectedWireSize > cvMaxLeafWireBytes {
+		return nil, fmt.Errorf("CV-sAPVSS Leaf exceeds the wire safety limit")
 	}
 	if len(wire) != expectedWireSize {
-		return nil, fmt.Errorf("invalid CV-sAPVSS LeafV1 length: got %d, want %d", len(wire), expectedWireSize)
+		return nil, fmt.Errorf("invalid CV-sAPVSS Leaf length: got %d, want %d", len(wire), expectedWireSize)
 	}
-	expectedContextWire, err := cvLeafContextV1CanonicalBytes(expectedContext)
+	expectedContextWire, err := cvLeafContextCanonicalBytes(expectedContext)
 	if err != nil {
 		return nil, err
 	}
 	r := newCVWireReader(wire)
-	contextWire, err := cvReadExactBytesV1(r, len(expectedContextWire), "LeafV1 context")
+	contextWire, err := cvReadExactBytes(r, len(expectedContextWire), "Leaf context")
 	if err != nil || !bytes.Equal(contextWire, expectedContextWire) {
-		return nil, fmt.Errorf("CV-sAPVSS LeafV1 context mismatch")
+		return nil, fmt.Errorf("CV-sAPVSS Leaf context mismatch")
 	}
-	context, err := cvDecodeLeafContextV1(contextWire)
+	context, err := cvDecodeLeafContext(contextWire)
 	if err != nil {
 		return nil, err
 	}
-	leaf := &cvLeafV1{context: context}
+	leaf := &cvLeaf{context: context}
 	leaf.dealerID, err = r.uint64()
 	if err != nil {
-		return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 dealer: %w", err)
+		return nil, fmt.Errorf("decode CV-sAPVSS Leaf dealer: %w", err)
 	}
-	leaf.coefficientCommitments, err = cvReadExactPointVectorV1(
+	leaf.coefficientCommitments, err = cvReadExactPointVector(
 		r,
 		expectedContext.sharingDegree+1,
-		"LeafV1 coefficient commitments",
+		"Leaf coefficient commitments",
 	)
 	if err != nil {
 		return nil, err
 	}
 	receivers := len(expectedContext.receiverPublicKeys)
-	if err := cvReadExactCountV1(r, receivers, "LeafV1 receivers"); err != nil {
+	if err := cvReadExactCount(r, receivers, "Leaf receivers"); err != nil {
 		return nil, err
 	}
 	chunks, err := cvChunkCount(expectedContext.profile)
 	if err != nil {
 		return nil, err
 	}
-	ciphertextBytes, err := cvCheckedProductV1(chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "LeafV1 receiver ciphertexts")
+	ciphertextBytes, err := cvCheckedProduct(chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "Leaf receiver ciphertexts")
 	if err != nil {
 		return nil, err
 	}
 	receiverBytes := 4 + 3*bls12381.SizeOfG1AffineCompressed + 4 + ciphertextBytes
-	if err := cvRequireRemainingV1(r, receivers, receiverBytes, "LeafV1 receivers"); err != nil {
+	if err := cvRequireRemaining(r, receivers, receiverBytes, "Leaf receivers"); err != nil {
 		return nil, err
 	}
-	leaf.receivers = make([]cvLeafReceiverV1, receivers)
+	leaf.receivers = make([]cvLeafReceiver, receivers)
 	for i := range leaf.receivers {
 		receiver := &leaf.receivers[i]
 		receiver.receiverIndex, err = r.uint32()
 		if err != nil || receiver.receiverIndex != i+1 {
-			return nil, fmt.Errorf("invalid CV-sAPVSS LeafV1 receiver index %d", i+1)
+			return nil, fmt.Errorf("invalid CV-sAPVSS Leaf receiver index %d", i+1)
 		}
 		receiver.receiverPublicKey, err = r.point()
 		if err != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 receiver key %d: %w", i+1, err)
+			return nil, fmt.Errorf("decode CV-sAPVSS Leaf receiver key %d: %w", i+1, err)
 		}
 		share := &cvEncryptedShare{}
 		share.receiverPublicKey, err = r.point()
 		if err != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 encrypted key %d: %w", i+1, err)
+			return nil, fmt.Errorf("decode CV-sAPVSS Leaf encrypted key %d: %w", i+1, err)
 		}
 		share.commitment, err = r.point()
 		if err != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 commitment %d: %w", i+1, err)
+			return nil, fmt.Errorf("decode CV-sAPVSS Leaf commitment %d: %w", i+1, err)
 		}
-		if err := cvReadExactCountV1(r, chunks, "LeafV1 scalar chunks"); err != nil {
+		if err := cvReadExactCount(r, chunks, "Leaf scalar chunks"); err != nil {
 			return nil, err
 		}
-		if err := cvRequireRemainingV1(r, chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "LeafV1 ciphertexts"); err != nil {
+		if err := cvRequireRemaining(r, chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "Leaf ciphertexts"); err != nil {
 			return nil, err
 		}
 		share.scalarChunks = make([]cvElGamalCiphertext, chunks)
 		for j := range share.scalarChunks {
 			share.scalarChunks[j], err = r.ciphertext()
 			if err != nil {
-				return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 ciphertext %d/%d: %w", i+1, j, err)
+				return nil, fmt.Errorf("decode CV-sAPVSS Leaf ciphertext %d/%d: %w", i+1, j, err)
 			}
 		}
 		share.blinding, err = r.ciphertext()
 		if err != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 blinding ciphertext %d: %w", i+1, err)
+			return nil, fmt.Errorf("decode CV-sAPVSS Leaf blinding ciphertext %d: %w", i+1, err)
 		}
 		receiver.encryptedShare = share
 	}
 	capability, err := r.reader.ReadByte()
 	if err != nil {
-		return nil, fmt.Errorf("decode CV-sAPVSS LeafV1 proof capability: %w", err)
+		return nil, fmt.Errorf("decode CV-sAPVSS Leaf proof capability: %w", err)
 	}
 	switch expectedContext.proofProfile {
-	case cvLeafV1StructuralProofProfile:
+	case cvLeafStructuralProofProfile:
 		if capability != 0 {
-			return nil, fmt.Errorf("invalid CV-sAPVSS structural LeafV1 capability")
+			return nil, fmt.Errorf("invalid CV-sAPVSS structural Leaf capability")
 		}
-	case cvLeafV1GrothProofProfile:
+	case cvLeafGrothProofProfile:
 		if capability != 1 {
-			return nil, fmt.Errorf("missing CV-sAPVSS LeafV1 proof")
+			return nil, fmt.Errorf("missing CV-sAPVSS Leaf proof")
 		}
-		proofSize, proofErr := cvLeafProofWireSizeV1(expectedContext)
+		proofSize, proofErr := cvLeafProofWireSize(expectedContext)
 		if proofErr != nil {
 			return nil, proofErr
 		}
-		proofWire, proofErr := cvReadExactBytesV1(r, proofSize, "LeafV1 proof")
+		proofWire, proofErr := cvReadExactBytes(r, proofSize, "Leaf proof")
 		if proofErr != nil {
 			return nil, proofErr
 		}
-		leaf.proof, proofErr = cvDecodeLeafProofV1(proofWire, expectedContext)
+		leaf.proof, proofErr = cvDecodeLeafProof(proofWire, expectedContext)
 		if proofErr != nil {
 			return nil, proofErr
 		}
 		leaf.hasLeafNIZK = true
 	default:
-		return nil, fmt.Errorf("unsupported CV-sAPVSS LeafV1 proof profile")
+		return nil, fmt.Errorf("unsupported CV-sAPVSS Leaf proof profile")
 	}
 	if r.reader.Len() != 0 {
-		return nil, fmt.Errorf("trailing CV-sAPVSS LeafV1 bytes")
+		return nil, fmt.Errorf("trailing CV-sAPVSS Leaf bytes")
 	}
-	leaf.digest = hashBytes([]byte(cvLeafV1DigestDomain), wire)
-	canonical, err := cvLeafV1CanonicalBytes(leaf)
+	leaf.digest = hashBytes([]byte(cvLeafDigestDomain), wire)
+	canonical, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, wire) {
-		return nil, fmt.Errorf("non-canonical CV-sAPVSS LeafV1 encoding")
+		return nil, fmt.Errorf("non-canonical CV-sAPVSS Leaf encoding")
 	}
-	if err := cvVerifyLeafV1(expectedContext, leaf); err != nil {
+	if err := cvVerifyLeaf(expectedContext, leaf); err != nil {
 		return nil, err
 	}
 	return leaf, nil
 }
 
-func cvDecodeReceiptV1(
+func cvDecodeReceipt(
 	wire []byte,
-	expectedContext *cvLeafContextV1,
-	agg *cvAggregateV1,
+	expectedContext *cvLeafContext,
+	agg *cvAggregateTranscript,
 	expectedReceiverIndex int,
-) (*cvReceiptV1, error) {
+) (*cvReceipt, error) {
 	if len(wire) == 0 || len(wire) > cvMaxCanonicalFieldBytes {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receipt length")
 	}
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvReceiptV1Domain))
-	if err != nil || !bytes.Equal(domain, []byte(cvReceiptV1Domain)) {
+	domain, err := r.bytes(len(cvReceiptDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvReceiptDomain)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receipt domain")
 	}
-	receipt := &cvReceiptV1{}
+	receipt := &cvReceipt{}
 	receipt.aggregateDigest, err = r.bytes(32)
 	if err != nil || len(receipt.aggregateDigest) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receipt aggregate digest")
@@ -662,7 +662,7 @@ func cvDecodeReceiptV1(
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV-sAPVSS receipt bytes")
 	}
-	canonical, err := cvReceiptV1CanonicalBytes(receipt)
+	canonical, err := cvReceiptCanonicalBytes(receipt)
 	if err != nil {
 		return nil, err
 	}
@@ -670,8 +670,8 @@ func cvDecodeReceiptV1(
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS receipt encoding")
 	}
 	receipt.digestWire = append([]byte(nil), wire...)
-	receipt.digest = hashBytes([]byte(cvReceiptV1Domain), wire)
-	if err := cvVerifyShareV1(expectedContext, agg, expectedReceiverIndex, receipt); err != nil {
+	receipt.digest = hashBytes([]byte(cvReceiptDomain), wire)
+	if err := cvVerifyShare(expectedContext, agg, expectedReceiverIndex, receipt); err != nil {
 		return nil, err
 	}
 	return receipt, nil

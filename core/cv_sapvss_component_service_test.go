@@ -3,7 +3,6 @@ package core
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"testing"
 	"time"
 )
@@ -15,7 +14,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	}
 	nodes := sortedUnique(cfg.OldCommittee)
 	transport := newCVRouterTestTransport(nodes, 128)
-	router, err := newCVSAPVSSRouterV1(
+	router, err := newCVSAPVSSRouter(
 		context.Background(), transport, cfg.SID, cfg.Epoch, nodes, nodes, 64,
 	)
 	if err != nil {
@@ -23,13 +22,13 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	}
 	t.Cleanup(func() { _ = router.Close() })
 
-	services := make([]*cvComponentServiceV1, len(nodes))
+	services := make([]*cvComponentService, len(nodes))
 	for i, node := range nodes {
-		store, storeErr := newCVComponentLeafStoreV1(t.TempDir())
+		store, storeErr := newCVComponentLeafStore(t.TempDir())
 		if storeErr != nil {
 			t.Fatal(storeErr)
 		}
-		services[i], err = newCVComponentServiceV1(
+		services[i], err = newCVComponentService(
 			context.Background(), cfg, &leafContext, node, transport, router, store,
 		)
 		if err != nil {
@@ -48,14 +47,14 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := transport.sentCount(cvTagComponentInitV1); got != len(nodes)-1 {
+	if got := transport.sentCount(cvTagComponentInit); got != len(nodes)-1 {
 		t.Fatalf("component dispersal sent %d INIT messages, want %d without self-INIT", got, len(nodes)-1)
 	}
 	if len(descriptor.holders) != len(nodes)-cfg.FOld ||
 		len(descriptor.shareSignatures) != len(descriptor.holders) {
 		t.Fatalf("component certificate does not preserve n-f holder shares: %+v", descriptor)
 	}
-	if err := cvValidateComponentDescriptorV1(cfg, descriptor); err != nil {
+	if err := cvValidateComponentDescriptor(cfg, descriptor); err != nil {
 		t.Fatalf("network-produced descriptor rejected: %v", err)
 	}
 	for _, service := range services {
@@ -67,15 +66,15 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		}
 	}
 
-	getBefore := transport.sentCount(cvTagComponentGetV1)
-	leafBefore := transport.sentCount(cvTagComponentLeafV1)
+	getBefore := transport.sentCount(cvTagComponentGet)
+	leafBefore := transport.sentCount(cvTagComponentLeaf)
 	retrieved, err := services[len(services)-1].Retrieve(ctx, descriptor)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(retrieved.digest, leaves[0].digest) ||
-		transport.sentCount(cvTagComponentGetV1) <= getBefore ||
-		transport.sentCount(cvTagComponentLeafV1) <= leafBefore {
+		transport.sentCount(cvTagComponentGet) <= getBefore ||
+		transport.sentCount(cvTagComponentLeaf) <= leafBefore {
 		t.Fatal("component retrieval did not use authenticated GET/LEAF network messages")
 	}
 
@@ -89,14 +88,14 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		t.Fatal("component candidate collection succeeded below n-f certified descriptors")
 	}
 	insufficientCancel()
-	thirdLeaf, err := cvRandomDealerLeafV1(leafContext, 2)
+	thirdLeaf, err := cvRandomDealerLeaf(leafContext, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := services[2].Disperse(ctx, thirdLeaf); err != nil {
 		t.Fatal(err)
 	}
-	candidateSets := make(map[int][]*cvComponentDescriptorV1, len(services))
+	candidateSets := make(map[int][]*cvComponentDescriptor, len(services))
 	for _, service := range services {
 		candidates, collectErr := service.CollectComponentCandidates(ctx)
 		if collectErr != nil {
@@ -109,7 +108,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		candidateSets[service.localNode] = candidates
 	}
 	type materializeResult struct {
-		value *cvMaterializedAggregateV1
+		value *cvMaterializedAggregate
 		err   error
 	}
 	materializedResults := make(chan materializeResult, len(services))
@@ -122,7 +121,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 			materializedResults <- materializeResult{value: value, err: materializeErr}
 		}()
 	}
-	var materialized *cvMaterializedAggregateV1
+	var materialized *cvMaterializedAggregate
 	for range services {
 		result := <-materializedResults
 		if result.err != nil {
@@ -145,7 +144,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	}
 	for _, service := range services {
 		service.mu.Lock()
-		cachedOffers := len(service.verifiedAggregateOffers)
+		cachedOffers := len(service.verifiedAggregates)
 		service.mu.Unlock()
 		if cachedOffers != 1 {
 			t.Fatalf("node %d cached %d verified aggregate offers, want one", service.localNode, cachedOffers)
@@ -164,96 +163,84 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	if err := services[stoppedHolder].Close(); err != nil {
 		t.Fatal(err)
 	}
-	recoverGetBefore := transport.sentCount(cvTagRecoverGetV1)
-	recoverShardBefore := transport.sentCount(cvTagRecoverShardV1)
+	recoverGetBefore := transport.sentCount(cvTagRecoverGet)
+	recoverShardBefore := transport.sentCount(cvTagRecoverShard)
 	recovered, err := services[len(services)-1].RecoverAggregate(ctx, materialized.rlo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(recovered.digest, materialized.aggregate.digest) ||
-		transport.sentCount(cvTagRecoverGetV1) <= recoverGetBefore ||
-		transport.sentCount(cvTagRecoverShardV1)-recoverShardBefore < len(nodes)-2*cfg.FOld {
+		transport.sentCount(cvTagRecoverGet) <= recoverGetBefore ||
+		transport.sentCount(cvTagRecoverShard)-recoverShardBefore < len(nodes)-2*cfg.FOld {
 		t.Fatal("aggregate recovery did not collect n-2f ARC-holder shards over the network")
 	}
 }
 
-func TestCVVerifiedAggregateOfferTokenRejectsMutation(t *testing.T) {
+func TestCVAggregateManifestOfferRejectsMutation(t *testing.T) {
 	cfg, context, _, leaves := cvM4Fixture(t)
-	accepted := make([]*cvVerifiedLeafV1, cfg.FOld+1)
-	descriptors := make([]*cvComponentDescriptorV1, cfg.FOld+1)
+	accepted := make([]*cvVerifiedLeaf, cfg.FOld+1)
+	descriptors := make([]*cvComponentDescriptor, cfg.FOld+1)
 	for i := range accepted {
-		wire, err := cvLeafV1CanonicalBytes(leaves[i])
+		wire, err := cvLeafCanonicalBytes(leaves[i])
 		if err != nil {
 			t.Fatal(err)
 		}
-		accepted[i], err = cvAcceptedLeafV1(&context, leaves[i], wire)
+		accepted[i], err = cvAcceptedLeaf(&context, leaves[i], wire)
 		if err != nil {
 			t.Fatal(err)
 		}
-		descriptors[i] = &cvComponentDescriptorV1{
+		descriptors[i] = &cvComponentDescriptor{
 			dealer: int(leaves[i].dealerID), leafDigest: accepted[i].leafDigest,
 			holders: []int{0, 1, 2}, shareSignatures: map[int][]byte{
 				0: {1}, 1: {2}, 2: {3},
 			}, certificate: []byte{4},
 		}
 	}
-	aggregate, err := cvAggVerifiedV1(&context, accepted)
+	aggregate, err := cvAggVerified(&context, accepted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(aggregate, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
+	dispersal, err := cvDisperseAggregate(aggregate, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
 	if err != nil {
 		t.Fatal(err)
 	}
-	header, err := cvBuildNetworkAggHeaderV1(cfg, aggregate, dispersal)
+	header, err := cvBuildNetworkAggHeader(cfg, aggregate, dispersal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := cvBuildVerifiedAggregateOfferTokenV1(header, descriptors, aggregate)
+	root, err := cvComponentManifestRoot(descriptors)
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := &cvAggregateOfferV1{header: header, descriptors: descriptors, aggregate: aggregate}
-	if err := token.matches(valid); err != nil {
-		t.Fatalf("verified token rejected its source offer: %v", err)
+	wire, err := cvAggregateManifestOfferCanonicalBytes(&cvAggregateManifestOffer{
+		header: header, descriptors: descriptors, root: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeAggregateManifestOffer(wire, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.root, root) || len(decoded.descriptors) != 0 {
+		t.Fatal("manifest offer did not preserve its compact reference")
 	}
 
-	t.Run("descriptor digest", func(t *testing.T) {
-		badDescriptors := append([]*cvComponentDescriptorV1(nil), descriptors...)
+	t.Run("manifest root mismatch", func(t *testing.T) {
+		badDescriptors := append([]*cvComponentDescriptor(nil), descriptors...)
 		copyDescriptor := *descriptors[0]
 		copyDescriptor.leafDigest = append([]byte(nil), descriptors[0].leafDigest...)
 		copyDescriptor.leafDigest[0] ^= 1
 		badDescriptors[0] = &copyDescriptor
-		if err := token.matches(&cvAggregateOfferV1{
-			header: header, descriptors: badDescriptors, aggregate: aggregate,
+		if _, err := cvAggregateManifestOfferCanonicalBytes(&cvAggregateManifestOffer{
+			header: header, descriptors: badDescriptors, root: root,
 		}); err == nil {
-			t.Fatal("verified aggregate token accepted a mutated descriptor digest")
+			t.Fatal("encoded an aggregate manifest with a mismatched root")
 		}
 	})
-	t.Run("aggregate ciphertext", func(t *testing.T) {
-		badAggregate := cvCloneAggregateV1ForTest(aggregate)
-		badAggregate.receivers[0].scalarChunks[0].c.Add(
-			&badAggregate.receivers[0].scalarChunks[0].c, &genG1,
-		)
-		if err := token.matches(&cvAggregateOfferV1{
-			header: header, descriptors: descriptors, aggregate: badAggregate,
-		}); err == nil {
-			t.Fatal("verified aggregate token accepted mutated aggregate bytes")
-		}
-	})
-	t.Run("fresh root", func(t *testing.T) {
-		badHeader := header
-		badHeader.FreshShardRoot = append([]byte(nil), header.FreshShardRoot...)
-		badHeader.FreshShardRoot[0] ^= 1
-		badHeader.MetadataHash = hashBytes(
-			[]byte("aggrlo-meta"), []byte(badHeader.SID),
-			[]byte(fmt.Sprintf("|epoch=%d", badHeader.Epoch)), encodeInts(badHeader.Dealers),
-			badHeader.AggregateDigest, badHeader.PayloadDigest, badHeader.FreshShardRoot,
-		)
-		if err := token.matches(&cvAggregateOfferV1{
-			header: badHeader, descriptors: descriptors, aggregate: aggregate,
-		}); err == nil {
-			t.Fatal("verified aggregate token accepted a mutated fresh root")
+	t.Run("trailing bytes", func(t *testing.T) {
+		if _, err := cvDecodeAggregateManifestOffer(append(wire, 0), cfg); err == nil {
+			t.Fatal("accepted an aggregate manifest with trailing bytes")
 		}
 	})
 }
@@ -265,18 +252,18 @@ func TestCVComponentServiceCandidateCollectionRequiresReadyCertifiedDescriptors(
 	}
 	nodes := sortedUnique(cfg.OldCommittee)
 	transport := newCVRouterTestTransport(nodes, 32)
-	router, err := newCVSAPVSSRouterV1(
+	router, err := newCVSAPVSSRouter(
 		context.Background(), transport, cfg.SID, cfg.Epoch, nodes, []int{0}, 16,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer router.Close()
-	store, err := newCVComponentLeafStoreV1(t.TempDir())
+	store, err := newCVComponentLeafStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := newCVComponentServiceV1(
+	service, err := newCVComponentService(
 		context.Background(), cfg, &leafContext, 0, transport, router, store,
 	)
 	if err != nil {
@@ -298,7 +285,7 @@ func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
 	}
 	nodes := sortedUnique(cfg.OldCommittee)
 	transport := newCVRouterTestTransport(nodes, 128)
-	router, err := newCVSAPVSSRouterV1(
+	router, err := newCVSAPVSSRouter(
 		context.Background(), transport, cfg.SID, cfg.Epoch, nodes, nodes, 64,
 	)
 	if err != nil {
@@ -306,13 +293,13 @@ func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = router.Close() })
 
-	services := make([]*cvComponentServiceV1, len(nodes))
+	services := make([]*cvComponentService, len(nodes))
 	for i, node := range nodes {
-		store, storeErr := newCVComponentLeafStoreV1(t.TempDir())
+		store, storeErr := newCVComponentLeafStore(t.TempDir())
 		if storeErr != nil {
 			t.Fatal(storeErr)
 		}
-		services[i], err = newCVComponentServiceV1(
+		services[i], err = newCVComponentService(
 			context.Background(), cfg, &leafContext, node, transport, router, store,
 		)
 		if err != nil {
@@ -325,20 +312,20 @@ func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
 		}
 	})
 
-	bad := cvCloneLeafV1ForTest(leaves[0])
+	bad := cvCloneLeafForTest(leaves[0])
 	bad.receivers[0].receiverPublicKey = leafContext.receiverPublicKeys[1]
-	bad.digest = cvLeafV1Digest(bad)
-	if err := cvVerifyLeafV1(&leafContext, bad); err == nil {
+	bad.digest = cvLeafDigest(bad)
+	if err := cvVerifyLeaf(&leafContext, bad); err == nil {
 		t.Fatal("test fixture did not produce an invalid APVSS leaf")
 	}
-	third, err := cvRandomDealerLeafV1(leafContext, 2)
+	third, err := cvRandomDealerLeaf(leafContext, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	for dealer, leaf := range []*cvLeafV1{bad, leaves[1], third} {
+	for dealer, leaf := range []*cvLeaf{bad, leaves[1], third} {
 		if _, err := services[dealer].Disperse(ctx, leaf); err != nil {
 			t.Fatalf("availability-lock dealer %d: %v", dealer, err)
 		}
@@ -354,7 +341,7 @@ func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
 	if got := materialized.aggregate.dealerIDs; len(got) != cfg.FOld+1 || got[0] != 1 || got[1] != 2 {
 		t.Fatalf("materializer selected dealers %v, want [1 2]", got)
 	}
-	badKey := cvComponentKeyV1(0, bad.digest)
+	badKey := cvComponentKey(0, bad.digest)
 	for _, service := range services {
 		service.mu.Lock()
 		_, cached := service.verifiedLeaves[badKey]
@@ -372,18 +359,18 @@ func TestCVComponentServiceRejectsForgedDealerInit(t *testing.T) {
 	}
 	nodes := sortedUnique(cfg.OldCommittee)
 	transport := newCVRouterTestTransport(nodes, 32)
-	router, err := newCVSAPVSSRouterV1(
+	router, err := newCVSAPVSSRouter(
 		context.Background(), transport, cfg.SID, cfg.Epoch, nodes, []int{2}, 16,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer router.Close()
-	store, err := newCVComponentLeafStoreV1(t.TempDir())
+	store, err := newCVComponentLeafStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := newCVComponentServiceV1(
+	service, err := newCVComponentService(
 		context.Background(), cfg, &leafContext, 2, transport, router, store,
 	)
 	if err != nil {
@@ -391,43 +378,43 @@ func TestCVComponentServiceRejectsForgedDealerInit(t *testing.T) {
 	}
 	defer service.Close()
 
-	leafWire, err := cvLeafV1CanonicalBytes(leaves[0])
+	leafWire, err := cvLeafCanonicalBytes(leaves[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifactWire, err := cvComponentLeafArtifactV1CanonicalBytes(&cvComponentLeafArtifactV1{
+	artifactWire, err := cvComponentLeafArtifactCanonicalBytes(&cvComponentLeafArtifact{
 		dealer: 0, leafDigest: leaves[0].digest, leafWire: leafWire,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement, err := cvComponentStatementDigestV1(0, leaves[0].digest)
+	statement, err := cvComponentStatementDigest(0, leaves[0].digest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	forged, err := cfg.runtime.lockSigner.SignShare(
-		1, cvComponentDealerSignatureDomainV1, statement,
+		1, cvComponentDealerSignatureDomain, statement,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	initWire, err := cvComponentInitV1CanonicalBytes(&cvComponentInitV1{
+	initWire, err := cvComponentInitCanonicalBytes(&cvComponentInit{
 		artifactWire: artifactWire,
 		dealerSig:    forged,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := cvEncodeNetworkEnvelopeV1(cfg.SID, cfg.Epoch, initWire)
+	envelope, err := cvEncodeNetworkEnvelope(cfg.SID, cfg.Epoch, initWire)
 	if err != nil {
 		t.Fatal(err)
 	}
-	acksBefore := transport.sentCount(cvTagComponentAckV1)
-	if err := transport.Send(Message{From: 0, To: 2, Tag: cvTagComponentInitV1, Body: envelope}); err != nil {
+	acksBefore := transport.sentCount(cvTagComponentAck)
+	if err := transport.Send(Message{From: 0, To: 2, Tag: cvTagComponentInit, Body: envelope}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if got := transport.sentCount(cvTagComponentAckV1); got != acksBefore {
+	if got := transport.sentCount(cvTagComponentAck); got != acksBefore {
 		t.Fatalf("forged dealer INIT produced ACK: before=%d after=%d", acksBefore, got)
 	}
 }

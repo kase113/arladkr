@@ -10,19 +10,19 @@ import (
 )
 
 func TestCVComponentLeafStoreIsImmutableIdempotentAndPrivate(t *testing.T) {
-	store, err := newCVComponentLeafStoreV1(t.TempDir())
+	store, err := newCVComponentLeafStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest := hashBytes([]byte("component leaf digest"))
-	leaf := []byte("canonical LeafV1")
+	leaf := []byte("canonical Leaf")
 	if err := store.Put("component-store", 4, 7, 2, digest, leaf); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put("component-store", 4, 7, 2, digest, append([]byte(nil), leaf...)); err != nil {
 		t.Fatalf("idempotent put: %v", err)
 	}
-	if err := store.Put("component-store", 4, 7, 2, digest, []byte("different LeafV1")); err == nil {
+	if err := store.Put("component-store", 4, 7, 2, digest, []byte("different Leaf")); err == nil {
 		t.Fatal("same component key accepted different bytes")
 	}
 
@@ -45,7 +45,7 @@ func TestCVComponentLeafStoreIsImmutableIdempotentAndPrivate(t *testing.T) {
 }
 
 func TestCVFreshShardStoreIsImmutableIdempotentAndPrivate(t *testing.T) {
-	store, err := newCVFreshShardStoreV1(t.TempDir())
+	store, err := newCVFreshShardStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestCVFreshShardStoreIsImmutableIdempotentAndPrivate(t *testing.T) {
 
 func TestCVStoresKeepDistinctAndHostileSIDsInsideTheirRoots(t *testing.T) {
 	base := t.TempDir()
-	componentStore, err := newCVComponentLeafStoreV1(base)
+	componentStore, err := newCVComponentLeafStore(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestCVStoresKeepDistinctAndHostileSIDsInsideTheirRoots(t *testing.T) {
 		t.Fatalf("hostile SID escaped store root: %v", err)
 	}
 
-	shardStore, err := newCVFreshShardStoreV1(base)
+	shardStore, err := newCVFreshShardStore(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,11 +120,11 @@ func TestCVStoresKeepDistinctAndHostileSIDsInsideTheirRoots(t *testing.T) {
 }
 
 func TestCVStoresRejectInvalidKeys(t *testing.T) {
-	componentStore, err := newCVComponentLeafStoreV1(t.TempDir())
+	componentStore, err := newCVComponentLeafStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	shardStore, err := newCVFreshShardStoreV1(t.TempDir())
+	shardStore, err := newCVFreshShardStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestCVStoresRejectInvalidKeys(t *testing.T) {
 }
 
 func TestCVFreshShardStoreConcurrentConflictDoesNotOverwrite(t *testing.T) {
-	store, err := newCVFreshShardStoreV1(t.TempDir())
+	store, err := newCVFreshShardStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestCVFreshShardStoreConcurrentConflictDoesNotOverwrite(t *testing.T) {
 }
 
 func TestCVStoresRejectNonPrivateFiles(t *testing.T) {
-	store, err := newCVFreshShardStoreV1(t.TempDir())
+	store, err := newCVFreshShardStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

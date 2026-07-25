@@ -13,15 +13,15 @@ import (
 )
 
 const (
-	cvMaxChunkBits                 = 20
-	cvMaxDLogBound                 = uint64(1) << 32
-	cvLeafV1StructuralProofProfile = "m1a-structural-no-nizk"
-	cvLeafV1GrothProofProfile      = "m1b-groth-32x8-exact-range-v2"
-	cvLeafV1ContextDigestDomain    = "ARL-CV-sAPVSS-v1/context"
-	cvLeafV1StatementDigestDomain  = "ARL-CV-sAPVSS-v1/statement"
-	cvLeafV1DigestDomain           = "ARL-CV-sAPVSS-v1/leaf"
-	cvLeafV1ReceiverRegistryDomain = "ARL-CV-sAPVSS-v1/registry"
-	cvLeafV1GroupID                = "BLS12-381-G1/fr"
+	cvMaxChunkBits               = 20
+	cvMaxDLogBound               = uint64(1) << 32
+	cvLeafStructuralProofProfile = "m1a-structural-no-nizk"
+	cvLeafGrothProofProfile      = "m1b-groth-32x8-exact-range"
+	cvLeafContextDigestDomain    = "ARL-CV-sAPVSS/context"
+	cvLeafStatementDigestDomain  = "ARL-CV-sAPVSS/statement"
+	cvLeafDigestDomain           = "ARL-CV-sAPVSS/leaf"
+	cvLeafReceiverRegistryDomain = "ARL-CV-sAPVSS/registry"
+	cvLeafGroupID                = "BLS12-381-G1/fr"
 )
 
 type cvChunkProfile struct {
@@ -47,7 +47,7 @@ type cvDecryptedShare struct {
 	blindingOpening bls12381.G1Affine
 }
 
-type cvLeafContextV1 struct {
+type cvLeafContext struct {
 	sessionID          []byte
 	epoch              uint64
 	sharingDegree      int
@@ -57,19 +57,19 @@ type cvLeafContextV1 struct {
 	proofProfile       string
 }
 
-type cvLeafReceiverV1 struct {
+type cvLeafReceiver struct {
 	receiverIndex     int
 	receiverPublicKey bls12381.G1Affine
 	encryptedShare    *cvEncryptedShare
 }
 
-type cvLeafV1 struct {
-	context                cvLeafContextV1
+type cvLeaf struct {
+	context                cvLeafContext
 	dealerID               uint64
 	coefficientCommitments []bls12381.G1Affine
-	receivers              []cvLeafReceiverV1
+	receivers              []cvLeafReceiver
 	hasLeafNIZK            bool
-	proof                  *cvLeafProofV1
+	proof                  *cvLeafProof
 	digest                 []byte
 }
 
@@ -114,8 +114,8 @@ func cvReceiverPublicKey(secret fr.Element) (bls12381.G1Affine, error) {
 
 func cvPedersenBase() (bls12381.G1Affine, error) {
 	h, err := bls12381.HashToG1(
-		[]byte("ARL-CV-sAPVSS-v1-Pedersen-H"),
-		[]byte("ARL-CV-sAPVSS-v1-H2C"),
+		[]byte("ARL-CV-sAPVSS-Pedersen-H"),
+		[]byte("ARL-CV-sAPVSS-H2C"),
 	)
 	if err != nil {
 		return bls12381.G1Affine{}, fmt.Errorf("derive CV-sAPVSS Pedersen base: %w", err)
@@ -386,18 +386,18 @@ func cvVerifyRelation(aggregate *cvEncryptedShare, decrypted *cvDecryptedShare) 
 	return expectedPublic.Equal(&decrypted.publicScalar) && expectedCommitment.Equal(&aggregate.commitment)
 }
 
-func cvValidateLeafContextV1(context *cvLeafContextV1) error {
+func cvValidateLeafContext(context *cvLeafContext) error {
 	if context == nil || len(context.sessionID) == 0 || len(context.dealerSetPolicy) == 0 ||
-		(context.proofProfile != cvLeafV1StructuralProofProfile &&
-			context.proofProfile != cvLeafV1GrothProofProfile) {
-		return fmt.Errorf("invalid CV-sAPVSS LeafV1 context")
+		(context.proofProfile != cvLeafStructuralProofProfile &&
+			context.proofProfile != cvLeafGrothProofProfile) {
+		return fmt.Errorf("invalid CV-sAPVSS Leaf context")
 	}
 	if _, _, _, err := cvProfile(context.profile); err != nil {
 		return err
 	}
 	if len(context.receiverPublicKeys) == 0 || context.sharingDegree < 0 ||
 		context.sharingDegree >= len(context.receiverPublicKeys) {
-		return fmt.Errorf("invalid CV-sAPVSS LeafV1 sharing degree")
+		return fmt.Errorf("invalid CV-sAPVSS Leaf sharing degree")
 	}
 	seen := make(map[[bls12381.SizeOfG1AffineCompressed]byte]struct{}, len(context.receiverPublicKeys))
 	for i := range context.receiverPublicKeys {
@@ -443,7 +443,7 @@ func cvWritePoint(buffer *bytes.Buffer, point *bls12381.G1Affine) {
 	_, _ = buffer.Write(encoded[:])
 }
 
-func cvReceiverRegistryDigestV1(keys []bls12381.G1Affine) ([]byte, error) {
+func cvReceiverRegistryDigest(keys []bls12381.G1Affine) ([]byte, error) {
 	var wire bytes.Buffer
 	if err := cvWriteUint32(&wire, len(keys)); err != nil {
 		return nil, err
@@ -457,11 +457,11 @@ func cvReceiverRegistryDigestV1(keys []bls12381.G1Affine) ([]byte, error) {
 		}
 		cvWritePoint(&wire, &keys[i])
 	}
-	return hashBytes([]byte(cvLeafV1ReceiverRegistryDomain), wire.Bytes()), nil
+	return hashBytes([]byte(cvLeafReceiverRegistryDomain), wire.Bytes()), nil
 }
 
-func cvLeafContextV1CanonicalBytes(context *cvLeafContextV1) ([]byte, error) {
-	if err := cvValidateLeafContextV1(context); err != nil {
+func cvLeafContextCanonicalBytes(context *cvLeafContext) ([]byte, error) {
+	if err := cvValidateLeafContext(context); err != nil {
 		return nil, err
 	}
 	base, _, chunks, _ := cvProfile(context.profile)
@@ -469,15 +469,15 @@ func cvLeafContextV1CanonicalBytes(context *cvLeafContextV1) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	registryDigest, err := cvReceiverRegistryDigestV1(context.receiverPublicKeys)
+	registryDigest, err := cvReceiverRegistryDigest(context.receiverPublicKeys)
 	if err != nil {
 		return nil, err
 	}
 
 	var wire bytes.Buffer
 	for _, value := range [][]byte{
-		[]byte("ARL-CV-sAPVSS-v1"),
-		[]byte(cvLeafV1GroupID),
+		[]byte("ARL-CV-sAPVSS"),
+		[]byte(cvLeafGroupID),
 		fr.Modulus().Bytes(),
 	} {
 		if err := cvWriteBytes(&wire, value); err != nil {
@@ -523,29 +523,29 @@ func cvLeafContextV1CanonicalBytes(context *cvLeafContextV1) ([]byte, error) {
 	return wire.Bytes(), nil
 }
 
-func cvLeafContextV1Digest(context *cvLeafContextV1) []byte {
-	wire, err := cvLeafContextV1CanonicalBytes(context)
+func cvLeafContextDigest(context *cvLeafContext) []byte {
+	wire, err := cvLeafContextCanonicalBytes(context)
 	if err != nil {
 		return nil
 	}
-	return hashBytes([]byte(cvLeafV1ContextDigestDomain), wire)
+	return hashBytes([]byte(cvLeafContextDigestDomain), wire)
 }
 
-func cvCloneLeafContextV1(context cvLeafContextV1) cvLeafContextV1 {
+func cvCloneLeafContext(context cvLeafContext) cvLeafContext {
 	context.sessionID = append([]byte(nil), context.sessionID...)
 	context.receiverPublicKeys = append([]bls12381.G1Affine(nil), context.receiverPublicKeys...)
 	context.dealerSetPolicy = append([]byte(nil), context.dealerSetPolicy...)
 	return context
 }
 
-func cvReferenceDealV1(
-	context cvLeafContextV1,
+func cvReferenceDeal(
+	context cvLeafContext,
 	dealerID uint64,
 	scalarCoefficients, blindingCoefficients []fr.Element,
 	scalarCoins [][]fr.Element,
 	blindingCoins []fr.Element,
-) (*cvLeafV1, error) {
-	if err := cvValidateLeafContextV1(&context); err != nil {
+) (*cvLeaf, error) {
+	if err := cvValidateLeafContext(&context); err != nil {
 		return nil, err
 	}
 	coefficientCount := context.sharingDegree + 1
@@ -556,7 +556,7 @@ func cvReferenceDealV1(
 		len(blindingCoins) != len(context.receiverPublicKeys) {
 		return nil, fmt.Errorf("CV-sAPVSS receiver coin count mismatch")
 	}
-	if context.proofProfile == cvLeafV1GrothProofProfile {
+	if context.proofProfile == cvLeafGrothProofProfile {
 		for receiver := 1; receiver < len(context.receiverPublicKeys); receiver++ {
 			if len(scalarCoins[receiver]) != len(scalarCoins[0]) {
 				return nil, fmt.Errorf("CV-sAPVSS Groth scalar coin count mismatch")
@@ -584,7 +584,7 @@ func cvReferenceDealV1(
 		commitments[i].Add(&scalarTerm, &blindingTerm)
 	}
 
-	receivers := make([]cvLeafReceiverV1, len(context.receiverPublicKeys))
+	receivers := make([]cvLeafReceiver, len(context.receiverPublicKeys))
 	scalarEvaluations := make([]fr.Element, len(receivers))
 	blindingEvaluations := make([]fr.Element, len(receivers))
 	for i := range receivers {
@@ -603,22 +603,22 @@ func cvReferenceDealV1(
 		if encryptErr != nil {
 			return nil, fmt.Errorf("encrypt CV-sAPVSS receiver %d: %w", i+1, encryptErr)
 		}
-		receivers[i] = cvLeafReceiverV1{
+		receivers[i] = cvLeafReceiver{
 			receiverIndex:     i + 1,
 			receiverPublicKey: context.receiverPublicKeys[i],
 			encryptedShare:    encrypted,
 		}
 	}
 
-	leaf := &cvLeafV1{
-		context:                cvCloneLeafContextV1(context),
+	leaf := &cvLeaf{
+		context:                cvCloneLeafContext(context),
 		dealerID:               dealerID,
 		coefficientCommitments: commitments,
 		receivers:              receivers,
-		hasLeafNIZK:            context.proofProfile == cvLeafV1GrothProofProfile,
+		hasLeafNIZK:            context.proofProfile == cvLeafGrothProofProfile,
 	}
 	if leaf.hasLeafNIZK {
-		leaf.proof, err = cvProveLeafV1(
+		leaf.proof, err = cvProveLeaf(
 			leaf,
 			scalarEvaluations,
 			blindingEvaluations,
@@ -629,9 +629,9 @@ func cvReferenceDealV1(
 			return nil, err
 		}
 	}
-	leaf.digest = cvLeafV1Digest(leaf)
+	leaf.digest = cvLeafDigest(leaf)
 	if leaf.digest == nil {
-		return nil, fmt.Errorf("encode CV-sAPVSS LeafV1")
+		return nil, fmt.Errorf("encode CV-sAPVSS Leaf")
 	}
 	return leaf, nil
 }
@@ -641,11 +641,11 @@ func cvWriteCiphertext(buffer *bytes.Buffer, ciphertext *cvElGamalCiphertext) {
 	cvWritePoint(buffer, &ciphertext.c)
 }
 
-func cvLeafV1StatementBytes(leaf *cvLeafV1) ([]byte, error) {
+func cvLeafStatementBytes(leaf *cvLeaf) ([]byte, error) {
 	if leaf == nil {
-		return nil, fmt.Errorf("invalid CV-sAPVSS LeafV1")
+		return nil, fmt.Errorf("invalid CV-sAPVSS Leaf")
 	}
-	contextWire, err := cvLeafContextV1CanonicalBytes(&leaf.context)
+	contextWire, err := cvLeafContextCanonicalBytes(&leaf.context)
 	if err != nil {
 		return nil, err
 	}
@@ -672,7 +672,7 @@ func cvLeafV1StatementBytes(leaf *cvLeafV1) ([]byte, error) {
 		receiver := &leaf.receivers[i]
 		if receiver.receiverIndex <= 0 || !cvValidG1(&receiver.receiverPublicKey, false) ||
 			receiver.encryptedShare == nil {
-			return nil, fmt.Errorf("invalid CV-sAPVSS LeafV1 receiver item %d", i)
+			return nil, fmt.Errorf("invalid CV-sAPVSS Leaf receiver item %d", i)
 		}
 		if err := cvValidateShare(receiver.encryptedShare, chunks); err != nil {
 			return nil, err
@@ -694,25 +694,25 @@ func cvLeafV1StatementBytes(leaf *cvLeafV1) ([]byte, error) {
 	return wire.Bytes(), nil
 }
 
-func cvLeafV1CanonicalBytes(leaf *cvLeafV1) ([]byte, error) {
-	statement, err := cvLeafV1StatementBytes(leaf)
+func cvLeafCanonicalBytes(leaf *cvLeaf) ([]byte, error) {
+	statement, err := cvLeafStatementBytes(leaf)
 	if err != nil {
 		return nil, err
 	}
 	var wire bytes.Buffer
 	_, _ = wire.Write(statement)
 	switch leaf.context.proofProfile {
-	case cvLeafV1StructuralProofProfile:
+	case cvLeafStructuralProofProfile:
 		if leaf.hasLeafNIZK || leaf.proof != nil {
-			return nil, fmt.Errorf("invalid CV-sAPVSS structural LeafV1 capability")
+			return nil, fmt.Errorf("invalid CV-sAPVSS structural Leaf capability")
 		}
 		_ = wire.WriteByte(0)
-	case cvLeafV1GrothProofProfile:
+	case cvLeafGrothProofProfile:
 		if !leaf.hasLeafNIZK || leaf.proof == nil {
-			return nil, fmt.Errorf("missing CV-sAPVSS LeafV1 proof")
+			return nil, fmt.Errorf("missing CV-sAPVSS Leaf proof")
 		}
 		_ = wire.WriteByte(1)
-		proofWire, err := cvLeafProofV1CanonicalBytes(leaf.proof)
+		proofWire, err := cvLeafProofCanonicalBytes(leaf.proof)
 		if err != nil {
 			return nil, err
 		}
@@ -720,20 +720,20 @@ func cvLeafV1CanonicalBytes(leaf *cvLeafV1) ([]byte, error) {
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("unsupported CV-sAPVSS LeafV1 proof profile")
+		return nil, fmt.Errorf("unsupported CV-sAPVSS Leaf proof profile")
 	}
 	return wire.Bytes(), nil
 }
 
-func cvLeafV1Digest(leaf *cvLeafV1) []byte {
-	wire, err := cvLeafV1CanonicalBytes(leaf)
+func cvLeafDigest(leaf *cvLeaf) []byte {
+	wire, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		return nil
 	}
-	return hashBytes([]byte(cvLeafV1DigestDomain), wire)
+	return hashBytes([]byte(cvLeafDigestDomain), wire)
 }
 
-func cvEvaluateCommitmentsV1(commitments []bls12381.G1Affine, receiverIndex int) bls12381.G1Affine {
+func cvEvaluateCommitments(commitments []bls12381.G1Affine, receiverIndex int) bls12381.G1Affine {
 	var x, power fr.Element
 	x.SetInt64(int64(receiverIndex))
 	power.SetOne()
@@ -748,39 +748,39 @@ func cvEvaluateCommitmentsV1(commitments []bls12381.G1Affine, receiverIndex int)
 	return result
 }
 
-func cvVerifyLeafV1(expectedContext *cvLeafContextV1, leaf *cvLeafV1) error {
+func cvVerifyLeaf(expectedContext *cvLeafContext, leaf *cvLeaf) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.leafVerifyCalls.Add(1)
 	}
-	if err := cvValidateLeafContextV1(expectedContext); err != nil {
+	if err := cvValidateLeafContext(expectedContext); err != nil {
 		return err
 	}
 	if leaf == nil {
-		return fmt.Errorf("invalid CV-sAPVSS LeafV1")
+		return fmt.Errorf("invalid CV-sAPVSS Leaf")
 	}
 	switch expectedContext.proofProfile {
-	case cvLeafV1StructuralProofProfile:
+	case cvLeafStructuralProofProfile:
 		if leaf.hasLeafNIZK || leaf.proof != nil {
-			return fmt.Errorf("invalid CV-sAPVSS structural LeafV1 capability")
+			return fmt.Errorf("invalid CV-sAPVSS structural Leaf capability")
 		}
-	case cvLeafV1GrothProofProfile:
+	case cvLeafGrothProofProfile:
 		if !leaf.hasLeafNIZK || leaf.proof == nil {
-			return fmt.Errorf("missing CV-sAPVSS LeafV1 proof")
+			return fmt.Errorf("missing CV-sAPVSS Leaf proof")
 		}
 	default:
-		return fmt.Errorf("unsupported CV-sAPVSS LeafV1 proof profile")
+		return fmt.Errorf("unsupported CV-sAPVSS Leaf proof profile")
 	}
-	expectedContextWire, err := cvLeafContextV1CanonicalBytes(expectedContext)
+	expectedContextWire, err := cvLeafContextCanonicalBytes(expectedContext)
 	if err != nil {
 		return err
 	}
-	leafContextWire, err := cvLeafContextV1CanonicalBytes(&leaf.context)
+	leafContextWire, err := cvLeafContextCanonicalBytes(&leaf.context)
 	if err != nil || !bytes.Equal(expectedContextWire, leafContextWire) {
-		return fmt.Errorf("CV-sAPVSS LeafV1 context mismatch")
+		return fmt.Errorf("CV-sAPVSS Leaf context mismatch")
 	}
 	if len(leaf.coefficientCommitments) != expectedContext.sharingDegree+1 ||
 		len(leaf.receivers) != len(expectedContext.receiverPublicKeys) {
-		return fmt.Errorf("CV-sAPVSS LeafV1 statement size mismatch")
+		return fmt.Errorf("CV-sAPVSS Leaf statement size mismatch")
 	}
 	_, _, chunks, _ := cvProfile(expectedContext.profile)
 	for i := range leaf.coefficientCommitments {
@@ -793,26 +793,26 @@ func cvVerifyLeafV1(expectedContext *cvLeafContextV1, leaf *cvLeafV1) error {
 		expectedKey := &expectedContext.receiverPublicKeys[i]
 		if receiver.receiverIndex != i+1 || !receiver.receiverPublicKey.Equal(expectedKey) ||
 			receiver.encryptedShare == nil || !receiver.encryptedShare.receiverPublicKey.Equal(expectedKey) {
-			return fmt.Errorf("CV-sAPVSS LeafV1 receiver binding mismatch at index %d", i+1)
+			return fmt.Errorf("CV-sAPVSS Leaf receiver binding mismatch at index %d", i+1)
 		}
 		if err := cvValidateShare(receiver.encryptedShare, chunks); err != nil {
 			return err
 		}
-		expectedCommitment := cvEvaluateCommitmentsV1(leaf.coefficientCommitments, i+1)
+		expectedCommitment := cvEvaluateCommitments(leaf.coefficientCommitments, i+1)
 		if !receiver.encryptedShare.commitment.Equal(&expectedCommitment) {
-			return fmt.Errorf("CV-sAPVSS LeafV1 evaluation commitment mismatch at index %d", i+1)
+			return fmt.Errorf("CV-sAPVSS Leaf evaluation commitment mismatch at index %d", i+1)
 		}
 	}
-	wire, err := cvLeafV1CanonicalBytes(leaf)
+	wire, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		return err
 	}
-	expectedDigest := hashBytes([]byte(cvLeafV1DigestDomain), wire)
+	expectedDigest := hashBytes([]byte(cvLeafDigestDomain), wire)
 	if len(leaf.digest) != sha256.Size || !bytes.Equal(leaf.digest, expectedDigest) {
-		return fmt.Errorf("CV-sAPVSS LeafV1 digest mismatch")
+		return fmt.Errorf("CV-sAPVSS Leaf digest mismatch")
 	}
-	if expectedContext.proofProfile == cvLeafV1GrothProofProfile {
-		if err := cvVerifyLeafProofV1(leaf); err != nil {
+	if expectedContext.proofProfile == cvLeafGrothProofProfile {
+		if err := cvVerifyLeafProof(leaf); err != nil {
 			return err
 		}
 	}

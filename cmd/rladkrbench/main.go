@@ -129,7 +129,7 @@ func main() {
 		fallbackPolicy           = flag.String("fallback-policy", "force", "legacy compatibility flag: off|auto|force; active ARL path always runs dumbomvba")
 		agreementKernel          = flag.String("agreement-kernel", "commonsubset-tcp", "agreement kernel: commonsubset-tcp|dumbomvba-direct|distributed-actor|legacy-sim")
 		apvssProvider            = flag.String("apvss-provider", "cv-sapvss", apvssProviderUsage)
-		apvssFallbackProfile     = flag.String("apvss-fallback-profile", "exact-lane-v1", "APVSS fallback proof: exact-lane-v1|compact-batch-v1")
+		apvssFallbackProfile     = flag.String("apvss-fallback-profile", "exact-lane", "APVSS fallback proof: exact-lane|compact-batch")
 		allowExperimentalAPVSS   = flag.Bool("allow-experimental-apvss", false, "allow an APVSS proof profile that has not passed production admission")
 		apvssForcedFallbackCount = flag.Int("apvss-forced-fallback-count", 0, "benchmark-only forced |I| (0 = natural ACK scheduling)")
 		apvssWaitAllACKs         = flag.Bool("apvss-wait-all-acks", false, "benchmark-only wait for all receiver ACKs to produce |I|=0")

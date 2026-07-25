@@ -15,7 +15,7 @@ import (
 
 func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
 	cfg, leafContext, receiverSecrets, leaves := cvM4Fixture(t)
-	materialized, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, leaves)
+	materialized, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,15 +44,15 @@ func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
 	for i := range available {
 		available[i] = i
 	}
-	recovered, err := cvRecoverMaterializedAggregateV1(cfg, materialized, agreedDigest, available)
+	recovered, err := cvRecoverMaterializedAggregate(cfg, materialized, agreedDigest, available)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, receipt, err := cvDecShareV1(recovered, receiverSecrets[0], 1)
+	decrypted, receipt, err := cvDecShare(recovered, receiverSecrets[0], 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cvVerifyShareV1(&leafContext, recovered, 1, receipt); err != nil {
+	if err := cvVerifyShare(&leafContext, recovered, 1, receipt); err != nil {
 		t.Fatalf("M4 recovered receipt rejected: %v", err)
 	}
 	want := cvTestScalar(24) // (5+3*1) + (11+5*1).
@@ -63,26 +63,26 @@ func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
 
 func TestCVSAPVSSM4DeterministicFreshDispersalRoot(t *testing.T) {
 	_, leafContext, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := cvDisperseAggregateV1(agg, 4, 2)
+	first, err := cvDisperseAggregate(agg, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := cvDisperseAggregateV1(agg, 4, 2)
+	second, err := cvDisperseAggregate(agg, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(first.nonce, second.nonce) || !bytes.Equal(first.root, second.root) {
 		t.Fatal("honest materializers did not converge on the same aggregate dispersal")
 	}
-	differentAgg, err := cvAggV1(&leafContext, leaves[:1])
+	differentAgg, err := cvAgg(&leafContext, leaves[:1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	different, err := cvDisperseAggregateV1(differentAgg, 4, 2)
+	different, err := cvDisperseAggregate(differentAgg, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,11 +93,11 @@ func TestCVSAPVSSM4DeterministicFreshDispersalRoot(t *testing.T) {
 
 func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 	_, leafContext, receiverSecrets, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	localShares, receiptWires, err := cvCreateLocalDecryptionOutputsV1(
+	localShares, receiptWires, err := cvCreateLocalDecryptionOutputs(
 		&leafContext, agg, []int{10, 11}, map[int]fr.Element{
 			10: receiverSecrets[0],
 			11: receiverSecrets[1],
@@ -109,7 +109,7 @@ func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 	if len(localShares) != 2 || len(localShares[10]) != fr.Bytes || len(receiptWires) != 2 {
 		t.Fatal("local scalar outputs or public receipts are incomplete")
 	}
-	publicKey, err := cvThresholdPublicKeyFromReceiptsV1(
+	publicKey, err := cvThresholdPublicKeyFromReceipts(
 		&leafContext, agg, []int{10, 11}, receiptWires,
 	)
 	if err != nil {
@@ -125,26 +125,26 @@ func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 
 	bad := cloneBytesMap(receiptWires)
 	bad[10][len(bad[10])-1] ^= 1
-	if _, err := cvThresholdPublicKeyFromReceiptsV1(&leafContext, agg, []int{10, 11}, bad); err == nil {
+	if _, err := cvThresholdPublicKeyFromReceipts(&leafContext, agg, []int{10, 11}, bad); err == nil {
 		t.Fatal("threshold-key derivation accepted a mutated public receipt")
 	}
 }
 
 func TestCVSAPVSSM4FreshBuilderMatchesCheckedBuilder(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
+	dispersal, err := cvDisperseAggregate(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked, err := cvBuildMaterializedAggRLOV1(cfg, &leafContext, leaves, agg, dispersal)
+	checked, err := cvBuildMaterializedAggRLO(cfg, &leafContext, leaves, agg, dispersal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := cvBuildMaterializedAggRLOFromVerifiedAggregateV1(cfg, agg, dispersal)
+	fresh, err := cvBuildMaterializedAggRLOFromVerifiedAggregate(cfg, agg, dispersal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,49 +154,49 @@ func TestCVSAPVSSM4FreshBuilderMatchesCheckedBuilder(t *testing.T) {
 		t.Fatal("fresh and checked builders produced different ARC bindings")
 	}
 
-	badLeaves := append([]*cvLeafV1(nil), leaves...)
+	badLeaves := append([]*cvLeaf(nil), leaves...)
 	badLeaf := *badLeaves[0]
 	badLeaf.digest = append([]byte(nil), badLeaf.digest...)
 	badLeaf.digest[0] ^= 1
 	badLeaves[0] = &badLeaf
-	if _, err := cvBuildMaterializedAggRLOV1(cfg, &leafContext, badLeaves, agg, dispersal); err == nil {
+	if _, err := cvBuildMaterializedAggRLO(cfg, &leafContext, badLeaves, agg, dispersal); err == nil {
 		t.Fatal("checked builder accepted a mutated leaf digest")
 	}
 }
 
 func TestCVSAPVSSM4ARCRejectsUnmaterializedAggregate(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cvBuildMaterializedAggRLOV1(cfg, &leafContext, leaves, agg, nil); err == nil {
+	if _, err := cvBuildMaterializedAggRLO(cfg, &leafContext, leaves, agg, nil); err == nil {
 		t.Fatal("ARC signed a CV-sAPVSS aggregate without materialized shards")
 	}
 }
 
 func TestCVSAPVSSM4ARCRejectsWrongErasureDimensions(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	badDispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), 1)
+	badDispersal, err := cvDisperseAggregate(agg, len(cfg.OldCommittee), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cvBuildMaterializedAggRLOV1(cfg, &leafContext, leaves, agg, badDispersal); err == nil {
+	if _, err := cvBuildMaterializedAggRLO(cfg, &leafContext, leaves, agg, badDispersal); err == nil {
 		t.Fatal("ARC accepted aggregate shards with recovery threshold below n_o-2f_o")
 	}
 }
 
 func TestCVSAPVSSM4RejectsInvalidErasureCodeword(t *testing.T) {
 	_, leafContext, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(agg, 4, 2)
+	dispersal, err := cvDisperseAggregate(agg, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestCVSAPVSSM4RejectsInvalidErasureCodeword(t *testing.T) {
 	bad.nonce = append([]byte(nil), dispersal.nonce...)
 	bad.payloadDigest = append([]byte(nil), dispersal.payloadDigest...)
 	bad.root = append([]byte(nil), dispersal.root...)
-	bad.shards = make([]cvAggregateShardV1, len(dispersal.shards))
+	bad.shards = make([]cvAggregateShard, len(dispersal.shards))
 	payloads := make([][]byte, len(bad.shards))
 	for i := range bad.shards {
 		bad.shards[i] = dispersal.shards[i]
@@ -216,13 +216,13 @@ func TestCVSAPVSSM4RejectsInvalidErasureCodeword(t *testing.T) {
 		payloads[i] = bad.shards[i].payload
 	}
 	bad.shards[bad.dataShards].payload[0] ^= 1
-	root, branches := cvBuildAggregateMerkleV1(dispersal.nonce, payloads)
+	root, branches := cvBuildAggregateMerkle(dispersal.nonce, payloads)
 	bad.root = root
 	for i := range bad.shards {
 		bad.shards[i].siblings = branches[i]
 	}
 
-	err = cvVerifyAggregateDispersalV1(agg, &bad)
+	err = cvVerifyAggregateDispersal(agg, &bad)
 	if err == nil || !strings.Contains(err.Error(), "codeword") {
 		t.Fatalf("invalid erasure codeword was not rejected: %v", err)
 	}
@@ -230,11 +230,11 @@ func TestCVSAPVSSM4RejectsInvalidErasureCodeword(t *testing.T) {
 
 func TestCVSAPVSSM4FromVerifiedRejectsAggregateDigestMutation(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	agg, err := cvAggV1(&leafContext, leaves)
+	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
+	dispersal, err := cvDisperseAggregate(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestCVSAPVSSM4FromVerifiedRejectsAggregateDigestMutation(t *testing.T) {
 	bad.digest = append([]byte(nil), agg.digest...)
 	bad.digest[0] ^= 1
 
-	_, err = cvBuildMaterializedAggRLOFromVerifiedAggregateV1(cfg, &bad, dispersal)
+	_, err = cvBuildMaterializedAggRLOFromVerifiedAggregate(cfg, &bad, dispersal)
 	if err == nil || !strings.Contains(err.Error(), "wire or digest mismatch") {
 		t.Fatalf("FromVerified accepted a mutated aggregate digest: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestCVSAPVSSM4FromVerifiedRejectsAggregateDigestMutation(t *testing.T) {
 
 func TestCVSAPVSSM4RecoverRejectsRootAndShardMutation(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	materialized, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, leaves)
+	materialized, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,23 +260,23 @@ func TestCVSAPVSSM4RecoverRejectsRootAndShardMutation(t *testing.T) {
 		bad.rlo = cloneAggRLO(materialized.rlo)
 		bad.rlo.Header.FreshShardRoot[0] ^= 1
 		bad.rlo.Digest = digestAggRLO(*bad.rlo)
-		if _, err := cvRecoverMaterializedAggregateV1(cfg, &bad, bad.rlo.Digest, []int{0, 1}); err == nil {
+		if _, err := cvRecoverMaterializedAggregate(cfg, &bad, bad.rlo.Digest, []int{0, 1}); err == nil {
 			t.Fatal("recovered after mutating the ARC-bound fresh shard root")
 		}
 	})
 
 	t.Run("available shard payload", func(t *testing.T) {
-		bad := cvCloneMaterializedAggregateV1ForTest(materialized)
+		bad := cvCloneMaterializedAggregateForTest(materialized)
 		bad.dispersal.shards[0].payload[0] ^= 1
-		if _, err := cvRecoverMaterializedAggregateV1(cfg, bad, bad.rlo.Digest, []int{0, 1}); err == nil {
+		if _, err := cvRecoverMaterializedAggregate(cfg, bad, bad.rlo.Digest, []int{0, 1}); err == nil {
 			t.Fatal("recovered after mutating an available aggregate shard")
 		}
 	})
 
 	t.Run("erasure dimensions", func(t *testing.T) {
-		bad := cvCloneMaterializedAggregateV1ForTest(materialized)
+		bad := cvCloneMaterializedAggregateForTest(materialized)
 		bad.dispersal.dataShards++
-		if _, err := cvRecoverMaterializedAggregateV1(cfg, bad, bad.rlo.Digest, []int{0, 1, 2}); err == nil {
+		if _, err := cvRecoverMaterializedAggregate(cfg, bad, bad.rlo.Digest, []int{0, 1, 2}); err == nil {
 			t.Fatal("recovered after mutating the ARC-required erasure dimensions")
 		}
 	})
@@ -284,13 +284,13 @@ func TestCVSAPVSSM4RecoverRejectsRootAndShardMutation(t *testing.T) {
 
 func TestCVSAPVSSM4RecoverRejectsUnagreedLocalAggregate(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	materialized, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, leaves)
+	materialized, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
 	agreedDigest := append([]byte(nil), materialized.rlo.Digest...)
 	agreedDigest[0] ^= 1
-	if _, err := cvRecoverMaterializedAggregateV1(cfg, materialized, agreedDigest, []int{0, 1}); err == nil {
+	if _, err := cvRecoverMaterializedAggregate(cfg, materialized, agreedDigest, []int{0, 1}); err == nil {
 		t.Fatal("recovered a local aggregate that was not selected by MVBA")
 	}
 }
@@ -298,18 +298,18 @@ func TestCVSAPVSSM4RecoverRejectsUnagreedLocalAggregate(t *testing.T) {
 func TestCVSAPVSSM4RejectsDealerOutsideOldCommittee(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	cfg.OldCommittee = []int{2, 3, 4, 5}
-	if _, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, leaves); err == nil || !strings.Contains(err.Error(), "outside old committee") {
+	if _, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves); err == nil || !strings.Contains(err.Error(), "outside old committee") {
 		t.Fatalf("M4 did not reject leaves from dealers outside the old committee: %v", err)
 	}
 }
 
 func TestCVSAPVSSM4RejectsDealerIDOutsideIntRange(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
-	badLeaves := append([]*cvLeafV1(nil), leaves...)
+	badLeaves := append([]*cvLeaf(nil), leaves...)
 	badLeaf := *badLeaves[1]
 	badLeaf.dealerID = uint64(^uint(0)>>1) + 1
 	badLeaves[1] = &badLeaf
-	if _, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, badLeaves); err == nil || !strings.Contains(err.Error(), "dealer ID exceeds int") {
+	if _, err := cvMaterializeAndLockAggregate(cfg, &leafContext, badLeaves); err == nil || !strings.Contains(err.Error(), "dealer ID exceeds int") {
 		t.Fatalf("M4 did not reject a dealer ID outside the local int range before aggregation: %v", err)
 	}
 }
@@ -326,7 +326,7 @@ func TestCVSAPVSSM4DecodeRejectsOversizedReceiverCountBeforeAllocation(t *testin
 	}
 	var wire bytes.Buffer
 	for _, value := range [][]byte{
-		[]byte("ARL-CV-sAPVSS-v1"), []byte(cvLeafV1GroupID), fr.Modulus().Bytes(),
+		[]byte("ARL-CV-sAPVSS"), []byte(cvLeafGroupID), fr.Modulus().Bytes(),
 	} {
 		if err := cvWriteBytes(&wire, value); err != nil {
 			t.Fatal(err)
@@ -350,7 +350,7 @@ func TestCVSAPVSSM4DecodeRejectsOversizedReceiverCountBeforeAllocation(t *testin
 		t.Fatal(err)
 	}
 
-	_, err = cvDecodeLeafContextV1(wire.Bytes())
+	_, err = cvDecodeLeafContext(wire.Bytes())
 	if err == nil || !strings.Contains(err.Error(), "receiver count exceeds remaining wire") {
 		t.Fatalf("oversized receiver count was not rejected before allocation: %v", err)
 	}
@@ -358,11 +358,11 @@ func TestCVSAPVSSM4DecodeRejectsOversizedReceiverCountBeforeAllocation(t *testin
 
 func TestCVSAPVSSM4DecodeAggregateRejectsReceiverCountBeyondRemainingWire(t *testing.T) {
 	context, _, leaves := cvM2Fixture(t)
-	agg, err := cvAggV1(&context, leaves)
+	agg, err := cvAgg(&context, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := cvAggregateV1CanonicalBytes(agg)
+	wire, err := cvAggregateCanonicalBytes(agg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestCVSAPVSSM4DecodeAggregateRejectsReceiverCountBeyondRemainingWire(t *tes
 	}
 	wire = wire[:len(wire)-r.reader.Len()]
 
-	_, err = cvDecodeAggregateV1(wire)
+	_, err = cvDecodeAggregate(wire)
 	if err == nil || !strings.Contains(err.Error(), "CV-sAPVSS aggregate receiver count exceeds remaining wire") {
 		t.Fatalf("aggregate receiver count was not rejected before allocation: %v", err)
 	}
@@ -413,22 +413,22 @@ func TestCVSAPVSSM4DecodeAggregateRejectsDealerCountBeyondRemainingWire(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("dealer-count-bound"),
 		epoch:              1,
 		sharingDegree:      0,
 		profile:            cvChunkProfile{chunkBits: 1, maxComponents: 1 << 20},
 		receiverPublicKeys: []bls12381.G1Affine{key},
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1StructuralProofProfile,
+		proofProfile:       cvLeafStructuralProofProfile,
 	}
-	contextWire, err := cvLeafContextV1CanonicalBytes(&context)
+	contextWire, err := cvLeafContextCanonicalBytes(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var wire bytes.Buffer
 	for _, value := range [][]byte{
-		[]byte(cvAggregateV1Domain), contextWire, cvLeafContextV1Digest(&context),
+		[]byte(cvAggregateDomain), contextWire, cvLeafContextDigest(&context),
 	} {
 		if err := cvWriteBytes(&wire, value); err != nil {
 			t.Fatal(err)
@@ -438,7 +438,7 @@ func TestCVSAPVSSM4DecodeAggregateRejectsDealerCountBeyondRemainingWire(t *testi
 		t.Fatal(err)
 	}
 
-	_, err = cvDecodeAggregateV1(wire.Bytes())
+	_, err = cvDecodeAggregate(wire.Bytes())
 	if err == nil || !strings.Contains(err.Error(), "aggregate dealer count exceeds remaining wire") {
 		t.Fatalf("oversized aggregate dealer count was not rejected before allocation: %v", err)
 	}
@@ -446,13 +446,13 @@ func TestCVSAPVSSM4DecodeAggregateRejectsDealerCountBeyondRemainingWire(t *testi
 
 func TestCVSAPVSSM4DecodeAggregateRejectsCommitmentCountBeyondRemainingWire(t *testing.T) {
 	context, _, leaves := cvM2Fixture(t)
-	contextWire, err := cvLeafContextV1CanonicalBytes(&context)
+	contextWire, err := cvLeafContextCanonicalBytes(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var wire bytes.Buffer
 	for _, value := range [][]byte{
-		[]byte(cvAggregateV1Domain), contextWire, cvLeafContextV1Digest(&context),
+		[]byte(cvAggregateDomain), contextWire, cvLeafContextDigest(&context),
 	} {
 		if err := cvWriteBytes(&wire, value); err != nil {
 			t.Fatal(err)
@@ -469,13 +469,13 @@ func TestCVSAPVSSM4DecodeAggregateRejectsCommitmentCountBeyondRemainingWire(t *t
 		t.Fatal(err)
 	}
 
-	_, err = cvDecodeAggregateV1(wire.Bytes())
+	_, err = cvDecodeAggregate(wire.Bytes())
 	if err == nil || !strings.Contains(err.Error(), "aggregate commitment count exceeds remaining wire") {
 		t.Fatalf("aggregate commitment count was not rejected before allocation: %v", err)
 	}
 }
 
-func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeafV1) {
+func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) {
 	t.Helper()
 	receiverSecrets := []fr.Element{
 		cvTestScalar(13),
@@ -492,20 +492,20 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeaf
 		}
 	}
 	sid := fmt.Sprintf("cv-m4-%d", time.Now().UnixNano())
-	leafContext := cvLeafContextV1{
+	leafContext := cvLeafContext{
 		sessionID:          []byte(sid),
 		epoch:              1,
 		sharingDegree:      1,
 		profile:            cvChunkProfile{chunkBits: 4, maxComponents: 2},
 		receiverPublicKeys: receiverKeys,
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1GrothProofProfile,
+		proofProfile:       cvLeafGrothProofProfile,
 	}
 	chunks, err := cvChunkCount(leafContext.profile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deal := func(dealer uint64, scalar, blinding []fr.Element, coinStart uint64) *cvLeafV1 {
+	deal := func(dealer uint64, scalar, blinding []fr.Element, coinStart uint64) *cvLeaf {
 		commonCoins := cvTestCoins(chunks, coinStart)
 		scalarCoins := make([][]fr.Element, len(receiverKeys))
 		blindingCoins := make([]fr.Element, len(receiverKeys))
@@ -513,7 +513,7 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeaf
 			scalarCoins[i] = append([]fr.Element(nil), commonCoins...)
 			blindingCoins[i] = cvTestScalar(coinStart + uint64(chunks) + 1)
 		}
-		leaf, dealErr := cvReferenceDealV1(
+		leaf, dealErr := cvReferenceDeal(
 			leafContext, dealer, scalar, blinding, scalarCoins, blindingCoins,
 		)
 		if dealErr != nil {
@@ -521,7 +521,7 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeaf
 		}
 		return leaf
 	}
-	leaves := []*cvLeafV1{
+	leaves := []*cvLeaf{
 		deal(0, []fr.Element{cvTestScalar(5), cvTestScalar(3)}, []fr.Element{cvTestScalar(7), cvTestScalar(2)}, 100),
 		deal(1, []fr.Element{cvTestScalar(11), cvTestScalar(5)}, []fr.Element{cvTestScalar(13), cvTestScalar(4)}, 300),
 	}
@@ -542,14 +542,14 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeaf
 	return cfg, leafContext, receiverSecrets, leaves
 }
 
-func cvCloneMaterializedAggregateV1ForTest(in *cvMaterializedAggregateV1) *cvMaterializedAggregateV1 {
+func cvCloneMaterializedAggregateForTest(in *cvMaterializedAggregate) *cvMaterializedAggregate {
 	out := *in
 	out.rlo = cloneAggRLO(in.rlo)
 	copyDispersal := *in.dispersal
 	copyDispersal.nonce = append([]byte(nil), in.dispersal.nonce...)
 	copyDispersal.payloadDigest = append([]byte(nil), in.dispersal.payloadDigest...)
 	copyDispersal.root = append([]byte(nil), in.dispersal.root...)
-	copyDispersal.shards = make([]cvAggregateShardV1, len(in.dispersal.shards))
+	copyDispersal.shards = make([]cvAggregateShard, len(in.dispersal.shards))
 	for i := range copyDispersal.shards {
 		copyDispersal.shards[i] = in.dispersal.shards[i]
 		copyDispersal.shards[i].payload = append([]byte(nil), in.dispersal.shards[i].payload...)

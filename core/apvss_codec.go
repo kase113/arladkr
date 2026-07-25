@@ -5,23 +5,23 @@ import (
 	"fmt"
 )
 
-const apvssMaxLeafWireBytesV1 = cvMaxLeafWireBytesV1
+const apvssMaxLeafWireBytes = cvMaxLeafWireBytes
 
-func apvssHasLeafWireDomainV1(wire []byte) bool {
+func apvssHasLeafWireDomain(wire []byte) bool {
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(apvssLeafWireDomain))
 	return err == nil && bytes.Equal(domain, []byte(apvssLeafWireDomain))
 }
 
-func apvssValidatePartitionShapeV1(prototype *apvssLeafPrototypeV1) error {
+func apvssValidatePartitionShape(prototype *apvssLeafPrototype) error {
 	if prototype == nil || prototype.leaf == nil {
 		return fmt.Errorf("invalid APVSS prototype leaf")
 	}
 	n := len(prototype.leaf.receivers)
-	if err := apvssRequireFallbackBackendV1(prototype.fallbackProfile); err != nil {
+	if err := apvssRequireFallbackBackend(prototype.fallbackProfile); err != nil {
 		return err
 	}
-	fallbackIndices, err := apvssPrototypeFallbackIndicesV1(prototype)
+	fallbackIndices, err := apvssPrototypeFallbackIndices(prototype)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func apvssValidatePartitionShapeV1(prototype *apvssLeafPrototypeV1) error {
 			covered[receiverIndex-1] {
 			return fmt.Errorf("APVSS fallback indices are not the ACK complement")
 		}
-		if apvssNormalizeFallbackProfileV1(prototype.fallbackProfile) == apvssFallbackExactLaneProfileV1 &&
+		if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackExactLaneProfile &&
 			prototype.fallbackProofs[i].proof == nil {
 			return fmt.Errorf("missing exact APVSS fallback proof")
 		}
@@ -61,14 +61,14 @@ func apvssValidatePartitionShapeV1(prototype *apvssLeafPrototypeV1) error {
 	return nil
 }
 
-func apvssLeafPrototypeV1CanonicalBytes(prototype *apvssLeafPrototypeV1) ([]byte, error) {
+func apvssLeafPrototypeCanonicalBytes(prototype *apvssLeafPrototype) ([]byte, error) {
 	if prototype == nil || prototype.leaf == nil {
 		return nil, fmt.Errorf("invalid APVSS prototype leaf")
 	}
-	if err := apvssValidatePartitionShapeV1(prototype); err != nil {
+	if err := apvssValidatePartitionShape(prototype); err != nil {
 		return nil, err
 	}
-	leafWire, err := cvLeafV1CanonicalBytes(prototype.leaf)
+	leafWire, err := cvLeafCanonicalBytes(prototype.leaf)
 	if err != nil {
 		return nil, err
 	}
@@ -94,24 +94,24 @@ func apvssLeafPrototypeV1CanonicalBytes(prototype *apvssLeafPrototypeV1) ([]byte
 	// An empty profile preserves the legacy exact-lane v1 wire. New encodings
 	// carry an unambiguous marker and explicit profile before the fallback count.
 	if prototype.fallbackProfile != "" {
-		if err := cvWriteUint32(&wire, apvssFallbackProfileMarkerV1); err != nil {
+		if err := cvWriteUint32(&wire, apvssFallbackProfileMarker); err != nil {
 			return nil, err
 		}
 		if err := cvWriteBytes(
 			&wire,
-			[]byte(apvssNormalizeFallbackProfileV1(prototype.fallbackProfile)),
+			[]byte(apvssNormalizeFallbackProfile(prototype.fallbackProfile)),
 		); err != nil {
 			return nil, err
 		}
 	}
-	fallbackIndices, err := apvssPrototypeFallbackIndicesV1(prototype)
+	fallbackIndices, err := apvssPrototypeFallbackIndices(prototype)
 	if err != nil {
 		return nil, err
 	}
 	if err := cvWriteUint32(&wire, len(fallbackIndices)); err != nil {
 		return nil, err
 	}
-	if apvssNormalizeFallbackProfileV1(prototype.fallbackProfile) == apvssFallbackCompactBatchProfileV1 {
+	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackCompactBatchProfile {
 		for _, receiverIndex := range fallbackIndices {
 			if err := cvWriteUint32(&wire, receiverIndex); err != nil {
 				return nil, err
@@ -119,7 +119,7 @@ func apvssLeafPrototypeV1CanonicalBytes(prototype *apvssLeafPrototypeV1) ([]byte
 		}
 		var proofWire []byte
 		if prototype.compactFallback != nil {
-			proofWire, err = apvssCompactFallbackProofV1CanonicalBytes(
+			proofWire, err = apvssCompactFallbackProofCanonicalBytes(
 				prototype.leaf, prototype.compactFallback,
 			)
 			if err != nil {
@@ -135,7 +135,7 @@ func apvssLeafPrototypeV1CanonicalBytes(prototype *apvssLeafPrototypeV1) ([]byte
 			if err := cvWriteUint32(&wire, fallback.receiverIndex); err != nil {
 				return nil, err
 			}
-			proofWire, err := cvLeafProofV1CanonicalBytes(fallback.proof)
+			proofWire, err := cvLeafProofCanonicalBytes(fallback.proof)
 			if err != nil {
 				return nil, err
 			}
@@ -144,26 +144,26 @@ func apvssLeafPrototypeV1CanonicalBytes(prototype *apvssLeafPrototypeV1) ([]byte
 			}
 		}
 	}
-	if wire.Len() > apvssMaxLeafWireBytesV1 {
+	if wire.Len() > apvssMaxLeafWireBytes {
 		return nil, fmt.Errorf("APVSS leaf exceeds the wire safety limit")
 	}
 	return wire.Bytes(), nil
 }
 
-func apvssLeafPrototypeV1Digest(prototype *apvssLeafPrototypeV1) []byte {
-	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+func apvssLeafPrototypeDigest(prototype *apvssLeafPrototype) []byte {
+	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil {
 		return nil
 	}
 	return hashBytes([]byte(apvssLeafDigestDomain), wire)
 }
 
-func apvssDecodeLeafPrototypeV1(
+func apvssDecodeLeafPrototype(
 	wire []byte,
-	expectedContext *cvLeafContextV1,
-) (*apvssLeafPrototypeV1, error) {
-	if expectedContext == nil || expectedContext.proofProfile != cvLeafV1StructuralProofProfile ||
-		len(wire) == 0 || len(wire) > apvssMaxLeafWireBytesV1 {
+	expectedContext *cvLeafContext,
+) (*apvssLeafPrototype, error) {
+	if expectedContext == nil || expectedContext.proofProfile != cvLeafStructuralProofProfile ||
+		len(wire) == 0 || len(wire) > apvssMaxLeafWireBytes {
 		return nil, fmt.Errorf("invalid expected APVSS leaf context or wire")
 	}
 	r := newCVWireReader(wire)
@@ -171,11 +171,11 @@ func apvssDecodeLeafPrototypeV1(
 	if err != nil || !bytes.Equal(domain, []byte(apvssLeafWireDomain)) {
 		return nil, fmt.Errorf("invalid APVSS leaf wire domain")
 	}
-	baseWire, err := r.bytes(cvMaxLeafWireBytesV1)
+	baseWire, err := r.bytes(cvMaxLeafWireBytes)
 	if err != nil || len(baseWire) == 0 {
 		return nil, fmt.Errorf("invalid APVSS structural leaf field")
 	}
-	leaf, err := cvDecodeLeafV1(baseWire, expectedContext)
+	leaf, err := cvDecodeLeaf(baseWire, expectedContext)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,7 @@ func apvssDecodeLeafPrototypeV1(
 	if err != nil || ackCount < 0 || ackCount > n {
 		return nil, fmt.Errorf("invalid APVSS ACK count")
 	}
-	prototype := &apvssLeafPrototypeV1{leaf: leaf, acks: make([]apvssLaneACKV1, ackCount)}
+	prototype := &apvssLeafPrototype{leaf: leaf, acks: make([]apvssLaneACK, ackCount)}
 	for i := range prototype.acks {
 		ack := &prototype.acks[i]
 		ack.receiverIndex, err = r.uint32()
@@ -205,13 +205,13 @@ func apvssDecodeLeafPrototypeV1(
 		return nil, fmt.Errorf("decode APVSS fallback profile/count: %w", err)
 	}
 	fallbackCount := profileMarkerOrCount
-	if profileMarkerOrCount == apvssFallbackProfileMarkerV1 {
+	if profileMarkerOrCount == apvssFallbackProfileMarker {
 		profileWire, err := r.bytes(128)
 		if err != nil {
 			return nil, fmt.Errorf("decode APVSS fallback proof profile: %w", err)
 		}
 		prototype.fallbackProfile = string(profileWire)
-		if err := apvssRequireFallbackBackendV1(prototype.fallbackProfile); err != nil {
+		if err := apvssRequireFallbackBackend(prototype.fallbackProfile); err != nil {
 			return nil, err
 		}
 		fallbackCount, err = r.uint32()
@@ -219,7 +219,7 @@ func apvssDecodeLeafPrototypeV1(
 	if err != nil || fallbackCount < 0 || fallbackCount > expectedContext.sharingDegree {
 		return nil, fmt.Errorf("invalid APVSS fallback proof count")
 	}
-	if apvssNormalizeFallbackProfileV1(prototype.fallbackProfile) == apvssFallbackCompactBatchProfileV1 {
+	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackCompactBatchProfile {
 		prototype.fallbackIndices = make([]int, fallbackCount)
 		for i := range prototype.fallbackIndices {
 			prototype.fallbackIndices[i], err = r.uint32()
@@ -227,7 +227,7 @@ func apvssDecodeLeafPrototypeV1(
 				return nil, fmt.Errorf("decode compact APVSS fallback receiver index: %w", err)
 			}
 		}
-		proofWire, readErr := r.bytes(cvMaxLeafWireBytesV1)
+		proofWire, readErr := r.bytes(cvMaxLeafWireBytes)
 		if readErr != nil {
 			return nil, fmt.Errorf("decode compact APVSS fallback proof: %w", readErr)
 		}
@@ -238,7 +238,7 @@ func apvssDecodeLeafPrototypeV1(
 		} else {
 			// Partition verification below checks the proof exactly once after the
 			// outer ordered I set has also been decoded and matched.
-			prototype.compactFallback, err = apvssDecodeCompactFallbackProofWithVerifyV1(
+			prototype.compactFallback, err = apvssDecodeCompactFallbackProofWithVerify(
 				proofWire, leaf, false,
 			)
 			if err != nil {
@@ -246,26 +246,26 @@ func apvssDecodeLeafPrototypeV1(
 			}
 		}
 	} else {
-		prototype.fallbackProofs = make([]apvssFallbackProofV1, fallbackCount)
+		prototype.fallbackProofs = make([]apvssFallbackProof, fallbackCount)
 		for i := range prototype.fallbackProofs {
 			fallback := &prototype.fallbackProofs[i]
 			fallback.receiverIndex, err = r.uint32()
 			if err != nil {
 				return nil, fmt.Errorf("decode APVSS fallback receiver index: %w", err)
 			}
-			fallbackContext, _, deriveErr := apvssFallbackLeafV1(leaf, fallback.receiverIndex)
+			fallbackContext, _, deriveErr := apvssFallbackLeaf(leaf, fallback.receiverIndex)
 			if deriveErr != nil {
 				return nil, deriveErr
 			}
-			proofSize, sizeErr := cvLeafProofWireSizeV1(fallbackContext)
+			proofSize, sizeErr := cvLeafProofWireSize(fallbackContext)
 			if sizeErr != nil {
 				return nil, sizeErr
 			}
-			proofWire, readErr := cvReadExactBytesV1(r, proofSize, "APVSS fallback proof")
+			proofWire, readErr := cvReadExactBytes(r, proofSize, "APVSS fallback proof")
 			if readErr != nil {
 				return nil, readErr
 			}
-			fallback.proof, err = cvDecodeLeafProofV1(proofWire, fallbackContext)
+			fallback.proof, err = cvDecodeLeafProof(proofWire, fallbackContext)
 			if err != nil {
 				return nil, err
 			}
@@ -274,24 +274,24 @@ func apvssDecodeLeafPrototypeV1(
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing APVSS leaf bytes")
 	}
-	if err := apvssValidatePartitionShapeV1(prototype); err != nil {
+	if err := apvssValidatePartitionShape(prototype); err != nil {
 		return nil, err
 	}
-	canonical, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	canonical, err := apvssLeafPrototypeCanonicalBytes(prototype)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical APVSS leaf encoding")
 	}
-	// cvDecodeLeafV1 already performed the complete structural-leaf check.
+	// cvDecodeLeaf already performed the complete structural-leaf check.
 	// Verify only the APVSS authentication partition here so an untrusted wire
 	// is checked once, rather than repeating all commitment evaluations.
-	if err := apvssVerifyPrototypePartitionV1(prototype); err != nil {
+	if err := apvssVerifyPrototypePartition(prototype); err != nil {
 		return nil, err
 	}
 	prototype.digest = hashBytes([]byte(apvssLeafDigestDomain), wire)
 	return prototype, nil
 }
 
-func apvssLaneACKMessageV1CanonicalBytes(message *apvssLaneACKMessageV1) ([]byte, error) {
+func apvssLaneACKMessageCanonicalBytes(message *apvssLaneACKMessage) ([]byte, error) {
 	if message == nil || len(message.leafDigest) != 32 || message.ack.receiverIndex <= 0 ||
 		!cvValidG1(&message.ack.signature.r, false) {
 		return nil, fmt.Errorf("invalid APVSS ACK message")
@@ -312,10 +312,10 @@ func apvssLaneACKMessageV1CanonicalBytes(message *apvssLaneACKMessageV1) ([]byte
 	return wire.Bytes(), nil
 }
 
-func apvssDecodeLaneACKMessageV1(
+func apvssDecodeLaneACKMessage(
 	wire []byte,
-	leaf *cvLeafV1,
-) (*apvssLaneACKMessageV1, error) {
+	leaf *cvLeaf,
+) (*apvssLaneACKMessage, error) {
 	if leaf == nil || len(leaf.digest) != 32 {
 		return nil, fmt.Errorf("invalid APVSS ACK message leaf")
 	}
@@ -324,7 +324,7 @@ func apvssDecodeLaneACKMessageV1(
 	if err != nil || !bytes.Equal(domain, []byte(apvssACKMessageDomain)) {
 		return nil, fmt.Errorf("invalid APVSS ACK message domain")
 	}
-	message := &apvssLaneACKMessageV1{}
+	message := &apvssLaneACKMessage{}
 	message.dealerID, err = r.uint64()
 	if err != nil || message.dealerID != leaf.dealerID {
 		return nil, fmt.Errorf("APVSS ACK message dealer mismatch")
@@ -345,11 +345,11 @@ func apvssDecodeLaneACKMessageV1(
 	if err != nil || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid APVSS ACK message response or framing")
 	}
-	canonical, err := apvssLaneACKMessageV1CanonicalBytes(message)
+	canonical, err := apvssLaneACKMessageCanonicalBytes(message)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical APVSS ACK message")
 	}
-	if err := apvssVerifyLaneACKV1(leaf, &message.ack); err != nil {
+	if err := apvssVerifyLaneACK(leaf, &message.ack); err != nil {
 		return nil, err
 	}
 	return message, nil

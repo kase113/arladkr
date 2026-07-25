@@ -10,28 +10,28 @@ import (
 )
 
 const (
-	apvssCompactFallbackDomainV1            = "ARL-APVSS-v1/compact-fallback"
-	apvssCompactComparatorStatementDomainV1 = "ARL-APVSS-v1/canonical-comparator/statement"
-	apvssCompactComparatorWeightDomainV1    = "ARL-APVSS-v1/canonical-comparator/weight"
-	apvssCompactComparatorChallengeDomainV1 = "ARL-APVSS-v1/canonical-comparator/challenge"
+	apvssCompactFallbackDomain            = "ARL-APVSS/compact-fallback"
+	apvssCompactComparatorStatementDomain = "ARL-APVSS/canonical-comparator/statement"
+	apvssCompactComparatorWeightDomain    = "ARL-APVSS/canonical-comparator/weight"
+	apvssCompactComparatorChallengeDomain = "ARL-APVSS/canonical-comparator/challenge"
 )
 
-type apvssCompactComparatorProofV1 struct {
+type apvssCompactComparatorProof struct {
 	complementCommitments []bls12381.G1Affine
 	borrowCommitments     []bls12381.G1Affine
-	complementRange       *apvssCompactRangeProofV1
-	borrowRange           *apvssCompactRangeProofV1
+	complementRange       *apvssCompactRangeProof
+	borrowRange           *apvssCompactRangeProof
 	tRelation             bls12381.G1Affine
 	zRelation             fr.Element
 }
 
-type apvssCompactFallbackProofV1 struct {
-	link       *apvssCompactLinkProofV1
-	digitRange *apvssCompactRangeProofV1
-	comparator *apvssCompactComparatorProofV1
+type apvssCompactFallbackProof struct {
+	link       *apvssCompactLinkProof
+	digitRange *apvssCompactRangeProof
+	comparator *apvssCompactComparatorProof
 }
 
-func apvssCompactLinkCommitmentsV1(proof *apvssCompactLinkProofV1) []bls12381.G1Affine {
+func apvssCompactLinkCommitments(proof *apvssCompactLinkProof) []bls12381.G1Affine {
 	if proof == nil {
 		return nil
 	}
@@ -44,7 +44,7 @@ func apvssCompactLinkCommitmentsV1(proof *apvssCompactLinkProofV1) []bls12381.G1
 	return commitments
 }
 
-func apvssCompactModulusDigitsV1(count int) ([]uint64, error) {
+func apvssCompactModulusDigits(count int) ([]uint64, error) {
 	if count <= 0 {
 		return nil, fmt.Errorf("invalid APVSS comparator digit count")
 	}
@@ -60,7 +60,7 @@ func apvssCompactModulusDigitsV1(count int) ([]uint64, error) {
 	return digits, nil
 }
 
-func apvssCompactComplementDigitsV1(scalar fr.Element, count int) ([]uint64, error) {
+func apvssCompactComplementDigits(scalar fr.Element, count int) ([]uint64, error) {
 	value := scalar.BigInt(new(big.Int))
 	complement := new(big.Int).Sub(new(big.Int).Sub(new(big.Int).Set(fr.Modulus()), big.NewInt(1)), value)
 	if complement.Sign() < 0 {
@@ -77,7 +77,7 @@ func apvssCompactComplementDigitsV1(scalar fr.Element, count int) ([]uint64, err
 	return digits, nil
 }
 
-func apvssCompactComparatorBorrowsV1(
+func apvssCompactComparatorBorrows(
 	modulusDigits, scalarDigits, complementDigits []uint64,
 ) ([]uint64, error) {
 	if len(modulusDigits) == 0 || len(modulusDigits) != len(scalarDigits) ||
@@ -106,30 +106,30 @@ func apvssCompactComparatorBorrowsV1(
 	return borrows, nil
 }
 
-func apvssCompactComparatorStatementV1(
-	leaf *cvLeafV1,
-	link *apvssCompactLinkProofV1,
-	proof *apvssCompactComparatorProofV1,
+func apvssCompactComparatorStatement(
+	leaf *cvLeaf,
+	link *apvssCompactLinkProof,
+	proof *apvssCompactComparatorProof,
 ) ([]byte, error) {
 	if leaf == nil || link == nil || proof == nil {
 		return nil, fmt.Errorf("invalid APVSS comparator statement")
 	}
-	fallbackDigest, err := apvssFallbackSetStatementDigestV1(
+	fallbackDigest, err := apvssFallbackSetStatementDigest(
 		leaf,
-		apvssCompactLinkReceiverIndicesV1(link),
-		apvssFallbackCompactBatchProfileV1,
+		apvssCompactLinkReceiverIndices(link),
+		apvssFallbackCompactBatchProfile,
 	)
 	if err != nil {
 		return nil, err
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(apvssCompactComparatorStatementDomainV1)); err != nil {
+	if err := cvWriteBytes(&wire, []byte(apvssCompactComparatorStatementDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, fallbackDigest); err != nil {
 		return nil, err
 	}
-	if err := cvWritePointVector(&wire, apvssCompactLinkCommitmentsV1(link)); err != nil {
+	if err := cvWritePointVector(&wire, apvssCompactLinkCommitments(link)); err != nil {
 		return nil, err
 	}
 	if err := cvWritePointVector(&wire, proof.complementCommitments); err != nil {
@@ -138,27 +138,27 @@ func apvssCompactComparatorStatementV1(
 	if err := cvWritePointVector(&wire, proof.borrowCommitments); err != nil {
 		return nil, err
 	}
-	return hashBytes([]byte(apvssCompactComparatorStatementDomainV1), wire.Bytes()), nil
+	return hashBytes([]byte(apvssCompactComparatorStatementDomain), wire.Bytes()), nil
 }
 
-func apvssCompactSubproofStatementV1(statement []byte, label string) []byte {
-	return hashBytes([]byte(apvssCompactFallbackDomainV1+"/"+label), statement)
+func apvssCompactSubproofStatement(statement []byte, label string) []byte {
+	return hashBytes([]byte(apvssCompactFallbackDomain+"/"+label), statement)
 }
 
-func apvssCompactComparatorAggregateV1(
+func apvssCompactComparatorAggregate(
 	statement []byte,
-	link *apvssCompactLinkProofV1,
-	proof *apvssCompactComparatorProofV1,
+	link *apvssCompactLinkProof,
+	proof *apvssCompactComparatorProof,
 	modulusDigits []uint64,
 	withBlindings bool,
 	scalarBlindings, complementBlindings, borrowBlindings []fr.Element,
 ) (bls12381.G1Affine, fr.Element, error) {
-	weight, err := apvssCompactChallengeV1(apvssCompactComparatorWeightDomainV1, statement)
+	weight, err := apvssCompactChallenge(apvssCompactComparatorWeightDomain, statement)
 	if err != nil {
 		return bls12381.G1Affine{}, fr.Element{}, err
 	}
-	weights := apvssCompactScalarPowersV1(weight, len(proof.complementCommitments))
-	scalarCommitments := apvssCompactLinkCommitmentsV1(link)
+	weights := apvssCompactScalarPowers(weight, len(proof.complementCommitments))
+	scalarCommitments := apvssCompactLinkCommitments(link)
 	chunks := len(modulusDigits)
 	lanes := len(link.lanes)
 	if len(scalarCommitments) != lanes*chunks || len(proof.complementCommitments) != lanes*chunks ||
@@ -201,7 +201,7 @@ func apvssCompactComparatorAggregateV1(
 	coefficients = append(coefficients, borrowCoefficients...)
 	points = append(points, genG1)
 	coefficients = append(coefficients, generatorCoefficient)
-	aggregate := apvssCompactPointSumV1(points, coefficients)
+	aggregate := apvssCompactPointSum(points, coefficients)
 	var aggregateBlinding fr.Element
 	if withBlindings {
 		for i := range scalarBlindings {
@@ -220,13 +220,13 @@ func apvssCompactComparatorAggregateV1(
 	return aggregate, aggregateBlinding, nil
 }
 
-func apvssProveCompactComparatorV1(
-	leaf *cvLeafV1,
-	witness *apvssDealerWitnessV1,
-	link *apvssCompactLinkProofV1,
+func apvssProveCompactComparator(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
+	link *apvssCompactLinkProof,
 	scalarDigits []uint64,
 	scalarBlindings []fr.Element,
-) (*apvssCompactComparatorProofV1, error) {
+) (*apvssCompactComparatorProof, error) {
 	if leaf == nil || witness == nil || link == nil || len(link.lanes) == 0 {
 		return nil, fmt.Errorf("invalid APVSS compact comparator witness")
 	}
@@ -237,11 +237,11 @@ func apvssProveCompactComparatorV1(
 	if len(scalarDigits) != len(link.lanes)*chunks || len(scalarBlindings) != len(scalarDigits) {
 		return nil, fmt.Errorf("invalid APVSS compact comparator digit openings")
 	}
-	modulusDigits, err := apvssCompactModulusDigitsV1(chunks)
+	modulusDigits, err := apvssCompactModulusDigits(chunks)
 	if err != nil {
 		return nil, err
 	}
-	proof := &apvssCompactComparatorProofV1{
+	proof := &apvssCompactComparatorProof{
 		complementCommitments: make([]bls12381.G1Affine, 0, len(scalarDigits)),
 		borrowCommitments:     make([]bls12381.G1Affine, 0, len(link.lanes)*(chunks-1)),
 	}
@@ -251,21 +251,21 @@ func apvssProveCompactComparatorV1(
 	borrowBlindings := make([]fr.Element, 0, len(link.lanes)*(chunks-1))
 	for laneIndex, lane := range link.lanes {
 		witnessIndex := lane.receiverIndex - 1
-		complements, err := apvssCompactComplementDigitsV1(witness.scalars[witnessIndex], chunks)
+		complements, err := apvssCompactComplementDigits(witness.scalars[witnessIndex], chunks)
 		if err != nil {
 			return nil, err
 		}
 		laneScalarDigits := scalarDigits[laneIndex*chunks : (laneIndex+1)*chunks]
-		borrows, err := apvssCompactComparatorBorrowsV1(modulusDigits, laneScalarDigits, complements)
+		borrows, err := apvssCompactComparatorBorrows(modulusDigits, laneScalarDigits, complements)
 		if err != nil {
 			return nil, err
 		}
 		for _, value := range complements {
-			blinding, err := apvssRandomFrV1()
+			blinding, err := apvssRandomFr()
 			if err != nil {
 				return nil, err
 			}
-			commitment, err := apvssCompactRangeCommitmentV1(value, blinding)
+			commitment, err := apvssCompactRangeCommitment(value, blinding)
 			if err != nil {
 				return nil, err
 			}
@@ -274,11 +274,11 @@ func apvssProveCompactComparatorV1(
 			proof.complementCommitments = append(proof.complementCommitments, commitment)
 		}
 		for _, value := range borrows {
-			blinding, err := apvssRandomFrV1()
+			blinding, err := apvssRandomFr()
 			if err != nil {
 				return nil, err
 			}
-			commitment, err := apvssCompactRangeCommitmentV1(value, blinding)
+			commitment, err := apvssCompactRangeCommitment(value, blinding)
 			if err != nil {
 				return nil, err
 			}
@@ -287,12 +287,12 @@ func apvssProveCompactComparatorV1(
 			proof.borrowCommitments = append(proof.borrowCommitments, commitment)
 		}
 	}
-	statement, err := apvssCompactComparatorStatementV1(leaf, link, proof)
+	statement, err := apvssCompactComparatorStatement(leaf, link, proof)
 	if err != nil {
 		return nil, err
 	}
-	proof.complementRange, err = apvssProveCompactRangeV1(
-		apvssCompactSubproofStatementV1(statement, "complement-range"),
+	proof.complementRange, err = apvssProveCompactRange(
+		apvssCompactSubproofStatement(statement, "complement-range"),
 		proof.complementCommitments,
 		complementValues,
 		complementBlindings,
@@ -301,8 +301,8 @@ func apvssProveCompactComparatorV1(
 	if err != nil {
 		return nil, err
 	}
-	proof.borrowRange, err = apvssProveCompactRangeV1(
-		apvssCompactSubproofStatementV1(statement, "borrow-range"),
+	proof.borrowRange, err = apvssProveCompactRange(
+		apvssCompactSubproofStatement(statement, "borrow-range"),
 		proof.borrowCommitments,
 		borrowValues,
 		borrowBlindings,
@@ -311,7 +311,7 @@ func apvssProveCompactComparatorV1(
 	if err != nil {
 		return nil, err
 	}
-	aggregate, aggregateBlinding, err := apvssCompactComparatorAggregateV1(
+	aggregate, aggregateBlinding, err := apvssCompactComparatorAggregate(
 		statement,
 		link,
 		proof,
@@ -324,7 +324,7 @@ func apvssProveCompactComparatorV1(
 	if err != nil {
 		return nil, err
 	}
-	randomness, err := apvssRandomFrV1()
+	randomness, err := apvssRandomFr()
 	if err != nil {
 		return nil, err
 	}
@@ -333,10 +333,10 @@ func apvssProveCompactComparatorV1(
 		return nil, err
 	}
 	proof.tRelation = cvPointTimes(&h, &randomness)
-	challenge, err := apvssCompactChallengeV1(
-		apvssCompactComparatorChallengeDomainV1,
+	challenge, err := apvssCompactChallenge(
+		apvssCompactComparatorChallengeDomain,
 		statement,
-		apvssCompactPointBytesV1(&aggregate, &proof.tRelation),
+		apvssCompactPointBytes(&aggregate, &proof.tRelation),
 	)
 	if err != nil {
 		return nil, err
@@ -345,10 +345,10 @@ func apvssProveCompactComparatorV1(
 	return proof, nil
 }
 
-func apvssVerifyCompactComparatorV1(
-	leaf *cvLeafV1,
-	link *apvssCompactLinkProofV1,
-	proof *apvssCompactComparatorProofV1,
+func apvssVerifyCompactComparator(
+	leaf *cvLeaf,
+	link *apvssCompactLinkProof,
+	proof *apvssCompactComparatorProof,
 ) error {
 	if leaf == nil || link == nil || proof == nil || !cvValidG1(&proof.tRelation, true) {
 		return fmt.Errorf("invalid APVSS compact comparator proof")
@@ -361,40 +361,40 @@ func apvssVerifyCompactComparatorV1(
 		len(proof.borrowCommitments) != len(link.lanes)*(chunks-1) {
 		return fmt.Errorf("invalid APVSS compact comparator shape")
 	}
-	statement, err := apvssCompactComparatorStatementV1(leaf, link, proof)
+	statement, err := apvssCompactComparatorStatement(leaf, link, proof)
 	if err != nil {
 		return err
 	}
-	if err := apvssVerifyCompactRangeV1(
-		apvssCompactSubproofStatementV1(statement, "complement-range"),
+	if err := apvssVerifyCompactRange(
+		apvssCompactSubproofStatement(statement, "complement-range"),
 		proof.complementCommitments,
 		proof.complementRange,
 		8,
 	); err != nil {
 		return fmt.Errorf("invalid APVSS comparator complement range: %w", err)
 	}
-	if err := apvssVerifyCompactRangeV1(
-		apvssCompactSubproofStatementV1(statement, "borrow-range"),
+	if err := apvssVerifyCompactRange(
+		apvssCompactSubproofStatement(statement, "borrow-range"),
 		proof.borrowCommitments,
 		proof.borrowRange,
 		1,
 	); err != nil {
 		return fmt.Errorf("invalid APVSS comparator borrow range: %w", err)
 	}
-	modulusDigits, err := apvssCompactModulusDigitsV1(chunks)
+	modulusDigits, err := apvssCompactModulusDigits(chunks)
 	if err != nil {
 		return err
 	}
-	aggregate, _, err := apvssCompactComparatorAggregateV1(
+	aggregate, _, err := apvssCompactComparatorAggregate(
 		statement, link, proof, modulusDigits, false, nil, nil, nil,
 	)
 	if err != nil {
 		return err
 	}
-	challenge, err := apvssCompactChallengeV1(
-		apvssCompactComparatorChallengeDomainV1,
+	challenge, err := apvssCompactChallenge(
+		apvssCompactComparatorChallengeDomain,
 		statement,
-		apvssCompactPointBytesV1(&aggregate, &proof.tRelation),
+		apvssCompactPointBytes(&aggregate, &proof.tRelation),
 	)
 	if err != nil {
 		return err
@@ -411,33 +411,33 @@ func apvssVerifyCompactComparatorV1(
 	return nil
 }
 
-func apvssProveCompactFallbackV1(
-	leaf *cvLeafV1,
-	witness *apvssDealerWitnessV1,
+func apvssProveCompactFallback(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
 	receiverIndices []int,
-) (*apvssCompactFallbackProofV1, error) {
+) (*apvssCompactFallbackProof, error) {
 	var digitValues []uint64
 	var digitBlindings []fr.Element
-	link, err := apvssProveCompactLinkWithOpeningsV1(
+	link, err := apvssProveCompactLinkWithOpenings(
 		leaf, witness, receiverIndices, &digitValues, &digitBlindings,
 	)
 	if err != nil {
 		return nil, err
 	}
-	proof := &apvssCompactFallbackProofV1{link: link}
-	proof.comparator, err = apvssProveCompactComparatorV1(
+	proof := &apvssCompactFallbackProof{link: link}
+	proof.comparator, err = apvssProveCompactComparator(
 		leaf, witness, link, digitValues, digitBlindings,
 	)
 	if err != nil {
 		return nil, err
 	}
-	statement, err := apvssCompactComparatorStatementV1(leaf, link, proof.comparator)
+	statement, err := apvssCompactComparatorStatement(leaf, link, proof.comparator)
 	if err != nil {
 		return nil, err
 	}
-	proof.digitRange, err = apvssProveCompactRangeV1(
-		apvssCompactSubproofStatementV1(statement, "scalar-digit-range"),
-		apvssCompactLinkCommitmentsV1(link),
+	proof.digitRange, err = apvssProveCompactRange(
+		apvssCompactSubproofStatement(statement, "scalar-digit-range"),
+		apvssCompactLinkCommitments(link),
 		digitValues,
 		digitBlindings,
 		8,
@@ -448,48 +448,48 @@ func apvssProveCompactFallbackV1(
 	return proof, nil
 }
 
-func apvssVerifyCompactFallbackV1(leaf *cvLeafV1, proof *apvssCompactFallbackProofV1) error {
+func apvssVerifyCompactFallback(leaf *cvLeaf, proof *apvssCompactFallbackProof) error {
 	if leaf == nil || proof == nil || proof.link == nil || proof.comparator == nil {
 		return fmt.Errorf("invalid APVSS compact fallback proof")
 	}
-	if err := apvssVerifyCompactLinkV1(leaf, proof.link); err != nil {
+	if err := apvssVerifyCompactLink(leaf, proof.link); err != nil {
 		return err
 	}
-	statement, err := apvssCompactComparatorStatementV1(leaf, proof.link, proof.comparator)
+	statement, err := apvssCompactComparatorStatement(leaf, proof.link, proof.comparator)
 	if err != nil {
 		return err
 	}
-	if err := apvssVerifyCompactRangeV1(
-		apvssCompactSubproofStatementV1(statement, "scalar-digit-range"),
-		apvssCompactLinkCommitmentsV1(proof.link),
+	if err := apvssVerifyCompactRange(
+		apvssCompactSubproofStatement(statement, "scalar-digit-range"),
+		apvssCompactLinkCommitments(proof.link),
 		proof.digitRange,
 		8,
 	); err != nil {
 		return fmt.Errorf("invalid APVSS scalar digit range: %w", err)
 	}
-	return apvssVerifyCompactComparatorV1(leaf, proof.link, proof.comparator)
+	return apvssVerifyCompactComparator(leaf, proof.link, proof.comparator)
 }
 
-func apvssCompactFallbackProofV1CanonicalBytes(
-	leaf *cvLeafV1,
-	proof *apvssCompactFallbackProofV1,
+func apvssCompactFallbackProofCanonicalBytes(
+	leaf *cvLeaf,
+	proof *apvssCompactFallbackProof,
 ) ([]byte, error) {
 	if leaf == nil || proof == nil || proof.comparator == nil {
 		return nil, fmt.Errorf("invalid APVSS compact fallback proof")
 	}
-	linkWire, err := apvssCompactLinkProofV1CanonicalBytes(leaf, proof.link)
+	linkWire, err := apvssCompactLinkProofCanonicalBytes(leaf, proof.link)
 	if err != nil {
 		return nil, err
 	}
-	digitRangeWire, err := apvssCompactRangeProofV1CanonicalBytes(proof.digitRange)
+	digitRangeWire, err := apvssCompactRangeProofCanonicalBytes(proof.digitRange)
 	if err != nil {
 		return nil, err
 	}
-	complementRangeWire, err := apvssCompactRangeProofV1CanonicalBytes(proof.comparator.complementRange)
+	complementRangeWire, err := apvssCompactRangeProofCanonicalBytes(proof.comparator.complementRange)
 	if err != nil {
 		return nil, err
 	}
-	borrowRangeWire, err := apvssCompactRangeProofV1CanonicalBytes(proof.comparator.borrowRange)
+	borrowRangeWire, err := apvssCompactRangeProofCanonicalBytes(proof.comparator.borrowRange)
 	if err != nil {
 		return nil, err
 	}
@@ -510,39 +510,39 @@ func apvssCompactFallbackProofV1CanonicalBytes(
 	return wire.Bytes(), nil
 }
 
-func apvssDecodeCompactFallbackProofV1(
+func apvssDecodeCompactFallbackProof(
 	wire []byte,
-	leaf *cvLeafV1,
-) (*apvssCompactFallbackProofV1, error) {
-	return apvssDecodeCompactFallbackProofWithVerifyV1(wire, leaf, true)
+	leaf *cvLeaf,
+) (*apvssCompactFallbackProof, error) {
+	return apvssDecodeCompactFallbackProofWithVerify(wire, leaf, true)
 }
 
-func apvssDecodeCompactFallbackProofWithVerifyV1(
+func apvssDecodeCompactFallbackProofWithVerify(
 	wire []byte,
-	leaf *cvLeafV1,
+	leaf *cvLeaf,
 	verify bool,
-) (*apvssCompactFallbackProofV1, error) {
-	if leaf == nil || len(wire) == 0 || len(wire) > cvMaxLeafWireBytesV1 {
+) (*apvssCompactFallbackProof, error) {
+	if leaf == nil || len(wire) == 0 || len(wire) > cvMaxLeafWireBytes {
 		return nil, fmt.Errorf("invalid APVSS compact fallback wire")
 	}
 	r := newCVWireReader(wire)
-	linkWire, err := r.bytes(cvMaxLeafWireBytesV1)
+	linkWire, err := r.bytes(cvMaxLeafWireBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode APVSS compact fallback link: %w", err)
 	}
-	link, err := apvssDecodeCompactLinkProofV1(linkWire, leaf)
+	link, err := apvssDecodeCompactLinkProof(linkWire, leaf)
 	if err != nil {
 		return nil, err
 	}
-	digitRangeWire, err := r.bytes(cvMaxLeafWireBytesV1)
+	digitRangeWire, err := r.bytes(cvMaxLeafWireBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode APVSS compact fallback digit range: %w", err)
 	}
-	complementRangeWire, err := r.bytes(cvMaxLeafWireBytesV1)
+	complementRangeWire, err := r.bytes(cvMaxLeafWireBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode APVSS compact fallback complement range: %w", err)
 	}
-	borrowRangeWire, err := r.bytes(cvMaxLeafWireBytesV1)
+	borrowRangeWire, err := r.bytes(cvMaxLeafWireBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode APVSS compact fallback borrow range: %w", err)
 	}
@@ -552,14 +552,14 @@ func apvssDecodeCompactFallbackProofWithVerifyV1(
 	}
 	scalarCount := len(link.lanes) * chunks
 	borrowCount := len(link.lanes) * (chunks - 1)
-	proof := &apvssCompactFallbackProofV1{link: link, comparator: &apvssCompactComparatorProofV1{}}
-	proof.comparator.complementCommitments, err = cvReadExactPointVectorV1(
+	proof := &apvssCompactFallbackProof{link: link, comparator: &apvssCompactComparatorProof{}}
+	proof.comparator.complementCommitments, err = cvReadExactPointVector(
 		r, scalarCount, "APVSS compact complement commitments",
 	)
 	if err != nil {
 		return nil, err
 	}
-	proof.comparator.borrowCommitments, err = cvReadExactPointVectorV1(
+	proof.comparator.borrowCommitments, err = cvReadExactPointVector(
 		r, borrowCount, "APVSS compact borrow commitments",
 	)
 	if err != nil {
@@ -573,28 +573,28 @@ func apvssDecodeCompactFallbackProofWithVerifyV1(
 	if err != nil || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid APVSS compact comparator relation scalar or suffix")
 	}
-	proof.digitRange, err = apvssDecodeCompactRangeProofV1(digitRangeWire, scalarCount, 8)
+	proof.digitRange, err = apvssDecodeCompactRangeProof(digitRangeWire, scalarCount, 8)
 	if err != nil {
 		return nil, err
 	}
-	proof.comparator.complementRange, err = apvssDecodeCompactRangeProofV1(
+	proof.comparator.complementRange, err = apvssDecodeCompactRangeProof(
 		complementRangeWire, scalarCount, 8,
 	)
 	if err != nil {
 		return nil, err
 	}
-	proof.comparator.borrowRange, err = apvssDecodeCompactRangeProofV1(
+	proof.comparator.borrowRange, err = apvssDecodeCompactRangeProof(
 		borrowRangeWire, borrowCount, 1,
 	)
 	if err != nil {
 		return nil, err
 	}
-	canonical, err := apvssCompactFallbackProofV1CanonicalBytes(leaf, proof)
+	canonical, err := apvssCompactFallbackProofCanonicalBytes(leaf, proof)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical APVSS compact fallback proof")
 	}
 	if verify {
-		if err := apvssVerifyCompactFallbackV1(leaf, proof); err != nil {
+		if err := apvssVerifyCompactFallback(leaf, proof); err != nil {
 			return nil, err
 		}
 	}

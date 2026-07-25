@@ -94,15 +94,15 @@ func (t *cvRouterTestTransport) closeCount() int {
 	return t.closes
 }
 
-func TestCVNetworkEnvelopeV1RoundTripAndCanonicalValidation(t *testing.T) {
+func TestCVNetworkEnvelopeRoundTripAndCanonicalValidation(t *testing.T) {
 	const sid = "cv-router-session"
 	const epoch = 17
 	payload := []byte("component payload")
-	wire, err := cvEncodeNetworkEnvelopeV1(sid, epoch, payload)
+	wire, err := cvEncodeNetworkEnvelope(sid, epoch, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := cvDecodeNetworkEnvelopeV1(wire, sid, epoch)
+	decoded, err := cvDecodeNetworkEnvelope(wire, sid, epoch)
 	if err != nil {
 		t.Fatalf("decode canonical envelope: %v", err)
 	}
@@ -113,8 +113,8 @@ func TestCVNetworkEnvelopeV1RoundTripAndCanonicalValidation(t *testing.T) {
 	if bytes.Equal(decoded, payload) {
 		t.Fatal("decoded payload aliases the input payload")
 	}
-	if cvMaxNetworkPayloadBytesV1 < cvMaxLeafWireBytesV1 {
-		t.Fatalf("network payload cap %d is below legal LeafV1 cap %d", cvMaxNetworkPayloadBytesV1, cvMaxLeafWireBytesV1)
+	if cvMaxNetworkPayloadBytes < cvMaxLeafWireBytes {
+		t.Fatalf("network payload cap %d is below legal Leaf cap %d", cvMaxNetworkPayloadBytes, cvMaxLeafWireBytes)
 	}
 
 	tests := []struct {
@@ -134,13 +134,13 @@ func TestCVNetworkEnvelopeV1RoundTripAndCanonicalValidation(t *testing.T) {
 		{name: "oversized payload declaration", wire: func() []byte {
 			bad := append([]byte(nil), wire...)
 			payloadLengthOffset := 1 + 4 + len(sid) + 8
-			binary.BigEndian.PutUint32(bad[payloadLengthOffset:payloadLengthOffset+4], uint32(cvMaxNetworkPayloadBytesV1+1))
+			binary.BigEndian.PutUint32(bad[payloadLengthOffset:payloadLengthOffset+4], uint32(cvMaxNetworkPayloadBytes+1))
 			return bad
 		}(), sid: sid, epoch: epoch},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := cvDecodeNetworkEnvelopeV1(test.wire, test.sid, test.epoch); err == nil {
+			if _, err := cvDecodeNetworkEnvelope(test.wire, test.sid, test.epoch); err == nil {
 				t.Fatal("accepted non-canonical or mismatched CV network envelope")
 			}
 		})
@@ -149,7 +149,7 @@ func TestCVNetworkEnvelopeV1RoundTripAndCanonicalValidation(t *testing.T) {
 
 func TestCVSAPVSSRouterConsumesEachLocalInboxOnce(t *testing.T) {
 	transport := newCVRouterTestTransport([]int{2, 4, 6}, 8)
-	router, err := newCVSAPVSSRouterV1(
+	router, err := newCVSAPVSSRouter(
 		context.Background(), transport, "router-once", 3,
 		[]int{2, 4, 6}, []int{2, 6}, 4,
 	)
@@ -177,7 +177,7 @@ func TestCVSAPVSSRouterRoutesOnlyValidAllowedMessages(t *testing.T) {
 	const sid = "router-filter"
 	const epoch = 9
 	transport := newCVRouterTestTransport([]int{1, 2}, 16)
-	router, err := newCVSAPVSSRouterV1(
+	router, err := newCVSAPVSSRouter(
 		context.Background(), transport, sid, epoch,
 		[]int{1, 2}, []int{2}, 2,
 	)
@@ -190,15 +190,15 @@ func TestCVSAPVSSRouterRoutesOnlyValidAllowedMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	validEnvelope, err := cvEncodeNetworkEnvelopeV1(sid, epoch, []byte("accepted"))
+	validEnvelope, err := cvEncodeNetworkEnvelope(sid, epoch, []byte("accepted"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongSID, err := cvEncodeNetworkEnvelopeV1("other-session", epoch, []byte("wrong sid"))
+	wrongSID, err := cvEncodeNetworkEnvelope("other-session", epoch, []byte("wrong sid"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongEpoch, err := cvEncodeNetworkEnvelopeV1(sid, epoch+1, []byte("wrong epoch"))
+	wrongEpoch, err := cvEncodeNetworkEnvelope(sid, epoch+1, []byte("wrong epoch"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,17 +206,17 @@ func TestCVSAPVSSRouterRoutesOnlyValidAllowedMessages(t *testing.T) {
 	malformed[0]++
 
 	transport.inject(2, Message{From: 1, To: 2, Tag: "NOT_CV", Body: validEnvelope})
-	transport.inject(2, Message{From: 99, To: 2, Tag: cvTagComponentInitV1, Body: validEnvelope})
-	transport.inject(2, Message{From: 1, To: 1, Tag: cvTagComponentInitV1, Body: validEnvelope})
-	transport.inject(2, Message{From: 1, To: 99, Tag: cvTagComponentInitV1, Body: validEnvelope})
-	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInitV1, Body: wrongSID})
-	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInitV1, Body: wrongEpoch})
-	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInitV1, Body: malformed})
-	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentLeafV1, Body: validEnvelope})
+	transport.inject(2, Message{From: 99, To: 2, Tag: cvTagComponentInit, Body: validEnvelope})
+	transport.inject(2, Message{From: 1, To: 1, Tag: cvTagComponentInit, Body: validEnvelope})
+	transport.inject(2, Message{From: 1, To: 99, Tag: cvTagComponentInit, Body: validEnvelope})
+	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInit, Body: wrongSID})
+	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInit, Body: wrongEpoch})
+	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInit, Body: malformed})
+	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentLeaf, Body: validEnvelope})
 
 	select {
 	case got := <-out:
-		if got.From != 1 || got.To != 2 || got.Tag != cvTagComponentLeafV1 || !bytes.Equal(got.Body, []byte("accepted")) {
+		if got.From != 1 || got.To != 2 || got.Tag != cvTagComponentLeaf || !bytes.Equal(got.Body, []byte("accepted")) {
 			t.Fatalf("unexpected routed message: %+v", got)
 		}
 	case <-time.After(time.Second):
@@ -229,11 +229,11 @@ func TestCVSAPVSSRouterRoutesOnlyValidAllowedMessages(t *testing.T) {
 	}
 }
 
-func TestCVSAPVSSRouterSeparatesOldDealerAndNewReceiverTagsV1(t *testing.T) {
+func TestCVSAPVSSRouterSeparatesOldDealerAndNewReceiverTags(t *testing.T) {
 	const sid = "router-apvss-actors"
 	const epoch = 4
 	transport := newCVRouterTestTransport([]int{1, 2, 10, 11}, 16)
-	router, err := newCVSAPVSSRouterWithReceiversV1(
+	router, err := newCVSAPVSSRouterWithReceivers(
 		context.Background(), transport, sid, epoch,
 		[]int{1, 2}, []int{10, 11}, []int{1, 10}, 8,
 	)
@@ -243,21 +243,21 @@ func TestCVSAPVSSRouterSeparatesOldDealerAndNewReceiverTagsV1(t *testing.T) {
 	defer router.Close()
 	oldInbox, _ := router.Receive(1)
 	newInbox, _ := router.Receive(10)
-	envelope, err := cvEncodeNetworkEnvelopeV1(sid, epoch, []byte("actor payload"))
+	envelope, err := cvEncodeNetworkEnvelope(sid, epoch, []byte("actor payload"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport.inject(10, Message{From: 1, To: 10, Tag: apvssTagLaneOfferV1, Body: envelope})
-	transport.inject(1, Message{From: 10, To: 1, Tag: apvssTagLaneACKV1, Body: envelope})
-	transport.inject(10, Message{From: 11, To: 10, Tag: apvssTagLaneOfferV1, Body: envelope})
-	transport.inject(1, Message{From: 2, To: 1, Tag: apvssTagLaneACKV1, Body: envelope})
-	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagComponentInitV1, Body: envelope})
+	transport.inject(10, Message{From: 1, To: 10, Tag: apvssTagLaneOffer, Body: envelope})
+	transport.inject(1, Message{From: 10, To: 1, Tag: apvssTagLaneACK, Body: envelope})
+	transport.inject(10, Message{From: 11, To: 10, Tag: apvssTagLaneOffer, Body: envelope})
+	transport.inject(1, Message{From: 2, To: 1, Tag: apvssTagLaneACK, Body: envelope})
+	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagComponentInit, Body: envelope})
 
 	for name, inbox := range map[string]<-chan Message{"old": oldInbox, "new": newInbox} {
 		select {
 		case msg := <-inbox:
-			if (name == "old" && msg.Tag != apvssTagLaneACKV1) ||
-				(name == "new" && msg.Tag != apvssTagLaneOfferV1) {
+			if (name == "old" && msg.Tag != apvssTagLaneACK) ||
+				(name == "new" && msg.Tag != apvssTagLaneOffer) {
 				t.Fatalf("unexpected %s actor message: %+v", name, msg)
 			}
 		case <-time.After(time.Second):
@@ -276,7 +276,7 @@ func TestCVSAPVSSRouterSeparatesOldDealerAndNewReceiverTagsV1(t *testing.T) {
 func TestCVSAPVSSRouterHasBoundedQueueAndStopsWithoutClosingTransport(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	transport := newCVRouterTestTransport([]int{5}, 4)
-	router, err := newCVSAPVSSRouterV1(ctx, transport, "router-close", 1, []int{5}, []int{5}, 1)
+	router, err := newCVSAPVSSRouter(ctx, transport, "router-close", 1, []int{5}, []int{5}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,17 +314,17 @@ func TestCVSAPVSSRouterHasBoundedQueueAndStopsWithoutClosingTransport(t *testing
 func TestCVSAPVSSRouterQueueOverflowIsFatal(t *testing.T) {
 	const sid = "router-overflow"
 	transport := newCVRouterTestTransport([]int{1, 2}, 4)
-	router, err := newCVSAPVSSRouterV1(context.Background(), transport, sid, 2, []int{1, 2}, []int{2}, 1)
+	router, err := newCVSAPVSSRouter(context.Background(), transport, sid, 2, []int{1, 2}, []int{2}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer router.Close()
-	wire, err := cvEncodeNetworkEnvelopeV1(sid, 2, []byte("valid"))
+	wire, err := cvEncodeNetworkEnvelope(sid, 2, []byte("valid"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInitV1, Body: wire})
-	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentAckV1, Body: wire})
+	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentInit, Body: wire})
+	transport.inject(2, Message{From: 1, To: 2, Tag: cvTagComponentAck, Body: wire})
 
 	select {
 	case err, ok := <-router.Errors():
@@ -338,7 +338,7 @@ func TestCVSAPVSSRouterQueueOverflowIsFatal(t *testing.T) {
 
 func TestCVSAPVSSRouterClosedInboxIsFatal(t *testing.T) {
 	transport := newCVRouterTestTransport([]int{7}, 1)
-	router, err := newCVSAPVSSRouterV1(context.Background(), transport, "router-reader", 2, []int{7}, []int{7}, 1)
+	router, err := newCVSAPVSSRouter(context.Background(), transport, "router-reader", 2, []int{7}, []int{7}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

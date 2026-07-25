@@ -9,37 +9,37 @@ import (
 	"strings"
 )
 
-type cvComponentLeafStoreV1 struct {
+type cvComponentLeafStore struct {
 	root string
 }
 
-type cvFreshShardStoreV1 struct {
+type cvFreshShardStore struct {
 	root string
 }
 
-func newCVComponentLeafStoreV1(root string) (*cvComponentLeafStoreV1, error) {
+func newCVComponentLeafStore(root string) (*cvComponentLeafStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("empty CV-sAPVSS component store root")
 	}
-	store := &cvComponentLeafStoreV1{root: filepath.Join(root, "component-leaves")}
-	if err := cvEnsurePrivateStoreDirV1(store.root); err != nil {
+	store := &cvComponentLeafStore{root: filepath.Join(root, "component-leaves")}
+	if err := cvEnsurePrivateStoreDir(store.root); err != nil {
 		return nil, err
 	}
 	return store, nil
 }
 
-func newCVFreshShardStoreV1(root string) (*cvFreshShardStoreV1, error) {
+func newCVFreshShardStore(root string) (*cvFreshShardStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("empty CV-sAPVSS fresh-shard store root")
 	}
-	store := &cvFreshShardStoreV1{root: filepath.Join(root, "fresh-shards")}
-	if err := cvEnsurePrivateStoreDirV1(store.root); err != nil {
+	store := &cvFreshShardStore{root: filepath.Join(root, "fresh-shards")}
+	if err := cvEnsurePrivateStoreDir(store.root); err != nil {
 		return nil, err
 	}
 	return store, nil
 }
 
-func (s *cvComponentLeafStoreV1) Put(
+func (s *cvComponentLeafStore) Put(
 	sid string,
 	epoch, dealer, holder int,
 	leafDigest, leaf []byte,
@@ -48,10 +48,10 @@ func (s *cvComponentLeafStoreV1) Put(
 	if err != nil {
 		return err
 	}
-	return cvPutImmutableFileV1(path, leaf)
+	return cvPutImmutableFile(path, leaf)
 }
 
-func (s *cvComponentLeafStoreV1) Read(
+func (s *cvComponentLeafStore) Read(
 	sid string,
 	epoch, dealer, holder int,
 	leafDigest []byte,
@@ -60,10 +60,10 @@ func (s *cvComponentLeafStoreV1) Read(
 	if err != nil {
 		return nil, err
 	}
-	return cvReadImmutableFileV1(path)
+	return cvReadImmutableFile(path)
 }
 
-func (s *cvComponentLeafStoreV1) path(
+func (s *cvComponentLeafStore) path(
 	sid string,
 	epoch, dealer, holder int,
 	leafDigest []byte,
@@ -71,7 +71,7 @@ func (s *cvComponentLeafStoreV1) path(
 	if s == nil || dealer < 0 {
 		return "", fmt.Errorf("invalid CV-sAPVSS component store key")
 	}
-	sidComponent, digest, err := cvStoreKeyPartsV1(sid, epoch, holder, leafDigest)
+	sidComponent, digest, err := cvStoreKeyParts(sid, epoch, holder, leafDigest)
 	if err != nil {
 		return "", err
 	}
@@ -84,7 +84,7 @@ func (s *cvComponentLeafStoreV1) path(
 	), nil
 }
 
-func (s *cvFreshShardStoreV1) Put(
+func (s *cvFreshShardStore) Put(
 	sid string,
 	epoch int,
 	headerDigest []byte,
@@ -95,10 +95,10 @@ func (s *cvFreshShardStoreV1) Put(
 	if err != nil {
 		return err
 	}
-	return cvPutImmutableFileV1(path, shard)
+	return cvPutImmutableFile(path, shard)
 }
 
-func (s *cvFreshShardStoreV1) Read(
+func (s *cvFreshShardStore) Read(
 	sid string,
 	epoch int,
 	headerDigest []byte,
@@ -108,10 +108,10 @@ func (s *cvFreshShardStoreV1) Read(
 	if err != nil {
 		return nil, err
 	}
-	return cvReadImmutableFileV1(path)
+	return cvReadImmutableFile(path)
 }
 
-func (s *cvFreshShardStoreV1) path(
+func (s *cvFreshShardStore) path(
 	sid string,
 	epoch int,
 	headerDigest []byte,
@@ -120,7 +120,7 @@ func (s *cvFreshShardStoreV1) path(
 	if s == nil {
 		return "", fmt.Errorf("invalid CV-sAPVSS fresh-shard store")
 	}
-	sidComponent, digest, err := cvStoreKeyPartsV1(sid, epoch, holder, headerDigest)
+	sidComponent, digest, err := cvStoreKeyParts(sid, epoch, holder, headerDigest)
 	if err != nil {
 		return "", err
 	}
@@ -133,7 +133,7 @@ func (s *cvFreshShardStoreV1) path(
 	), nil
 }
 
-func cvStoreKeyPartsV1(sid string, epoch, holder int, digest []byte) (string, string, error) {
+func cvStoreKeyParts(sid string, epoch, holder int, digest []byte) (string, string, error) {
 	if strings.TrimSpace(sid) == "" || epoch < 0 || holder < 0 || len(digest) != 32 {
 		return "", "", fmt.Errorf("invalid CV-sAPVSS store key")
 	}
@@ -145,11 +145,11 @@ func cvStoreKeyPartsV1(sid string, epoch, holder int, digest []byte) (string, st
 	if len(base) > 64 {
 		base = base[:64]
 	}
-	sidDigest := hashBytes([]byte("ARL-CV-sAPVSS-v1/store-sid"), []byte(sid))
+	sidDigest := hashBytes([]byte("ARL-CV-sAPVSS/store-sid"), []byte(sid))
 	return base + "-" + hex.EncodeToString(sidDigest), hex.EncodeToString(digest), nil
 }
 
-func cvEnsurePrivateStoreDirV1(path string) error {
+func cvEnsurePrivateStoreDir(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("create private CV-sAPVSS store directory: %w", err)
 	}
@@ -166,16 +166,16 @@ func cvEnsurePrivateStoreDirV1(path string) error {
 	return nil
 }
 
-func cvPutImmutableFileV1(path string, data []byte) error {
+func cvPutImmutableFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if err := cvEnsurePrivateStoreDirV1(dir); err != nil {
+	if err := cvEnsurePrivateStoreDir(dir); err != nil {
 		return err
 	}
-	if existing, err := cvReadImmutableFileV1(path); err == nil {
+	if existing, err := cvReadImmutableFile(path); err == nil {
 		if !bytes.Equal(existing, data) {
 			return fmt.Errorf("CV-sAPVSS immutable store key already contains different bytes")
 		}
-		return cvSyncStoreDirV1(dir)
+		return cvSyncStoreDir(dir)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -205,7 +205,7 @@ func cvPutImmutableFileV1(path string, data []byte) error {
 		if !os.IsExist(err) {
 			return err
 		}
-		existing, readErr := cvReadImmutableFileV1(path)
+		existing, readErr := cvReadImmutableFile(path)
 		if readErr != nil {
 			return readErr
 		}
@@ -213,10 +213,10 @@ func cvPutImmutableFileV1(path string, data []byte) error {
 			return fmt.Errorf("CV-sAPVSS immutable store key already contains different bytes")
 		}
 	}
-	return cvSyncStoreDirV1(dir)
+	return cvSyncStoreDir(dir)
 }
 
-func cvReadImmutableFileV1(path string) ([]byte, error) {
+func cvReadImmutableFile(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -231,7 +231,7 @@ func cvReadImmutableFileV1(path string) ([]byte, error) {
 	return raw, nil
 }
 
-func cvSyncStoreDirV1(path string) error {
+func cvSyncStoreDir(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {
 		return err

@@ -96,7 +96,7 @@ func ensureRuntime(cfg *Config) error {
 		if strings.TrimSpace(cfg.CVPublicKeyDir) == "" || strings.TrimSpace(cfg.CVLocalSecretDir) == "" {
 			return fmt.Errorf("CV old-lock runtime requires both public and local secret key directories")
 		}
-		material, err := cvLoadOldLockKeyMaterialV1(
+		material, err := cvLoadOldLockKeyMaterial(
 			cfg.CVPublicKeyDir, cfg.CVLocalSecretDir, cfg.SID,
 			oldOrder, lockThreshold, localOldNodes(*cfg),
 		)
@@ -446,7 +446,7 @@ func newTBLSThresholdSigner(members []int, threshold int, stream cipher.Stream) 
 	}, nil
 }
 
-func newTBLSThresholdSignerFromMaterial(material *cvOldLockKeyMaterialV1) (*tblsThresholdSigner, error) {
+func newTBLSThresholdSignerFromMaterial(material *cvOldLockKeyMaterial) (*tblsThresholdSigner, error) {
 	if material == nil || material.threshold <= 0 || material.threshold > len(material.members) ||
 		len(material.publicShares) != len(material.members) || len(material.localShares) == 0 {
 		return nil, fmt.Errorf("invalid CV old-lock signer material")
@@ -463,11 +463,11 @@ func newTBLSThresholdSignerFromMaterial(material *cvOldLockKeyMaterialV1) (*tbls
 		t: material.threshold, n: len(material.members), pubKey: material.groupPublic,
 		pubKeyShares: append([]bls12381.G2Affine(nil), material.publicShares...), shares: shares,
 		memberOrder: append([]int(nil), material.members...), memberIndex: memberIndex,
-		signingMembers: nodeSet(materialMemberIDsV1(material.localShares)),
+		signingMembers: nodeSet(materialMemberIDs(material.localShares)),
 	}, nil
 }
 
-func materialMemberIDsV1(shares map[int]fr.Element) []int {
+func materialMemberIDs(shares map[int]fr.Element) []int {
 	ids := make([]int, 0, len(shares))
 	for id := range shares {
 		ids = append(ids, id)

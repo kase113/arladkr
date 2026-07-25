@@ -20,16 +20,16 @@ func TestCVLeafCodecRoundTripAndRejectsTrailingBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("codec-leaf-session"),
 		epoch:              23,
 		sharingDegree:      0,
 		profile:            profile,
 		receiverPublicKeys: []bls12381.G1Affine{receiverKey},
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1GrothProofProfile,
+		proofProfile:       cvLeafGrothProofProfile,
 	}
-	leaf, err := cvReferenceDealV1(
+	leaf, err := cvReferenceDeal(
 		context,
 		41,
 		[]fr.Element{cvTestScalar(5)},
@@ -40,48 +40,48 @@ func TestCVLeafCodecRoundTripAndRejectsTrailingBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := cvLeafV1CanonicalBytes(leaf)
+	wire, err := cvLeafCanonicalBytes(leaf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proofWire, err := cvLeafProofV1CanonicalBytes(leaf.proof)
+	proofWire, err := cvLeafProofCanonicalBytes(leaf.proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proofSize, err := cvLeafProofWireSizeV1(&context)
+	proofSize, err := cvLeafProofWireSize(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(proofWire) != proofSize {
-		t.Fatalf("LeafV1 proof wire size = %d, want %d", len(proofWire), proofSize)
+		t.Fatalf("Leaf proof wire size = %d, want %d", len(proofWire), proofSize)
 	}
-	leafSize, err := cvLeafWireSizeV1(&context)
+	leafSize, err := cvLeafWireSize(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(wire) != leafSize {
-		t.Fatalf("LeafV1 wire size = %d, want %d", len(wire), leafSize)
+		t.Fatalf("Leaf wire size = %d, want %d", len(wire), leafSize)
 	}
 
-	decoded, err := cvDecodeLeafV1(wire, &context)
+	decoded, err := cvDecodeLeaf(wire, &context)
 	if err != nil {
 		t.Fatalf("decode canonical leaf: %v", err)
 	}
-	decodedWire, err := cvLeafV1CanonicalBytes(decoded)
+	decodedWire, err := cvLeafCanonicalBytes(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(decodedWire, wire) || !bytes.Equal(decoded.digest, leaf.digest) {
-		t.Fatal("decoded LeafV1 did not preserve its canonical wire or digest")
+		t.Fatal("decoded Leaf did not preserve its canonical wire or digest")
 	}
 
 	trailing := append(append([]byte(nil), wire...), 0)
-	if _, err := cvDecodeLeafV1(trailing, &context); err == nil {
-		t.Fatal("accepted trailing LeafV1 bytes")
+	if _, err := cvDecodeLeaf(trailing, &context); err == nil {
+		t.Fatal("accepted trailing Leaf bytes")
 	}
 
-	if _, err := cvDecodeLeafProofV1(proofWire, &context); err != nil {
-		t.Fatalf("decode canonical LeafV1 proof: %v", err)
+	if _, err := cvDecodeLeafProof(proofWire, &context); err != nil {
+		t.Fatalf("decode canonical Leaf proof: %v", err)
 	}
 	firstVectorCountOffset := 6*bls12381.SizeOfG1AffineCompressed + 4*fr.Bytes
 	for _, test := range []struct {
@@ -94,30 +94,30 @@ func TestCVLeafCodecRoundTripAndRejectsTrailingBytes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			bad := append([]byte(nil), proofWire...)
 			binary.BigEndian.PutUint32(bad[firstVectorCountOffset:firstVectorCountOffset+4], test.count)
-			if _, err := cvDecodeLeafProofV1(bad, &context); err == nil {
-				t.Fatalf("accepted LeafV1 proof with vector count %d", test.count)
+			if _, err := cvDecodeLeafProof(bad, &context); err == nil {
+				t.Fatalf("accepted Leaf proof with vector count %d", test.count)
 			}
 		})
 	}
 	t.Run("proof trailing bytes", func(t *testing.T) {
 		bad := append(append([]byte(nil), proofWire...), 0)
-		if _, err := cvDecodeLeafProofV1(bad, &context); err == nil {
-			t.Fatal("accepted trailing LeafV1 proof bytes")
+		if _, err := cvDecodeLeafProof(bad, &context); err == nil {
+			t.Fatal("accepted trailing Leaf proof bytes")
 		}
 	})
 	t.Run("noncanonical scalar", func(t *testing.T) {
 		bad := append([]byte(nil), proofWire...)
 		firstScalarOffset := 6 * bls12381.SizeOfG1AffineCompressed
 		copy(bad[firstScalarOffset:firstScalarOffset+fr.Bytes], fr.Modulus().FillBytes(make([]byte, fr.Bytes)))
-		if _, err := cvDecodeLeafProofV1(bad, &context); err == nil {
-			t.Fatal("accepted noncanonical LeafV1 proof scalar")
+		if _, err := cvDecodeLeafProof(bad, &context); err == nil {
+			t.Fatal("accepted noncanonical Leaf proof scalar")
 		}
 	})
 	t.Run("noncanonical point", func(t *testing.T) {
 		bad := append([]byte(nil), proofWire...)
 		bad[0] &^= 0x80
-		if _, err := cvDecodeLeafProofV1(bad, &context); err == nil {
-			t.Fatal("accepted noncanonical LeafV1 proof point")
+		if _, err := cvDecodeLeafProof(bad, &context); err == nil {
+			t.Fatal("accepted noncanonical Leaf proof point")
 		}
 	})
 }
@@ -132,23 +132,23 @@ func TestCVLeafCodecSizesAllowLargeValidContext(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte("codec-large-leaf-session"),
 		epoch:              24,
 		sharingDegree:      85,
 		profile:            cvChunkProfile{chunkBits: 8, maxComponents: 86},
 		receiverPublicKeys: keys,
 		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafV1GrothProofProfile,
+		proofProfile:       cvLeafGrothProofProfile,
 	}
-	if err := cvValidateLeafContextV1(&context); err != nil {
+	if err := cvValidateLeafContext(&context); err != nil {
 		t.Fatalf("large context is not valid: %v", err)
 	}
-	proofSize, err := cvLeafProofWireSizeV1(&context)
+	proofSize, err := cvLeafProofWireSize(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leafSize, err := cvLeafWireSizeV1(&context)
+	leafSize, err := cvLeafWireSize(&context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,43 +164,43 @@ func TestCVLeafCodecSizesAllowLargeValidContext(t *testing.T) {
 
 func TestCVLeafCodecRoundTripWithMultipleReceiversAndDegree(t *testing.T) {
 	context, _, leaves := cvM2Fixture(t)
-	wire, err := cvLeafV1CanonicalBytes(leaves[0])
+	wire, err := cvLeafCanonicalBytes(leaves[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := cvDecodeLeafV1(wire, &context)
+	decoded, err := cvDecodeLeaf(wire, &context)
 	if err != nil {
-		t.Fatalf("decode multi-receiver degree-%d LeafV1: %v", context.sharingDegree, err)
+		t.Fatalf("decode multi-receiver degree-%d Leaf: %v", context.sharingDegree, err)
 	}
-	decodedWire, err := cvLeafV1CanonicalBytes(decoded)
+	decodedWire, err := cvLeafCanonicalBytes(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(decodedWire, wire) {
-		t.Fatal("multi-receiver LeafV1 roundtrip changed canonical wire")
+		t.Fatal("multi-receiver Leaf roundtrip changed canonical wire")
 	}
 }
 
 func TestCVReceiptCodecRoundTripAndRejectsTampering(t *testing.T) {
 	context, secrets, leaves := cvM2Fixture(t)
-	agg, err := cvAggV1(&context, leaves)
+	agg, err := cvAgg(&context, leaves)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, receipt, err := cvDecShareV1(agg, secrets[0], 1)
+	_, receipt, err := cvDecShare(agg, secrets[0], 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := cvReceiptV1CanonicalBytes(receipt)
+	wire, err := cvReceiptCanonicalBytes(receipt)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	decoded, err := cvDecodeReceiptV1(wire, &context, agg, 1)
+	decoded, err := cvDecodeReceipt(wire, &context, agg, 1)
 	if err != nil {
 		t.Fatalf("decode canonical receipt: %v", err)
 	}
-	decodedWire, err := cvReceiptV1CanonicalBytes(decoded)
+	decodedWire, err := cvReceiptCanonicalBytes(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,27 +210,27 @@ func TestCVReceiptCodecRoundTripAndRejectsTampering(t *testing.T) {
 
 	t.Run("aggregate binding", func(t *testing.T) {
 		bad := append([]byte(nil), wire...)
-		aggregateOffset := 4 + len(cvReceiptV1Domain) + 4
+		aggregateOffset := 4 + len(cvReceiptDomain) + 4
 		bad[aggregateOffset] ^= 1
-		if _, err := cvDecodeReceiptV1(bad, &context, agg, 1); err == nil {
+		if _, err := cvDecodeReceipt(bad, &context, agg, 1); err == nil {
 			t.Fatal("accepted receipt bound to another aggregate")
 		}
 	})
 	t.Run("receiver binding", func(t *testing.T) {
-		if _, err := cvDecodeReceiptV1(wire, &context, agg, 2); err == nil {
+		if _, err := cvDecodeReceipt(wire, &context, agg, 2); err == nil {
 			t.Fatal("accepted receipt under another receiver index")
 		}
 	})
 	t.Run("proof mutation", func(t *testing.T) {
 		bad := append([]byte(nil), wire...)
 		bad[len(bad)-1] ^= 1
-		if _, err := cvDecodeReceiptV1(bad, &context, agg, 1); err == nil {
+		if _, err := cvDecodeReceipt(bad, &context, agg, 1); err == nil {
 			t.Fatal("accepted receipt with a mutated DLEQ response")
 		}
 	})
 	t.Run("trailing bytes", func(t *testing.T) {
 		bad := append(append([]byte(nil), wire...), 0)
-		if _, err := cvDecodeReceiptV1(bad, &context, agg, 1); err == nil {
+		if _, err := cvDecodeReceipt(bad, &context, agg, 1); err == nil {
 			t.Fatal("accepted trailing receipt bytes")
 		}
 	})

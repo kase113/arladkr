@@ -9,7 +9,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-func cvBenchmarkFixture(b *testing.B, receivers, f, k int) (cvLeafContextV1, []*cvLeafV1) {
+func cvBenchmarkFixture(b *testing.B, receivers, f, k int) (cvLeafContext, []*cvLeaf) {
 	b.Helper()
 	if receivers <= 0 || f < 0 || f >= receivers || k != f+1 {
 		b.Fatal("invalid CV benchmark topology")
@@ -26,16 +26,16 @@ func cvBenchmarkFixture(b *testing.B, receivers, f, k int) (cvLeafContextV1, []*
 			b.Fatal(err)
 		}
 	}
-	context := cvLeafContextV1{
+	context := cvLeafContext{
 		sessionID:          []byte(fmt.Sprintf("cv-benchmark-n%d-f%d", receivers, f)),
 		epoch:              1,
 		sharingDegree:      f,
 		profile:            profile,
 		receiverPublicKeys: receiverKeys,
 		dealerSetPolicy:    []byte("first-f-plus-one"),
-		proofProfile:       cvLeafV1GrothProofProfile,
+		proofProfile:       cvLeafGrothProofProfile,
 	}
-	leaves := make([]*cvLeafV1, k)
+	leaves := make([]*cvLeaf, k)
 	for dealer := 0; dealer < k; dealer++ {
 		scalars := make([]fr.Element, f+1)
 		blindings := make([]fr.Element, f+1)
@@ -50,7 +50,7 @@ func cvBenchmarkFixture(b *testing.B, receivers, f, k int) (cvLeafContextV1, []*
 			scalarCoins[receiver] = append([]fr.Element(nil), commonCoins...)
 			blindingCoins[receiver] = cvTestScalar(uint64(3000 + dealer))
 		}
-		leaves[dealer], err = cvReferenceDealV1(
+		leaves[dealer], err = cvReferenceDeal(
 			context, uint64(dealer), scalars, blindings, scalarCoins, blindingCoins,
 		)
 		if err != nil {
@@ -60,7 +60,7 @@ func cvBenchmarkFixture(b *testing.B, receivers, f, k int) (cvLeafContextV1, []*
 	return context, leaves
 }
 
-func benchmarkCVTopologies(b *testing.B, run func(*testing.B, *cvLeafContextV1, []*cvLeafV1)) {
+func benchmarkCVTopologies(b *testing.B, run func(*testing.B, *cvLeafContext, []*cvLeaf)) {
 	b.Helper()
 	for _, topology := range []struct {
 		name       string
@@ -115,18 +115,18 @@ func BenchmarkCVSAPVSSM4Materialize(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := cvMaterializeAndLockAggregateV1(cfg, &leafContext, leaves); err != nil {
+		if _, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkCVVerifyLeafV1(b *testing.B) {
-	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContextV1, leaves []*cvLeafV1) {
+func BenchmarkCVVerifyLeaf(b *testing.B) {
+	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContext, leaves []*cvLeaf) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := cvVerifyLeafV1(context, leaves[0]); err != nil {
+			if err := cvVerifyLeaf(context, leaves[0]); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -134,12 +134,12 @@ func BenchmarkCVVerifyLeafV1(b *testing.B) {
 }
 
 func BenchmarkCVLeafProofParts(b *testing.B) {
-	benchmarkCVTopologies(b, func(b *testing.B, _ *cvLeafContextV1, leaves []*cvLeafV1) {
+	benchmarkCVTopologies(b, func(b *testing.B, _ *cvLeafContext, leaves []*cvLeaf) {
 		leaf := leaves[0]
 		b.Run("Sharing", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				if err := cvVerifySharingV1(leaf, &leaf.proof.sharing); err != nil {
+				if err := cvVerifySharing(leaf, &leaf.proof.sharing); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -147,7 +147,7 @@ func BenchmarkCVLeafProofParts(b *testing.B) {
 		b.Run("Chunking", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				if err := cvVerifyChunkingV1(leaf, &leaf.proof.chunking); err != nil {
+				if err := cvVerifyChunking(leaf, &leaf.proof.chunking); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -155,7 +155,7 @@ func BenchmarkCVLeafProofParts(b *testing.B) {
 		b.Run("ExactRange", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				if err := cvVerifyExactRangeV1(leaf, &leaf.proof.chunking.exactRange); err != nil {
+				if err := cvVerifyExactRange(leaf, &leaf.proof.chunking.exactRange); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -163,40 +163,40 @@ func BenchmarkCVLeafProofParts(b *testing.B) {
 	})
 }
 
-func BenchmarkCVAggV1Current(b *testing.B) {
-	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContextV1, leaves []*cvLeafV1) {
+func BenchmarkCVAggCurrent(b *testing.B) {
+	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContext, leaves []*cvLeaf) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := cvAggV1(context, leaves); err != nil {
+			if _, err := cvAgg(context, leaves); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 }
 
-func BenchmarkCVAVerV1Current(b *testing.B) {
-	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContextV1, leaves []*cvLeafV1) {
-		agg, err := cvAggV1(context, leaves)
+func BenchmarkCVAVerCurrent(b *testing.B) {
+	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContext, leaves []*cvLeaf) {
+		agg, err := cvAgg(context, leaves)
 		if err != nil {
 			b.Fatal(err)
 		}
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := cvAVerV1(context, agg, leaves); err != nil {
+			if err := cvAVer(context, agg, leaves); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 }
 
-func cvBenchmarkAcceptedLeaves(b *testing.B, context *cvLeafContextV1, leaves []*cvLeafV1) []*cvVerifiedLeafV1 {
+func cvBenchmarkAcceptedLeaves(b *testing.B, context *cvLeafContext, leaves []*cvLeaf) []*cvVerifiedLeaf {
 	b.Helper()
-	accepted := make([]*cvVerifiedLeafV1, len(leaves))
+	accepted := make([]*cvVerifiedLeaf, len(leaves))
 	for i := range leaves {
 		var err error
-		accepted[i], err = cvAcceptedLeafV1(context, leaves[i], nil)
+		accepted[i], err = cvAcceptedLeaf(context, leaves[i], nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -204,22 +204,22 @@ func cvBenchmarkAcceptedLeaves(b *testing.B, context *cvLeafContextV1, leaves []
 	return accepted
 }
 
-func BenchmarkCVAggV1Verified(b *testing.B) {
-	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContextV1, leaves []*cvLeafV1) {
+func BenchmarkCVAggVerified(b *testing.B) {
+	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContext, leaves []*cvLeaf) {
 		accepted := cvBenchmarkAcceptedLeaves(b, context, leaves)
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := cvAggVerifiedV1(context, accepted); err != nil {
+			if _, err := cvAggVerified(context, accepted); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 }
 
-func BenchmarkCVAVerV1Verified(b *testing.B) {
-	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContextV1, leaves []*cvLeafV1) {
-		agg, err := cvAggV1(context, leaves)
+func BenchmarkCVAVerVerified(b *testing.B) {
+	benchmarkCVTopologies(b, func(b *testing.B, context *cvLeafContext, leaves []*cvLeaf) {
+		agg, err := cvAgg(context, leaves)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -227,7 +227,7 @@ func BenchmarkCVAVerV1Verified(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := cvAVerVerifiedV1(context, agg, accepted); err != nil {
+			if err := cvAVerVerified(context, agg, accepted); err != nil {
 				b.Fatal(err)
 			}
 		}
