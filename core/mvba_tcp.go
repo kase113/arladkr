@@ -707,7 +707,7 @@ func runArladkrMVBATCPInstance(
 ) ([][]byte, time.Duration, error) {
 	var peerWaitLatency time.Duration
 	n := len(cfg.OldCommittee)
-	f := cfg.F
+	f := cfg.FOld
 	kernel := strings.ToLower(strings.TrimSpace(cfg.AgreementKernel))
 	if predicate != nil && kernel == "dumbomvba-direct" {
 		return nil, 0, fmt.Errorf("external predicate requires the common-subset MVBA kernel")

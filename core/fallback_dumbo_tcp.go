@@ -66,7 +66,7 @@ func runDumboTCPFallback(
 		privKM[i] = sk
 	}
 
-	maxR := cfg.F + 4
+	maxR := cfg.FOld + 4
 	if maxR < 4 {
 		maxR = 4
 	}
@@ -94,7 +94,7 @@ func runDumboTCPFallback(
 					SID:                cfg.SID + "-mvba",
 					ID:                 i,
 					N:                  n,
-					F:                  cfg.F,
+					F:                  cfg.FOld,
 					MaxRounds:          maxR,
 					WaitSPBCTimeout:    8 * time.Second,
 					RouteSendTimeout:   100 * time.Millisecond,

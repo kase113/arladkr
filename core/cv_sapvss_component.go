@@ -278,7 +278,7 @@ func cvValidateComponentDescriptorV1(cfg Config, descriptor *cvComponentDescript
 	if c.runtime == nil || c.runtime.lockSigner == nil {
 		return fmt.Errorf("CV-sAPVSS component lock signer is unavailable")
 	}
-	threshold := len(c.OldCommittee) - c.F
+	threshold := len(c.OldCommittee) - c.FOld
 	wire, err := cvComponentDescriptorV1CanonicalBytes(descriptor)
 	if err != nil {
 		return err

@@ -16,10 +16,26 @@ func TestAdmitAggPassRatio(t *testing.T) {
 }
 
 func TestFormatBenchResultIncludesEffectiveKappa(t *testing.T) {
-	effective := core.NormalizeConfig(core.Config{F: 1, Kappa: 0}).Kappa
+	effective := core.NormalizeConfig(core.Config{FOld: 1, FNew: 1, Kappa: 0}).Kappa
 	line := formatBenchResult(benchResultInput{kappa: effective, runs: 1})
 	if !strings.Contains(line, " kappa=2 ") {
 		t.Fatalf("benchmark output missing effective kappa: %s", line)
+	}
+}
+
+func TestFormatBenchResultReportsCommitteeFaultThresholds(t *testing.T) {
+	asymmetric := formatBenchResult(benchResultInput{fOld: 1, fNew: 2, runs: 1})
+	for _, token := range []string{" f_old=1 ", " f_new=2 "} {
+		if !strings.Contains(asymmetric, token) {
+			t.Fatalf("asymmetric benchmark output missing %q: %s", token, asymmetric)
+		}
+	}
+
+	balanced := formatBenchResult(benchResultInput{fOld: 1, fNew: 1, runs: 1})
+	for _, token := range []string{" f_old=1 ", " f_new=1 "} {
+		if !strings.Contains(balanced, token) {
+			t.Fatalf("balanced benchmark output missing %q: %s", token, balanced)
+		}
 	}
 }
 
@@ -54,7 +70,8 @@ func TestFormatBenchResultIncludesARLADKRMetrics(t *testing.T) {
 	}
 	line := formatBenchResult(benchResultInput{
 		n:               4,
-		f:               1,
+		fOld:            1,
+		fNew:            1,
 		kappa:           2,
 		runs:            2,
 		timeoutMs:       90000,
@@ -132,7 +149,8 @@ func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
 func TestFormatBenchResultIncludesScalarShamirSecurityMetadata(t *testing.T) {
 	line := formatBenchResult(benchResultInput{
 		n:               4,
-		f:               1,
+		fOld:            1,
+		fNew:            1,
 		kappa:           2,
 		runs:            1,
 		timeoutMs:       90000,

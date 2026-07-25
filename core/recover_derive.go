@@ -30,8 +30,8 @@ func RecoverAndDerive(
 	// ARL-ADKR: process ALL locked dealers, not a κ-sample.
 	// The AggRLO carries a header-only recoverability obligation via AggLock;
 	// Recover has already bound that obligation to a verified aggregate object.
-	// Safety then follows from the combinatorial fact that |S|=n-f contains
-	// f+1 honest dealers — no statistical sampling needed.
+	// Safety then follows from the combinatorial fact that |S|=n_o-f_o contains
+	// f_o+1 honest dealers; no statistical sampling is needed.
 	dealers := sortedLocked
 	sort.Ints(dealers)
 
@@ -43,7 +43,7 @@ func RecoverAndDerive(
 	aggCommit := suite.Point().Null()
 
 	recovered := make(map[int][]byte, len(dealers))
-	minOpeners := c.F + 1
+	minOpeners := dealerShareThreshold(c, len(c.runtime.receiverOrder))
 	if minOpeners <= 0 {
 		minOpeners = 1
 	}

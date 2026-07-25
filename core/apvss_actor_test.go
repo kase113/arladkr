@@ -18,8 +18,10 @@ func TestAPVSSReceiverActorsCollectACKsV1(t *testing.T) {
 	allNodes := sortedUnique(append(append([]int(nil), oldNodes...), receiverOrder...))
 	cfg := NormalizeConfig(Config{
 		SID: string(fixture.context.sessionID), Epoch: int(fixture.context.epoch),
-		OldCommittee: oldNodes, NewCommittee: receiverOrder, F: 1, Kappa: 2,
+		OldCommittee: oldNodes, NewCommittee: receiverOrder, FOld: 1, FNew: 1, Kappa: 2,
 		APVSSProvider: "cv-sapvss", ARCMode: "materialized",
+		APVSSFallbackProfile:   apvssFallbackCompactBatchProfileV1,
+		AllowExperimentalAPVSS: true, APVSSBenchmarkFallbackCount: 1,
 		LocalNodeIDs: oldNodes, ArtifactCacheDir: t.TempDir(),
 	})
 	if err := ensureRuntime(&cfg); err != nil {
@@ -57,9 +59,12 @@ func TestAPVSSReceiverActorsCollectACKsV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prototype.acks) < len(receiverOrder)-fixture.context.sharingDegree ||
-		len(prototype.fallbackProofs) > fixture.context.sharingDegree {
-		t.Fatalf("actor ACK/fallback counts = %d/%d", len(prototype.acks), len(prototype.fallbackProofs))
+	fallbackCount := apvssPrototypeFallbackCountV1(prototype)
+	if len(prototype.acks) != len(receiverOrder)-1 || fallbackCount != 1 {
+		t.Fatalf("actor ACK/fallback counts = %d/%d", len(prototype.acks), fallbackCount)
+	}
+	if prototype.fallbackProfile != apvssFallbackCompactBatchProfileV1 || prototype.compactFallback == nil {
+		t.Fatal("actor did not assemble the experimental compact fallback profile")
 	}
 	if err := apvssVerifyPrototypeV1(&fixture.context, prototype); err != nil {
 		t.Fatalf("actor-produced APVSS leaf rejected: %v", err)
@@ -79,7 +84,7 @@ func TestAPVSSReceiverActorsFeedAvailabilityAndVerifiedCacheV1(t *testing.T) {
 	allNodes := sortedUnique(append(append([]int(nil), oldNodes...), receiverOrder...))
 	cfg := NormalizeConfig(Config{
 		SID: string(fixture.context.sessionID), Epoch: int(fixture.context.epoch),
-		OldCommittee: oldNodes, NewCommittee: receiverOrder, F: 1, Kappa: 2,
+		OldCommittee: oldNodes, NewCommittee: receiverOrder, FOld: 1, FNew: 1, Kappa: 2,
 		APVSSProvider: "cv-sapvss", ARCMode: "materialized",
 		LocalNodeIDs: oldNodes, ArtifactCacheDir: t.TempDir(),
 	})

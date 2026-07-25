@@ -10,8 +10,8 @@ import (
 
 func TestSelectDealersForLockAggRequiresFastlaneReadyPool(t *testing.T) {
 	cfg := baseTestConfig()
-	if len(cfg.OldCommittee) != 4 || cfg.F != 1 || cfg.Kappa != 2 || cfg.FastlaneMin != 3 {
-		t.Fatalf("unexpected fixture: n=%d F=%d Kappa=%d FastlaneMin=%d", len(cfg.OldCommittee), cfg.F, cfg.Kappa, cfg.FastlaneMin)
+	if len(cfg.OldCommittee) != 4 || cfg.FOld != 1 || cfg.FNew != 1 || cfg.Kappa != 2 || cfg.FastlaneMin != 3 {
+		t.Fatalf("unexpected fixture: n=%d f_o=%d f_n=%d Kappa=%d FastlaneMin=%d", len(cfg.OldCommittee), cfg.FOld, cfg.FNew, cfg.Kappa, cfg.FastlaneMin)
 	}
 	if _, err := selectDealersForLockAgg(cfg, []readyCandidate{{dealer: 0}, {dealer: 1}}); err == nil {
 		t.Fatalf("selectDealersForLockAgg accepted fewer than FastlaneMin=%d candidates", cfg.FastlaneMin)

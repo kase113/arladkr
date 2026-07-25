@@ -181,7 +181,7 @@ func cvDecodeNetworkAggHeaderV1(wire []byte, cfg Config) (AggHeader, error) {
 		return AggHeader{}, fmt.Errorf("CV-sAPVSS aggregate header epoch mismatch")
 	}
 	dealerCount, err := r.uint32()
-	if err != nil || dealerCount != cfg.F+1 || dealerCount > len(cfg.OldCommittee) {
+	if err != nil || dealerCount != cfg.FOld+1 || dealerCount > len(cfg.OldCommittee) {
 		return AggHeader{}, fmt.Errorf("invalid CV-sAPVSS aggregate dealer count")
 	}
 	oldSet := nodeSet(cfg.OldCommittee)
@@ -301,7 +301,7 @@ func cvDecodeFreshShardArtifactV1(wire []byte, cfg Config, header AggHeader) (*c
 
 func cvVerifyFreshShardArtifactV1(cfg Config, header AggHeader, artifact *cvFreshShardArtifactV1) error {
 	n := len(sortedUnique(cfg.OldCommittee))
-	if artifact == nil || artifact.totalShards != n || artifact.dataShards != n-2*cfg.F ||
+	if artifact == nil || artifact.totalShards != n || artifact.dataShards != n-2*cfg.FOld ||
 		!bytes.Equal(artifact.headerDigest, digestAggHeaderForLock(header)) ||
 		!bytes.Equal(artifact.payloadDigest, header.PayloadDigest) ||
 		!bytes.Equal(artifact.root, header.FreshShardRoot) {
@@ -360,7 +360,7 @@ func cvDecodeAggregateOfferV1(wire []byte, cfg Config) (*cvAggregateOfferV1, err
 		return nil, err
 	}
 	count, err := r.uint32()
-	if err != nil || count != cfg.F+1 {
+	if err != nil || count != cfg.FOld+1 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate offer descriptor count")
 	}
 	descriptors := make([]*cvComponentDescriptorV1, count)
@@ -400,10 +400,10 @@ func cvDecodeAggregateOfferV1(wire []byte, cfg Config) (*cvAggregateOfferV1, err
 
 func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, descriptors []*cvComponentDescriptorV1) (*cvMaterializedAggregateV1, error) {
 	metrics := cvAggregateMaterializeMetricsV1{}
-	want := s.cfg.F + 1
-	ready := len(s.cfg.OldCommittee) - s.cfg.F
+	want := s.cfg.FOld + 1
+	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
 	if ctx == nil || len(descriptors) < want || len(descriptors) > ready {
-		return nil, fmt.Errorf("CV-sAPVSS network materializer requires K through n-f descriptors")
+		return nil, fmt.Errorf("CV-sAPVSS network materializer requires K through n_o-f_o descriptors")
 	}
 	phaseStart := time.Now()
 	s.aggregateBuildMu.Lock()
@@ -468,7 +468,7 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 	metrics.aggregate = time.Since(phaseStart)
 	n := len(s.cfg.OldCommittee)
 	phaseStart = time.Now()
-	dispersal, err := cvDisperseAggregateV1(agg, n, n-2*s.cfg.F)
+	dispersal, err := cvDisperseAggregateV1(agg, n, n-2*s.cfg.FOld)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +535,7 @@ func (s *cvComponentServiceV1) MaterializeAndCollectARC(ctx context.Context, des
 			sent++
 		}
 	}
-	threshold := n - s.cfg.F
+	threshold := n - s.cfg.FOld
 	if sent < threshold {
 		return nil, fmt.Errorf("CV-sAPVSS aggregate dispersal reached %d holders, need %d", sent, threshold)
 	}
@@ -683,7 +683,7 @@ func (s *cvComponentServiceV1) verifyAggregateOfferForARC(offer *cvAggregateOffe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.verifiedAggregateOffers) >= len(s.cfg.OldCommittee)-s.cfg.F {
+	if len(s.verifiedAggregateOffers) >= len(s.cfg.OldCommittee)-s.cfg.FOld {
 		return fmt.Errorf("verified CV-sAPVSS aggregate offer cache is full")
 	}
 	s.verifiedAggregateOffers[key] = token
@@ -783,7 +783,7 @@ func (s *cvComponentServiceV1) RecoverAggregate(ctx context.Context, rlo *AggRLO
 	for _, holder := range rlo.Lock.Holders {
 		_ = s.send(holder, cvTagRecoverGetV1, requestWire)
 	}
-	need := len(s.cfg.OldCommittee) - 2*s.cfg.F
+	need := len(s.cfg.OldCommittee) - 2*s.cfg.FOld
 	artifacts := make(map[int]cvFreshShardArtifactV1, need)
 	for len(artifacts) < need {
 		select {

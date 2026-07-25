@@ -9,7 +9,8 @@ func testBlsPVSSConfig(t *testing.T) Config {
 		Epoch:         1,
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11, 12, 13},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "bls-pvss",
 	})
 	if err := ensureRuntime(&cfg); err != nil {

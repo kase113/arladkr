@@ -96,7 +96,7 @@ func ValidateFallbackDescriptor(blob []byte, cfg Config, descriptors map[int]Des
 	}
 	sort.Slice(valid, func(i, j int) bool { return valid[i].Digest < valid[j].Digest })
 
-	required := cfg.F + 1
+	required := cfg.FOld + 1
 	if required <= 0 {
 		required = 1
 	}

@@ -275,17 +275,18 @@ func decodeDealerSharePacket(payload []byte) (*decodedDealerShare, error) {
 }
 
 func dealerShareThreshold(cfg Config, receiverCount int) int {
+	cfg = NormalizeConfig(cfg)
 	if receiverCount <= 0 {
 		return 0
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.APVSSProvider), "scalar-shamir") {
-		threshold := cfg.F + 1
+		threshold := cfg.FNew + 1
 		if threshold < 1 || threshold > receiverCount {
 			return 0
 		}
 		return threshold
 	}
-	threshold := receiverCount - cfg.F
+	threshold := receiverCount - cfg.FNew
 	if threshold < 1 {
 		return 1
 	}

@@ -15,7 +15,12 @@ type Config struct {
 
 	OldCommittee []int
 	NewCommittee []int
-	F            int
+	// FOld controls old-committee agreement, certificates, dealer selection,
+	// and aggregate dispersal/recovery thresholds.
+	FOld int
+	// FNew controls the new-committee APVSS sharing degree, receiver validity,
+	// and scalar-share reconstruction threshold.
+	FNew int
 
 	Kappa       int
 	FastlaneMin int
@@ -66,6 +71,18 @@ type Config struct {
 
 	// APVSSProvider is fixed to the materialized CV-sAPVSS experiment path.
 	APVSSProvider string
+	// APVSSFallbackProfile selects the proof carried for receivers outside the
+	// ACK set. compact-batch-v1 additionally requires AllowExperimentalAPVSS.
+	APVSSFallbackProfile string
+	// AllowExperimentalAPVSS is an explicit benchmark-only admission switch for
+	// proof profiles that have not passed the production cryptographic gate.
+	AllowExperimentalAPVSS bool
+	// APVSSBenchmarkFallbackCount forces an exact |I| in benchmark ACK
+	// collection when positive. Zero preserves natural message scheduling.
+	APVSSBenchmarkFallbackCount int
+	// APVSSBenchmarkWaitAllACKs waits for every receiver to ACK, producing
+	// |I|=0 on a healthy benchmark network. It is not an asynchronous protocol path.
+	APVSSBenchmarkWaitAllACKs bool
 	// DeriveMode selects how post-RecoverAgg key material is derived.
 	// "per-dealer" keeps the legacy compatibility path that re-processes every
 	// selected dealer. "aggregate" derives directly from the single recovered
@@ -143,6 +160,18 @@ func validateCVEpochConfig(cfg Config) error {
 	if strings.TrimSpace(c.ArtifactCacheDir) == "" {
 		return errors.New("CV epoch requires a local artifact store")
 	}
+	if c.APVSSFallbackProfile == apvssFallbackCompactBatchProfileV1 && !c.AllowExperimentalAPVSS {
+		return apvssRequireProductionFallbackBackendV1(c.APVSSFallbackProfile)
+	}
+	if c.APVSSBenchmarkFallbackCount > 0 && !c.AllowExperimentalAPVSS {
+		return errors.New("forced APVSS fallback count requires explicit experimental admission")
+	}
+	if c.APVSSBenchmarkWaitAllACKs && !c.AllowExperimentalAPVSS {
+		return errors.New("waiting for all APVSS ACKs requires explicit experimental admission")
+	}
+	if c.APVSSBenchmarkWaitAllACKs && c.APVSSBenchmarkFallbackCount > 0 {
+		return errors.New("APVSS wait-all and forced fallback modes are mutually exclusive")
+	}
 	return nil
 }
 
@@ -152,14 +181,11 @@ func NormalizeConfig(cfg Config) Config {
 		out.Epoch = 1
 	}
 	if out.Kappa == 0 {
-		out.Kappa = out.F + 1
-	}
-	if out.Kappa == 0 {
-		out.Kappa = 1
+		out.Kappa = out.FOld + 1
 	}
 	n := len(out.OldCommittee)
 	if out.FastlaneMin <= 0 {
-		out.FastlaneMin = n - out.F
+		out.FastlaneMin = n - out.FOld
 	}
 	if out.FastlaneMin <= 0 {
 		out.FastlaneMin = 1
@@ -205,6 +231,10 @@ func NormalizeConfig(cfg Config) Config {
 		out.APVSSProvider = "cv-sapvss"
 	}
 	out.APVSSProvider = strings.ToLower(strings.TrimSpace(out.APVSSProvider))
+	if out.APVSSFallbackProfile == "" {
+		out.APVSSFallbackProfile = apvssFallbackExactLaneProfileV1
+	}
+	out.APVSSFallbackProfile = strings.ToLower(strings.TrimSpace(out.APVSSFallbackProfile))
 	if out.DeriveMode == "" {
 		out.DeriveMode = "scalar"
 	}
@@ -238,6 +268,7 @@ func NormalizeConfig(cfg Config) Config {
 }
 
 func ValidateConfig(cfg Config) error {
+	cfg = NormalizeConfig(cfg)
 	if cfg.SID == "" {
 		return errors.New("empty SID")
 	}
@@ -255,17 +286,23 @@ func ValidateConfig(cfg Config) error {
 	if len(newCommittee) != len(cfg.NewCommittee) {
 		return errors.New("duplicate new committee member")
 	}
-	if cfg.F < 0 {
-		return errors.New("invalid F")
+	if cfg.FOld < 0 {
+		return errors.New("invalid old-committee fault threshold")
 	}
-	if len(oldCommittee) < 3*cfg.F+1 {
-		return errors.New("old committee does not satisfy n >= 3f+1")
+	if cfg.FNew < 0 {
+		return errors.New("invalid new-committee fault threshold")
 	}
-	if cfg.Kappa != cfg.F+1 {
-		return errors.New("aggregate dealer count must equal f+1")
+	if len(oldCommittee) < 3*cfg.FOld+1 {
+		return errors.New("old committee does not satisfy n_o >= 3f_o+1")
 	}
-	if cfg.FastlaneMin < cfg.F+1 {
-		return errors.New("fastlane minimum below f+1")
+	if len(newCommittee) < 3*cfg.FNew+1 {
+		return errors.New("new committee does not satisfy n_n >= 3f_n+1")
+	}
+	if cfg.Kappa != cfg.FOld+1 {
+		return errors.New("aggregate dealer count must equal f_o+1")
+	}
+	if cfg.FastlaneMin < cfg.FOld+1 {
+		return errors.New("fastlane minimum below f_o+1")
 	}
 	if cfg.FastlaneMin > len(oldCommittee) {
 		return errors.New("fastlane minimum exceeds old committee size")
@@ -275,6 +312,12 @@ func ValidateConfig(cfg Config) error {
 	}
 	if cfg.SendRetryMax <= 0 {
 		return errors.New("invalid send retry max")
+	}
+	if err := apvssRequireFallbackBackendV1(cfg.APVSSFallbackProfile); err != nil {
+		return err
+	}
+	if cfg.APVSSBenchmarkFallbackCount < 0 || cfg.APVSSBenchmarkFallbackCount > cfg.FNew {
+		return errors.New("APVSS benchmark fallback count must be in [0,f_n]")
 	}
 	if cfg.APVSSProvider != "cv-sapvss" && cfg.Epoch > 1 && len(cfg.InputReceiverStates) == 0 && cfg.StateStoreDir == "" {
 		return errors.New("missing input receiver states for epoch > 1")
@@ -303,9 +346,6 @@ func ValidateConfig(cfg Config) error {
 	case "cv-sapvss":
 	default:
 		return errors.New("invalid APVSS provider")
-	}
-	if len(newCommittee) < cfg.F+1 {
-		return errors.New("CV-sAPVSS receiver count below f+1")
 	}
 	switch cfg.DeriveMode {
 	case "per-dealer", "aggregate", "scalar":

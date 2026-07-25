@@ -118,7 +118,8 @@ func TestPredicateBearingMVBATCPRejectsDirectKernel(t *testing.T) {
 		SID:             "mvba-predicate-direct",
 		OldCommittee:    []int{0, 1, 2, 3},
 		NewCommittee:    []int{4, 5, 6, 7},
-		F:               1,
+		FOld:            1,
+		FNew:            1,
 		AgreementKernel: "dumbomvba-direct",
 	})
 	_, _, err := runArladkrMVBATCPInstance(
@@ -135,7 +136,8 @@ func TestPredicateBearingMVBATCPRequiresOneLocalOldNode(t *testing.T) {
 		SID:             "mvba-predicate-local-node",
 		OldCommittee:    []int{0, 1, 2, 3},
 		NewCommittee:    []int{4, 5, 6, 7},
-		F:               1,
+		FOld:            1,
+		FNew:            1,
 		AgreementKernel: "commonsubset-tcp",
 		LocalNodeIDs:    []int{0, 1},
 	})

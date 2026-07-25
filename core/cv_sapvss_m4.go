@@ -107,7 +107,7 @@ func cvMaterializeAndLockAggregateV1(
 	if leafContext == nil || string(leafContext.sessionID) != c.SID || int(leafContext.epoch) != c.Epoch {
 		return nil, fmt.Errorf("CV-sAPVSS M4 context does not match ARL session")
 	}
-	if c.Kappa != c.F+1 || len(leaves) != c.Kappa {
+	if c.Kappa != c.FOld+1 || len(leaves) != c.Kappa {
 		return nil, fmt.Errorf("CV-sAPVSS M4 requires K=f_o+1 leaves")
 	}
 	leafDealerIDs := make([]uint64, len(leaves))
@@ -128,7 +128,7 @@ func cvMaterializeAndLockAggregateV1(
 	if err != nil {
 		return nil, err
 	}
-	dispersal, err := cvDisperseAggregateV1(agg, len(c.OldCommittee), len(c.OldCommittee)-2*c.F)
+	dispersal, err := cvDisperseAggregateV1(agg, len(c.OldCommittee), len(c.OldCommittee)-2*c.FOld)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func cvRecoverMaterializedAggregateV1(
 
 func cvValidateAggregateErasureDimensionsV1(cfg Config, dispersal *cvAggregateDispersalV1) error {
 	totalShards := len(sortedUnique(cfg.OldCommittee))
-	dataShards := totalShards - 2*cfg.F
+	dataShards := totalShards - 2*cfg.FOld
 	if dispersal == nil || totalShards <= 0 || dataShards <= 0 ||
 		len(dispersal.shards) != totalShards || dispersal.dataShards != dataShards {
 		return fmt.Errorf("CV-sAPVSS aggregate dispersal must use (n_o,n_o-2f_o) erasure dimensions")

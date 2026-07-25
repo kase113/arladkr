@@ -6,6 +6,10 @@ f="${2:-1}"
 root="${3:-$(pwd)/cv-run}"
 base_port="${4:-41000}"
 epoch_timeout="${RLADKR_CV_EPOCH_TIMEOUT:-90s}"
+apvss_fallback_profile="${RLADKR_APVSS_FALLBACK_PROFILE:-exact-lane-v1}"
+allow_experimental_apvss="${RLADKR_ALLOW_EXPERIMENTAL_APVSS:-false}"
+apvss_forced_fallback_count="${RLADKR_APVSS_FORCED_FALLBACK_COUNT:-0}"
+apvss_wait_all_acks="${RLADKR_APVSS_WAIT_ALL_ACKS:-false}"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$repo_dir/bin/rladkrbench"
 public_dir="$root/keys/public"
@@ -51,6 +55,10 @@ for ((i=0; i<n; i++)); do
       -transport tcp-distributed -agreement-kernel commonsubset-tcp \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \
       -apvss-provider cv-sapvss -arc-mode materialized -derive-mode scalar \
+      -apvss-fallback-profile "$apvss_fallback_profile" \
+      -allow-experimental-apvss="$allow_experimental_apvss" \
+      -apvss-forced-fallback-count "$apvss_forced_fallback_count" \
+      -apvss-wait-all-acks="$apvss_wait_all_acks" \
       -comm-metrics=true -strict-network=true \
       -cv-public-key-dir "$public_dir" -cv-local-secret-dir "$node_secret_dir" \
       -cv-local-receiver-ids "$((n+i))" 2>&1 | sed -u "s/^/[node-$i] /"

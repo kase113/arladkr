@@ -151,7 +151,7 @@ func buildRBCFixture(t *testing.T, cfg Config) (map[int]Descriptor, map[int]*Dea
 	}
 	sort.Ints(ready)
 
-	required := cfg.F + 1
+	required := cfg.FOld + 1
 	if required <= 0 {
 		required = 1
 	}
@@ -328,7 +328,8 @@ func TestRunRBCAll_LocalNodeSubsetDoesNotRequireRemoteRecvChan(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1},
 		NewCommittee: []int{0, 1},
-		F:            0,
+		FOld:         0,
+		FNew:         0,
 		LocalNodeIDs: []int{0},
 	})
 	if err := ensureRuntime(&cfg); err != nil {
@@ -374,7 +375,8 @@ func TestRunBinaryABAForDealer_LocalNodeSubsetDoesNotRequireRemoteRecvChan(t *te
 		Epoch:        1,
 		OldCommittee: []int{0, 1},
 		NewCommittee: []int{0, 1},
-		F:            0,
+		FOld:         0,
+		FNew:         0,
 		LocalNodeIDs: []int{0},
 	})
 	if err := ensureRuntime(&cfg); err != nil {
@@ -434,7 +436,8 @@ func TestRunBinaryABAForDealer_LocalNodeSubsetBuffersOutOfPhaseMessages(t *testi
 		Epoch:        1,
 		OldCommittee: []int{0, 1},
 		NewCommittee: []int{0, 1},
-		F:            0,
+		FOld:         0,
+		FNew:         0,
 		LocalNodeIDs: []int{0},
 	})
 	if err := ensureRuntime(&cfg); err != nil {
@@ -488,7 +491,8 @@ func TestRunRBCAll_LocalNodeSubsetOnlyInitiatesLocalRBCInit(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1},
 		NewCommittee: []int{0, 1},
-		F:            0,
+		FOld:         0,
+		FNew:         0,
 		LocalNodeIDs: []int{0},
 	})
 	if err := ensureRuntime(&cfg); err != nil {

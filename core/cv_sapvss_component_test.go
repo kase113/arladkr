@@ -123,7 +123,7 @@ func TestCVComponentDescriptorValidation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		holders := append([]int(nil), cfg.runtime.oldOrder[:len(cfg.OldCommittee)-cfg.F]...)
+		holders := append([]int(nil), cfg.runtime.oldOrder[:len(cfg.OldCommittee)-cfg.FOld]...)
 		shares := make(map[int][]byte, len(holders))
 		for _, holder := range holders {
 			shares[holder], err = cfg.runtime.lockSigner.SignShare(

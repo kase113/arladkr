@@ -274,8 +274,14 @@ func (s *cvComponentServiceV1) CollectAPVSSLaneACKs(
 	if sent < threshold {
 		return nil, fmt.Errorf("APVSS lane offer reached %d receivers, need %d", sent, threshold)
 	}
+	requiredACKs := threshold
+	if s.cfg.APVSSBenchmarkWaitAllACKs {
+		requiredACKs = len(s.receiverOrder)
+	} else if s.cfg.APVSSBenchmarkFallbackCount > 0 {
+		requiredACKs = len(s.receiverOrder) - s.cfg.APVSSBenchmarkFallbackCount
+	}
 	acks := make(map[int]apvssLaneACKV1, len(s.receiverOrder))
-	for len(acks) < threshold {
+	for len(acks) < requiredACKs {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -285,6 +291,20 @@ func (s *cvComponentServiceV1) CollectAPVSSLaneACKs(
 			acks[ack.receiverIndex] = ack
 		}
 	}
+	assemble := func() (*apvssLeafPrototypeV1, error) {
+		ordered := make([]apvssLaneACKV1, 0, len(acks))
+		for receiverIndex := 1; receiverIndex <= len(s.receiverOrder); receiverIndex++ {
+			if ack, ok := acks[receiverIndex]; ok {
+				ordered = append(ordered, ack)
+			}
+		}
+		return apvssAssembleVerifiedPrototypeWithFallbackProfileV1(
+			s.leafCtx, leaf, witness, ordered, s.cfg.APVSSFallbackProfile,
+		)
+	}
+	if s.cfg.APVSSBenchmarkWaitAllACKs || s.cfg.APVSSBenchmarkFallbackCount > 0 {
+		return assemble()
+	}
 	// Include replies already delivered with the threshold response without
 	// adding a synchrony assumption or an extra protocol timeout.
 	for {
@@ -292,13 +312,7 @@ func (s *cvComponentServiceV1) CollectAPVSSLaneACKs(
 		case ack := <-pending.values:
 			acks[ack.receiverIndex] = ack
 		default:
-			ordered := make([]apvssLaneACKV1, 0, len(acks))
-			for receiverIndex := 1; receiverIndex <= len(s.receiverOrder); receiverIndex++ {
-				if ack, ok := acks[receiverIndex]; ok {
-					ordered = append(ordered, ack)
-				}
-			}
-			return apvssAssembleVerifiedPrototypeV1(s.leafCtx, leaf, witness, ordered)
+			return assemble()
 		}
 	}
 }
@@ -400,7 +414,7 @@ func (s *cvComponentServiceV1) disperseComponentWire(
 			sent++
 		}
 	}
-	threshold := len(s.cfg.OldCommittee) - s.cfg.F
+	threshold := len(s.cfg.OldCommittee) - s.cfg.FOld
 	if sent+1 < threshold {
 		return nil, fmt.Errorf("CV-sAPVSS component INIT reached %d holders, need %d", sent+1, threshold)
 	}
@@ -457,8 +471,8 @@ func (s *cvComponentServiceV1) CollectComponentCandidates(
 	if ctx == nil {
 		return nil, fmt.Errorf("nil CV-sAPVSS component candidate context")
 	}
-	want := s.cfg.F + 1
-	ready := len(s.cfg.OldCommittee) - s.cfg.F
+	want := s.cfg.FOld + 1
+	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
 	if s.cfg.Kappa != want || ready < want {
 		return nil, fmt.Errorf("CV-sAPVSS component candidate selection requires K=f_o+1")
 	}
@@ -983,7 +997,7 @@ func cvComponentKeyV1(dealer int, digest []byte) string {
 
 func cvDecodeAndValidateComponentDescriptorV1(cfg Config, wire []byte) (*cvComponentDescriptorV1, error) {
 	descriptor, err := cvDecodeComponentDescriptorV1(
-		wire, sortedUnique(cfg.OldCommittee), len(cfg.OldCommittee)-cfg.F,
+		wire, sortedUnique(cfg.OldCommittee), len(cfg.OldCommittee)-cfg.FOld,
 	)
 	if err != nil {
 		return nil, err

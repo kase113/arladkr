@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"rladkr_go/core"
 )
 
 func TestBenchMultiProcessLegacyOffPolicyStillRunsMVBA(t *testing.T) {
@@ -128,6 +130,25 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 	}
 	addrMap := strings.Join(addrParts, ",")
 	mvbaAddrMap := strings.Join(mvbaAddrParts, ",")
+	keyRoot := t.TempDir()
+	publicKeyDir := filepath.Join(keyRoot, "public")
+	secretKeyDir := filepath.Join(keyRoot, "secrets")
+	oldMembers := make([]int, topo.n)
+	receiverIDs := make([]int, topo.n)
+	for i := 0; i < topo.n; i++ {
+		oldMembers[i] = i
+		receiverIDs[i] = topo.n + i
+	}
+	if err := core.GenerateCVReceiverKeyMaterial(
+		publicKeyDir, secretKeyDir, "rladkr-go-bench", receiverIDs,
+	); err != nil {
+		t.Fatalf("generate multiprocess receiver keys: %v", err)
+	}
+	if err := core.GenerateCVOldLockKeyMaterial(
+		publicKeyDir, secretKeyDir, "rladkr-go-bench", oldMembers, topo.n-topo.f,
+	); err != nil {
+		t.Fatalf("generate multiprocess old-lock keys: %v", err)
+	}
 	args := []string{
 		"run", "./cmd/rladkrbench",
 		"-n", fmt.Sprintf("%d", topo.n),
@@ -146,11 +167,19 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 	for idx, localSet := range topo.localNodeSets {
 		cmd := exec.CommandContext(ctx, "go", args...)
 		cmd.Dir = workdir
+		localReceivers := make([]int, len(localSet))
+		for i, nodeID := range localSet {
+			localReceivers[i] = topo.n + nodeID
+		}
 		cmd.Env = append(os.Environ(),
 			"RLADKR_LOCAL_NODE_IDS="+joinIDs(localSet),
+			"RLADKR_LOCAL_RECEIVER_IDS="+joinIDs(localReceivers),
 			"RLADKR_NODE_ADDRS="+addrMap,
 			"RLADKR_MVBA_NODE_ADDRS="+mvbaAddrMap,
 			"RLADKR_DIAL_HOST=127.0.0.1",
+			"RLADKR_CV_PUBLIC_KEY_DIR="+publicKeyDir,
+			"RLADKR_CV_LOCAL_SECRET_DIR="+secretKeyDir,
+			"RLADKR_ARTIFACT_CACHE_DIR="+filepath.Join(keyRoot, fmt.Sprintf("node-%d", idx)),
 		)
 		chans[idx] = make(chan benchProcResult, 1)
 		go func(i int, c *exec.Cmd) { chans[i] <- runBenchCommand(c) }(idx, cmd)

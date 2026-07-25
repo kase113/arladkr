@@ -11,7 +11,8 @@ func TestBlsPVSS_DistributeAndVerify(t *testing.T) {
 		SID:           "test-blspvss",
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11, 12, 13},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "bls-pvss",
 	}
 	cfg = NormalizeConfig(cfg)
@@ -73,7 +74,8 @@ func TestBlsPVSS_InterfaceRoundTrip(t *testing.T) {
 		SID:           "test-blspvss-iface",
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11, 12, 13},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "bls-pvss",
 	}
 	cfg = NormalizeConfig(cfg)
@@ -127,7 +129,8 @@ func TestBlsPVSS_FailBadCommitment(t *testing.T) {
 		SID:           "test-blspvss-bad",
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11, 12, 13},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "bls-pvss",
 	}
 	cfg = NormalizeConfig(cfg)
@@ -156,7 +159,8 @@ func TestBlsPVSS_MultipleRoundTrip(t *testing.T) {
 				SID:           fmt.Sprintf("test-full-%s", variant),
 				OldCommittee:  []int{0, 1, 2, 3},
 				NewCommittee:  []int{10, 11, 12, 13},
-				F:             1,
+				FOld:          1,
+				FNew:          1,
 				APVSSProvider: variant,
 				LocalNodeIDs:  []int{0, 1, 2, 3},
 			}

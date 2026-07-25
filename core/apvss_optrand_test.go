@@ -27,8 +27,8 @@ func TestOptrandDealerArtifactsRetainLegacySchemaV1WireAndContributionDomain(t *
 	if transcript.Provider != "" {
 		t.Fatalf("optrand transcript provider=%q, want omitted", transcript.Provider)
 	}
-	if transcript.Threshold != len(cfg.runtime.receiverOrder)-cfg.F {
-		t.Fatalf("optrand threshold=%d, want %d", transcript.Threshold, len(cfg.runtime.receiverOrder)-cfg.F)
+	if transcript.Threshold != len(cfg.runtime.receiverOrder)-cfg.FNew {
+		t.Fatalf("optrand threshold=%d, want %d", transcript.Threshold, len(cfg.runtime.receiverOrder)-cfg.FNew)
 	}
 	var transcriptObject map[string]json.RawMessage
 	if err := json.Unmarshal(art.Payload, &transcriptObject); err != nil {
@@ -106,7 +106,8 @@ func TestOptrandRejectsScalarShamirSchemaWhenThresholdsCollide(t *testing.T) {
 		Epoch:         1,
 		OldCommittee:  []int{0, 1, 2},
 		NewCommittee:  []int{10, 11, 12},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "scalar-shamir",
 	})
 	if err := ensureRuntime(&scalarCfg); err != nil {

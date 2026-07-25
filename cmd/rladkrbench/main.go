@@ -85,66 +85,94 @@ type runStat struct {
 }
 
 type benchResultInput struct {
-	n                 int
-	f                 int
-	kappa             int
-	runs              int
-	timeoutMs         int64
-	policy            string
-	apvssProvider     string
-	apvssOutput       string
-	securityProfile   string
-	deriveMode        string
-	arcMode           string
-	successRuns       int
-	fallbackRuns      int
-	localNodes        []int
-	requiredCompleted int
-	ablationMode      string
-	adversaryMode     string
-	commMetrics       bool
-	stats             []runStat
+	n                        int
+	fOld                     int
+	fNew                     int
+	kappa                    int
+	runs                     int
+	timeoutMs                int64
+	policy                   string
+	apvssProvider            string
+	apvssFallbackProfile     string
+	apvssForcedFallbackCount int
+	apvssWaitAllACKs         bool
+	experimentalAPVSS        bool
+	apvssOutput              string
+	securityProfile          string
+	deriveMode               string
+	arcMode                  string
+	successRuns              int
+	fallbackRuns             int
+	localNodes               []int
+	requiredCompleted        int
+	ablationMode             string
+	adversaryMode            string
+	commMetrics              bool
+	stats                    []runStat
 }
 
 func main() {
 	var (
-		n                   = flag.Int("n", 4, "number of old/new committee nodes")
-		f                   = flag.Int("f", 1, "byzantine threshold")
-		kappa               = flag.Int("kappa", 0, "aggregate dealer count (0 = F+1; other values are rejected)")
-		runs                = flag.Int("runs", 3, "number of benchmark runs")
-		epochs              = flag.Int("epochs", 1, "epochs per run (state-chained)")
-		transport           = flag.String("transport", "tcp-distributed", "agreement transport: tcp-distributed|tcp-loopback")
-		bindHost            = flag.String("bind-host", "0.0.0.0", "tcp bind host")
-		basePort            = flag.Int("base-port", 0, "deterministic base port for node listeners when >0")
-		runTimeout          = flag.Duration("timeout", 90*time.Second, "timeout per epoch run")
-		waitSPBCTimeout     = flag.Duration("wait-spbc-timeout", 30*time.Second, "MVBA/SPBC wait timeout")
-		routeSendTimeout    = flag.Duration("route-send-timeout", 2*time.Second, "MVBA route send timeout")
-		fallbackPolicy      = flag.String("fallback-policy", "force", "legacy compatibility flag: off|auto|force; active ARL path always runs dumbomvba")
-		agreementKernel     = flag.String("agreement-kernel", "commonsubset-tcp", "agreement kernel: commonsubset-tcp|dumbomvba-direct|distributed-actor|legacy-sim")
-		apvssProvider       = flag.String("apvss-provider", "cv-sapvss", apvssProviderUsage)
-		deriveMode          = flag.String("derive-mode", "scalar", "derive mode: scalar")
-		precomputeRuntime   = flag.Bool("precompute-runtime", true, "prepare deterministic runtime/key material before protocol timing")
-		startAt             = flag.Int64("start-at", 0, "unix timestamp to synchronise start across nodes (0 = start immediately)")
-		prepareOnly         = flag.Bool("prepare-only", false, "prepare deterministic runtime material and exit")
-		ablationMode        = flag.String("ablation-mode", "none", "security ablation mode: none|no-agclock|leader-select")
-		adversaryMode       = flag.String("adversary-mode", "none", "bench-only adversary mode: none|malicious-proposer-bad-agclock|malicious-proposer-leader-select-bias")
-		commMetrics         = flag.Bool("comm-metrics", true, "enable protocol-layer communication byte counters")
-		arcMode             = flag.String("arc-mode", "materialized", "aggregate recovery certificate mode: materialized")
-		recoverResponseMode = flag.String("recover-response-mode", "network", "recover response mode: network|local")
-		maxARCCandidates    = flag.Int("max-arc-candidates-per-epoch", 0, "cap LockAgg ARC candidates per epoch (0 = protocol default, usually n-f)")
-		strictNetwork       = flag.Bool("strict-network", envBoolDefault("RLADKR_STRICT_NETWORK", true), "fail if benchmark config selects local/cache protocol shortcuts")
-		cvPublicKeyDir      = flag.String("cv-public-key-dir", os.Getenv("RLADKR_CV_PUBLIC_KEY_DIR"), "CV public receiver registry directory")
-		cvLocalSecretDir    = flag.String("cv-local-secret-dir", os.Getenv("RLADKR_CV_LOCAL_SECRET_DIR"), "CV local receiver secret directory")
-		cvLocalReceiverRaw  = flag.String("cv-local-receiver-ids", os.Getenv("RLADKR_LOCAL_RECEIVER_IDS"), "comma-separated local new-committee receiver IDs")
-		cvKeygenOnly        = flag.Bool("cv-keygen-only", false, "generate CV receiver and old-lock keys and exit")
+		n                        = flag.Int("n", 4, "number of old/new committee nodes")
+		f                        = flag.Int("f", 1, "common default Byzantine threshold for both committees")
+		fOld                     = flag.Int("f-old", -1, "old-committee Byzantine threshold (-1 = use --f)")
+		fNew                     = flag.Int("f-new", -1, "new-committee Byzantine threshold (-1 = use --f)")
+		kappa                    = flag.Int("kappa", 0, "aggregate dealer count (0 = f_old+1; other values are rejected)")
+		runs                     = flag.Int("runs", 3, "number of benchmark runs")
+		epochs                   = flag.Int("epochs", 1, "epochs per run (state-chained)")
+		transport                = flag.String("transport", "tcp-distributed", "agreement transport: tcp-distributed|tcp-loopback")
+		bindHost                 = flag.String("bind-host", "0.0.0.0", "tcp bind host")
+		basePort                 = flag.Int("base-port", 0, "deterministic base port for node listeners when >0")
+		runTimeout               = flag.Duration("timeout", 90*time.Second, "timeout per epoch run")
+		waitSPBCTimeout          = flag.Duration("wait-spbc-timeout", 30*time.Second, "MVBA/SPBC wait timeout")
+		routeSendTimeout         = flag.Duration("route-send-timeout", 2*time.Second, "MVBA route send timeout")
+		fallbackPolicy           = flag.String("fallback-policy", "force", "legacy compatibility flag: off|auto|force; active ARL path always runs dumbomvba")
+		agreementKernel          = flag.String("agreement-kernel", "commonsubset-tcp", "agreement kernel: commonsubset-tcp|dumbomvba-direct|distributed-actor|legacy-sim")
+		apvssProvider            = flag.String("apvss-provider", "cv-sapvss", apvssProviderUsage)
+		apvssFallbackProfile     = flag.String("apvss-fallback-profile", "exact-lane-v1", "APVSS fallback proof: exact-lane-v1|compact-batch-v1")
+		allowExperimentalAPVSS   = flag.Bool("allow-experimental-apvss", false, "allow an APVSS proof profile that has not passed production admission")
+		apvssForcedFallbackCount = flag.Int("apvss-forced-fallback-count", 0, "benchmark-only forced |I| (0 = natural ACK scheduling)")
+		apvssWaitAllACKs         = flag.Bool("apvss-wait-all-acks", false, "benchmark-only wait for all receiver ACKs to produce |I|=0")
+		deriveMode               = flag.String("derive-mode", "scalar", "derive mode: scalar")
+		precomputeRuntime        = flag.Bool("precompute-runtime", true, "prepare deterministic runtime/key material before protocol timing")
+		startAt                  = flag.Int64("start-at", 0, "unix timestamp to synchronise start across nodes (0 = start immediately)")
+		prepareOnly              = flag.Bool("prepare-only", false, "prepare deterministic runtime material and exit")
+		ablationMode             = flag.String("ablation-mode", "none", "security ablation mode: none|no-agclock|leader-select")
+		adversaryMode            = flag.String("adversary-mode", "none", "bench-only adversary mode: none|malicious-proposer-bad-agclock|malicious-proposer-leader-select-bias")
+		commMetrics              = flag.Bool("comm-metrics", true, "enable protocol-layer communication byte counters")
+		arcMode                  = flag.String("arc-mode", "materialized", "aggregate recovery certificate mode: materialized")
+		recoverResponseMode      = flag.String("recover-response-mode", "network", "recover response mode: network|local")
+		maxARCCandidates         = flag.Int("max-arc-candidates-per-epoch", 0, "cap LockAgg ARC candidates per epoch (0 = protocol default, usually n-f)")
+		strictNetwork            = flag.Bool("strict-network", envBoolDefault("RLADKR_STRICT_NETWORK", true), "fail if benchmark config selects local/cache protocol shortcuts")
+		cvPublicKeyDir           = flag.String("cv-public-key-dir", os.Getenv("RLADKR_CV_PUBLIC_KEY_DIR"), "CV public receiver registry directory")
+		cvLocalSecretDir         = flag.String("cv-local-secret-dir", os.Getenv("RLADKR_CV_LOCAL_SECRET_DIR"), "CV local receiver secret directory")
+		cvLocalReceiverRaw       = flag.String("cv-local-receiver-ids", os.Getenv("RLADKR_LOCAL_RECEIVER_IDS"), "comma-separated local new-committee receiver IDs")
+		cvKeygenOnly             = flag.Bool("cv-keygen-only", false, "generate CV receiver and old-lock keys and exit")
 	)
 	flag.Parse()
-	effectiveKappa := core.NormalizeConfig(core.Config{F: *f, Kappa: *kappa}).Kappa
+	if *fOld < -1 || *fNew < -1 {
+		fmt.Println("f-old and f-new must be non-negative or -1")
+		return
+	}
+	oldFaults := *f
+	newFaults := *f
+	if *fOld >= 0 {
+		oldFaults = *fOld
+	}
+	if *fNew >= 0 {
+		newFaults = *fNew
+	}
+	effectiveKappa := core.NormalizeConfig(core.Config{
+		FOld:  oldFaults,
+		FNew:  newFaults,
+		Kappa: *kappa,
+	}).Kappa
 	visited := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
 		visited[f.Name] = true
 	})
 	apvssProviderName := strings.ToLower(strings.TrimSpace(*apvssProvider))
+	apvssFallbackProfileName := strings.ToLower(strings.TrimSpace(*apvssFallbackProfile))
 
 	if *runs <= 0 {
 		fmt.Println("runs must be positive")
@@ -201,44 +229,49 @@ func main() {
 			os.Exit(1)
 		}
 		if err := core.GenerateCVOldLockKeyMaterial(
-			*cvPublicKeyDir, *cvLocalSecretDir, "rladkr-go-bench", old, len(old)-*f,
+			*cvPublicKeyDir, *cvLocalSecretDir, "rladkr-go-bench", old, len(old)-oldFaults,
 		); err != nil {
 			fmt.Fprintf(os.Stderr, "CV_KEYGEN_ERROR err=%v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf(
 			"CV_KEYGEN_OK public_dir=%s secret_dir=%s receivers=%d old_lock_threshold=%d\n",
-			*cvPublicKeyDir, *cvLocalSecretDir, len(newC), len(old)-*f,
+			*cvPublicKeyDir, *cvLocalSecretDir, len(newC), len(old)-oldFaults,
 		)
 		return
 	}
-	requiredCompleted := requiredCompletedNodes(*n, *f, localNodeIDs)
+	requiredCompleted := requiredCompletedNodes(*n, oldFaults, localNodeIDs)
 	if *prepareOnly {
 		cfg := core.NormalizeConfig(core.Config{
-			SID:                      "rladkr-go-bench",
-			Epoch:                    1,
-			OldCommittee:             old,
-			NewCommittee:             newC,
-			F:                        *f,
-			Kappa:                    effectiveKappa,
-			AgreementTransport:       *transport,
-			AgreementBindHost:        *bindHost,
-			AgreementBasePort:        *basePort,
-			WaitSPBCTimeout:          waitSPBCValue,
-			RouteSendTimeout:         routeSendValue,
-			APVSSProvider:            apvssProviderName,
-			DeriveMode:               *deriveMode,
-			AblationMode:             *ablationMode,
-			AdversaryMode:            *adversaryMode,
-			CommMetrics:              *commMetrics,
-			ARCMode:                  *arcMode,
-			RecoverResponseMode:      *recoverResponseMode,
-			MaxARCCandidatesPerEpoch: *maxARCCandidates,
-			StrictNetwork:            *strictNetwork,
-			LocalNodeIDs:             localNodeIDs,
-			CVPublicKeyDir:           *cvPublicKeyDir,
-			CVLocalSecretDir:         *cvLocalSecretDir,
-			CVLocalReceiverIDs:       localReceiverIDs,
+			SID:                         "rladkr-go-bench",
+			Epoch:                       1,
+			OldCommittee:                old,
+			NewCommittee:                newC,
+			FOld:                        oldFaults,
+			FNew:                        newFaults,
+			Kappa:                       effectiveKappa,
+			AgreementTransport:          *transport,
+			AgreementBindHost:           *bindHost,
+			AgreementBasePort:           *basePort,
+			WaitSPBCTimeout:             waitSPBCValue,
+			RouteSendTimeout:            routeSendValue,
+			APVSSProvider:               apvssProviderName,
+			APVSSFallbackProfile:        apvssFallbackProfileName,
+			AllowExperimentalAPVSS:      *allowExperimentalAPVSS,
+			APVSSBenchmarkFallbackCount: *apvssForcedFallbackCount,
+			APVSSBenchmarkWaitAllACKs:   *apvssWaitAllACKs,
+			DeriveMode:                  *deriveMode,
+			AblationMode:                *ablationMode,
+			AdversaryMode:               *adversaryMode,
+			CommMetrics:                 *commMetrics,
+			ARCMode:                     *arcMode,
+			RecoverResponseMode:         *recoverResponseMode,
+			MaxARCCandidatesPerEpoch:    *maxARCCandidates,
+			StrictNetwork:               *strictNetwork,
+			LocalNodeIDs:                localNodeIDs,
+			CVPublicKeyDir:              *cvPublicKeyDir,
+			CVLocalSecretDir:            *cvLocalSecretDir,
+			CVLocalReceiverIDs:          localReceiverIDs,
 		})
 		if err := core.PrepareRuntime(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "PREPARE_RUNTIME_ERROR err=%v\n", err)
@@ -260,36 +293,41 @@ func main() {
 		runSuccess := true
 		for epoch := 1; epoch <= *epochs; epoch++ {
 			cfg := core.NormalizeConfig(core.Config{
-				SID:                        "rladkr-go-bench",
-				Epoch:                      epoch,
-				OldCommittee:               old,
-				NewCommittee:               newC,
-				F:                          *f,
-				Kappa:                      effectiveKappa,
-				ForceFallback:              true,
-				DisableFallback:            false,
-				DisableABAFallbackEstimate: false,
-				DisableCoinBitFallback:     false,
-				AgreementKernel:            *agreementKernel,
-				AgreementTransport:         *transport,
-				AgreementBindHost:          *bindHost,
-				AgreementBasePort:          *basePort,
-				WaitSPBCTimeout:            waitSPBCValue,
-				RouteSendTimeout:           routeSendValue,
-				APVSSProvider:              apvssProviderName,
-				DeriveMode:                 *deriveMode,
-				AblationMode:               *ablationMode,
-				AdversaryMode:              *adversaryMode,
-				CommMetrics:                *commMetrics,
-				ARCMode:                    *arcMode,
-				RecoverResponseMode:        *recoverResponseMode,
-				MaxARCCandidatesPerEpoch:   *maxARCCandidates,
-				StrictNetwork:              *strictNetwork,
-				LocalNodeIDs:               localNodeIDs,
-				CVPublicKeyDir:             *cvPublicKeyDir,
-				CVLocalSecretDir:           *cvLocalSecretDir,
-				CVLocalReceiverIDs:         localReceiverIDs,
-				InputReceiverStates:        states,
+				SID:                         "rladkr-go-bench",
+				Epoch:                       epoch,
+				OldCommittee:                old,
+				NewCommittee:                newC,
+				FOld:                        oldFaults,
+				FNew:                        newFaults,
+				Kappa:                       effectiveKappa,
+				ForceFallback:               true,
+				DisableFallback:             false,
+				DisableABAFallbackEstimate:  false,
+				DisableCoinBitFallback:      false,
+				AgreementKernel:             *agreementKernel,
+				AgreementTransport:          *transport,
+				AgreementBindHost:           *bindHost,
+				AgreementBasePort:           *basePort,
+				WaitSPBCTimeout:             waitSPBCValue,
+				RouteSendTimeout:            routeSendValue,
+				APVSSProvider:               apvssProviderName,
+				APVSSFallbackProfile:        apvssFallbackProfileName,
+				AllowExperimentalAPVSS:      *allowExperimentalAPVSS,
+				APVSSBenchmarkFallbackCount: *apvssForcedFallbackCount,
+				APVSSBenchmarkWaitAllACKs:   *apvssWaitAllACKs,
+				DeriveMode:                  *deriveMode,
+				AblationMode:                *ablationMode,
+				AdversaryMode:               *adversaryMode,
+				CommMetrics:                 *commMetrics,
+				ARCMode:                     *arcMode,
+				RecoverResponseMode:         *recoverResponseMode,
+				MaxARCCandidatesPerEpoch:    *maxARCCandidates,
+				StrictNetwork:               *strictNetwork,
+				LocalNodeIDs:                localNodeIDs,
+				CVPublicKeyDir:              *cvPublicKeyDir,
+				CVLocalSecretDir:            *cvLocalSecretDir,
+				CVLocalReceiverIDs:          localReceiverIDs,
+				InputReceiverStates:         states,
 			})
 
 			totalStart := time.Now()
@@ -413,25 +451,30 @@ func main() {
 
 	caps := core.APVSSCapabilitiesForConfig(core.Config{APVSSProvider: apvssProviderName})
 	line := formatBenchResult(benchResultInput{
-		n:                 *n,
-		f:                 *f,
-		kappa:             effectiveKappa,
-		runs:              *runs,
-		timeoutMs:         runTimeoutValue.Milliseconds(),
-		policy:            policy,
-		apvssProvider:     apvssProviderName,
-		apvssOutput:       string(caps.OutputKind),
-		securityProfile:   caps.SecurityProfile,
-		deriveMode:        *deriveMode,
-		arcMode:           strings.ToLower(strings.TrimSpace(*arcMode)),
-		successRuns:       successRuns,
-		fallbackRuns:      fallbackRuns,
-		localNodes:        append([]int(nil), localNodeIDs...),
-		requiredCompleted: requiredCompleted,
-		ablationMode:      strings.ToLower(strings.TrimSpace(*ablationMode)),
-		adversaryMode:     strings.ToLower(strings.TrimSpace(*adversaryMode)),
-		commMetrics:       *commMetrics,
-		stats:             stats,
+		n:                        *n,
+		fOld:                     oldFaults,
+		fNew:                     newFaults,
+		kappa:                    effectiveKappa,
+		runs:                     *runs,
+		timeoutMs:                runTimeoutValue.Milliseconds(),
+		policy:                   policy,
+		apvssProvider:            apvssProviderName,
+		apvssFallbackProfile:     apvssFallbackProfileName,
+		apvssForcedFallbackCount: *apvssForcedFallbackCount,
+		apvssWaitAllACKs:         *apvssWaitAllACKs,
+		experimentalAPVSS:        *allowExperimentalAPVSS,
+		apvssOutput:              string(caps.OutputKind),
+		securityProfile:          caps.SecurityProfile,
+		deriveMode:               *deriveMode,
+		arcMode:                  strings.ToLower(strings.TrimSpace(*arcMode)),
+		successRuns:              successRuns,
+		fallbackRuns:             fallbackRuns,
+		localNodes:               append([]int(nil), localNodeIDs...),
+		requiredCompleted:        requiredCompleted,
+		ablationMode:             strings.ToLower(strings.TrimSpace(*ablationMode)),
+		adversaryMode:            strings.ToLower(strings.TrimSpace(*adversaryMode)),
+		commMetrics:              *commMetrics,
+		stats:                    stats,
 	})
 	traceBenchMain(localNodeIDs, "before_final_print", fmt.Sprintf("success_runs=%d stats=%d", successRuns, len(stats)))
 	fmt.Println(line)
@@ -694,14 +737,19 @@ func formatBenchResult(in benchResultInput) string {
 	hashSummary := summarizeConsensusHash(in.stats)
 
 	line := fmt.Sprintf(
-		"E2E_BENCH_RESULT protocol=ARLADKR-GO mode=strict arc_mode=%s start_phase=protocol_start end_phase=local_decide apvss_provider=%s apvss_output=%s security_profile=%s derive_mode=%s n=%d f=%d kappa=%d runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s adversary_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f mean_setup_ms=%.2f mean_recover_barrier_wait_ms=%.2f mean_recover_service_grace_ms=%.2f mean_online_protocol_ms=%.2f mean_online_phase_wall_ms=%.2f mean_online_active_known_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f fallback_runs=%d mean_aggrlo_ready_ms=%.2f mean_header_obligation_ready_ms=%.2f admitagg_pass_ratio=%.4f recoveragg_success_ratio=%.4f disperse_ms=%.0f disperse_local_build_ms=%.0f disperse_broadcast_ms=%.0f disperse_read_wait_ms=%.0f disperse_trusted_ready_ms=%.0f disperse_aggregate_prewarm_ms=%.0f lockagg_ms=%.0f lockagg_ready_candidates_ms=%.0f lockagg_build_aggregate_ms=%.0f lockagg_arcshare_prepare_ms=%.0f lockagg_arcshare_attach_ms=%.0f lockagg_candidate_count=%.0f lockagg_arcshare_signed_count=%.0f lockagg_share_sign_ms=%.0f lockagg_cert_recover_ms=%.0f lockagg_local_admit_ms=%.0f mvba_only_ms=%.0f mvba_peer_wait_ms=%.0f mvba_active_known_ms=%.0f agreeagg_ms=%.0f recover_ms=%.0f recover_only_ms=%.0f recover_verify_ms=%.0f recover_collect_ms=%.0f recover_verify_only_ms=%.0f recover_materialize_ms=%.0f derive_ms=%.0f mean_total_sent_bytes=%.0f mean_total_recv_bytes=%.0f mean_agree_sent_bytes=%.0f mean_agree_recv_bytes=%.0f mean_recover_sent_bytes=%.0f mean_recover_recv_bytes=%.0f mean_recover_response_sent_bytes=%.0f mean_recover_response_recv_bytes=%.0f mean_derive_sent_bytes=%.0f mean_derive_recv_bytes=%.0f mean_agclock_prebroadcast_sent_bytes=%.0f mean_agclock_prebroadcast_recv_bytes=%.0f mean_arc_header_prebroadcast_sent_bytes=%.0f mean_arc_header_prebroadcast_recv_bytes=%.0f local_node_count=%d required_completed_nodes=%d consensus_hash=%s",
+		"E2E_BENCH_RESULT protocol=ARLADKR-GO mode=strict arc_mode=%s start_phase=protocol_start end_phase=local_decide apvss_provider=%s apvss_fallback_profile=%s apvss_forced_fallback_count=%d apvss_wait_all_acks=%t experimental_apvss=%t apvss_output=%s security_profile=%s derive_mode=%s n=%d f_old=%d f_new=%d kappa=%d runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s adversary_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f mean_setup_ms=%.2f mean_recover_barrier_wait_ms=%.2f mean_recover_service_grace_ms=%.2f mean_online_protocol_ms=%.2f mean_online_phase_wall_ms=%.2f mean_online_active_known_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f fallback_runs=%d mean_aggrlo_ready_ms=%.2f mean_header_obligation_ready_ms=%.2f admitagg_pass_ratio=%.4f recoveragg_success_ratio=%.4f disperse_ms=%.0f disperse_local_build_ms=%.0f disperse_broadcast_ms=%.0f disperse_read_wait_ms=%.0f disperse_trusted_ready_ms=%.0f disperse_aggregate_prewarm_ms=%.0f lockagg_ms=%.0f lockagg_ready_candidates_ms=%.0f lockagg_build_aggregate_ms=%.0f lockagg_arcshare_prepare_ms=%.0f lockagg_arcshare_attach_ms=%.0f lockagg_candidate_count=%.0f lockagg_arcshare_signed_count=%.0f lockagg_share_sign_ms=%.0f lockagg_cert_recover_ms=%.0f lockagg_local_admit_ms=%.0f mvba_only_ms=%.0f mvba_peer_wait_ms=%.0f mvba_active_known_ms=%.0f agreeagg_ms=%.0f recover_ms=%.0f recover_only_ms=%.0f recover_verify_ms=%.0f recover_collect_ms=%.0f recover_verify_only_ms=%.0f recover_materialize_ms=%.0f derive_ms=%.0f mean_total_sent_bytes=%.0f mean_total_recv_bytes=%.0f mean_agree_sent_bytes=%.0f mean_agree_recv_bytes=%.0f mean_recover_sent_bytes=%.0f mean_recover_recv_bytes=%.0f mean_recover_response_sent_bytes=%.0f mean_recover_response_recv_bytes=%.0f mean_derive_sent_bytes=%.0f mean_derive_recv_bytes=%.0f mean_agclock_prebroadcast_sent_bytes=%.0f mean_agclock_prebroadcast_recv_bytes=%.0f mean_arc_header_prebroadcast_sent_bytes=%.0f mean_arc_header_prebroadcast_recv_bytes=%.0f local_node_count=%d required_completed_nodes=%d consensus_hash=%s",
 		arcMode,
 		in.apvssProvider,
+		in.apvssFallbackProfile,
+		in.apvssForcedFallbackCount,
+		in.apvssWaitAllACKs,
+		in.experimentalAPVSS,
 		in.apvssOutput,
 		in.securityProfile,
 		in.deriveMode,
 		in.n,
-		in.f,
+		in.fOld,
+		in.fNew,
 		in.kappa,
 		in.runs,
 		in.timeoutMs,

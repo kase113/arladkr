@@ -87,7 +87,7 @@ func buildAggRLO(
 		header.PayloadDigest,
 		header.FreshShardRoot,
 	)
-	lockThreshold := len(c.runtime.oldOrder) - c.F
+	lockThreshold := len(c.runtime.oldOrder) - c.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
@@ -359,8 +359,8 @@ func validateAggRLOShape(cfg Config, rlo *AggRLO) ([]int, error) {
 }
 
 func validateFinalDealerSet(cfg Config, dealers []int) ([]int, error) {
-	if cfg.Kappa != cfg.F+1 {
-		return nil, fmt.Errorf("aggregate dealer count must equal f+1")
+	if cfg.Kappa != cfg.FOld+1 {
+		return nil, fmt.Errorf("aggregate dealer count must equal f_o+1")
 	}
 	canonical := sortedUnique(dealers)
 	if len(canonical) != len(dealers) {
@@ -379,7 +379,7 @@ func validateFinalDealerSet(cfg Config, dealers []int) ([]int, error) {
 }
 
 func validateAggRLOLock(cfg Config, rlo *AggRLO, strictShares bool) error {
-	lockThreshold := len(cfg.runtime.oldOrder) - cfg.F
+	lockThreshold := len(cfg.runtime.oldOrder) - cfg.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}

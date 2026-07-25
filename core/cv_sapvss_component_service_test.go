@@ -51,7 +51,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	if got := transport.sentCount(cvTagComponentInitV1); got != len(nodes)-1 {
 		t.Fatalf("component dispersal sent %d INIT messages, want %d without self-INIT", got, len(nodes)-1)
 	}
-	if len(descriptor.holders) != len(nodes)-cfg.F ||
+	if len(descriptor.holders) != len(nodes)-cfg.FOld ||
 		len(descriptor.shareSignatures) != len(descriptor.holders) {
 		t.Fatalf("component certificate does not preserve n-f holder shares: %+v", descriptor)
 	}
@@ -102,7 +102,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		if collectErr != nil {
 			t.Fatal(collectErr)
 		}
-		if len(candidates) != len(nodes)-cfg.F ||
+		if len(candidates) != len(nodes)-cfg.FOld ||
 			candidates[0].dealer != 0 || candidates[1].dealer != 1 || candidates[2].dealer != 2 {
 			t.Fatalf("node %d collected unexpected component candidates: %+v", service.localNode, candidates)
 		}
@@ -139,7 +139,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 			t.Fatal("concurrent materializers produced different aggregate headers")
 		}
 	}
-	if len(materialized.rlo.Lock.Holders) != len(nodes)-cfg.F ||
+	if len(materialized.rlo.Lock.Holders) != len(nodes)-cfg.FOld ||
 		len(materialized.rlo.Lock.ShareSignatures) != len(materialized.rlo.Lock.Holders) {
 		t.Fatal("network ARC did not preserve n-f individual holder shares")
 	}
@@ -172,15 +172,15 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	}
 	if !bytes.Equal(recovered.digest, materialized.aggregate.digest) ||
 		transport.sentCount(cvTagRecoverGetV1) <= recoverGetBefore ||
-		transport.sentCount(cvTagRecoverShardV1)-recoverShardBefore < len(nodes)-2*cfg.F {
+		transport.sentCount(cvTagRecoverShardV1)-recoverShardBefore < len(nodes)-2*cfg.FOld {
 		t.Fatal("aggregate recovery did not collect n-2f ARC-holder shards over the network")
 	}
 }
 
 func TestCVVerifiedAggregateOfferTokenRejectsMutation(t *testing.T) {
 	cfg, context, _, leaves := cvM4Fixture(t)
-	accepted := make([]*cvVerifiedLeafV1, cfg.F+1)
-	descriptors := make([]*cvComponentDescriptorV1, cfg.F+1)
+	accepted := make([]*cvVerifiedLeafV1, cfg.FOld+1)
+	descriptors := make([]*cvComponentDescriptorV1, cfg.FOld+1)
 	for i := range accepted {
 		wire, err := cvLeafV1CanonicalBytes(leaves[i])
 		if err != nil {
@@ -201,7 +201,7 @@ func TestCVVerifiedAggregateOfferTokenRejectsMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(aggregate, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.F)
+	dispersal, err := cvDisperseAggregateV1(aggregate, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := materialized.aggregate.dealerIDs; len(got) != cfg.F+1 || got[0] != 1 || got[1] != 2 {
+	if got := materialized.aggregate.dealerIDs; len(got) != cfg.FOld+1 || got[0] != 1 || got[1] != 2 {
 		t.Fatalf("materializer selected dealers %v, want [1 2]", got)
 	}
 	badKey := cvComponentKeyV1(0, bad.digest)

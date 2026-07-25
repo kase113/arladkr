@@ -16,6 +16,11 @@ const (
 	apvssLeafDigestDomain    = "ARL-APVSS-v1/leaf"
 	apvssLeafWireDomain      = "ARL-APVSS-v1/leaf-wire"
 	apvssACKMessageDomain    = "ARL-APVSS-v1/ack-message"
+	apvssFallbackSetDomain   = "ARL-APVSS-v1/fallback-set"
+
+	apvssFallbackExactLaneProfileV1    = "exact-lane-v1"
+	apvssFallbackCompactBatchProfileV1 = "compact-batch-v1"
+	apvssFallbackProfileMarkerV1       = 0x41505631
 )
 
 type apvssSchnorrSignatureV1 struct {
@@ -33,13 +38,17 @@ type apvssFallbackProofV1 struct {
 	proof         *cvLeafProofV1
 }
 
-// apvssLeafPrototypeV1 deliberately wraps a structural CV leaf. The network
-// codec remains unchanged until this proof/ACK split has been benchmarked.
+// apvssLeafPrototypeV1 deliberately wraps a structural CV leaf. Its fallback
+// profile is explicit on new wires; the decoder still accepts legacy exact
+// wires that placed the fallback count directly after the ACK set.
 type apvssLeafPrototypeV1 struct {
-	leaf           *cvLeafV1
-	acks           []apvssLaneACKV1
-	fallbackProofs []apvssFallbackProofV1
-	digest         []byte
+	leaf            *cvLeafV1
+	acks            []apvssLaneACKV1
+	fallbackProfile string
+	fallbackProofs  []apvssFallbackProofV1
+	fallbackIndices []int
+	compactFallback *apvssCompactFallbackProofV1
+	digest          []byte
 }
 
 type apvssLaneACKMessageV1 struct {
@@ -53,6 +62,142 @@ type apvssDealerWitnessV1 struct {
 	blindings     []fr.Element
 	scalarCoins   [][]fr.Element
 	blindingCoins []fr.Element
+}
+
+func apvssNormalizeFallbackProfileV1(profile string) string {
+	// Empty is the legacy v1 wire representation of exact per-lane proofs.
+	if profile == "" {
+		return apvssFallbackExactLaneProfileV1
+	}
+	return profile
+}
+
+func apvssRequireFallbackBackendV1(profile string) error {
+	switch apvssNormalizeFallbackProfileV1(profile) {
+	case apvssFallbackExactLaneProfileV1:
+		return nil
+	case apvssFallbackCompactBatchProfileV1:
+		return nil
+	default:
+		return fmt.Errorf("unsupported APVSS fallback proof profile %q", profile)
+	}
+}
+
+func apvssPrototypeFallbackIndicesV1(prototype *apvssLeafPrototypeV1) ([]int, error) {
+	if prototype == nil {
+		return nil, fmt.Errorf("nil APVSS prototype")
+	}
+	switch apvssNormalizeFallbackProfileV1(prototype.fallbackProfile) {
+	case apvssFallbackExactLaneProfileV1:
+		if len(prototype.fallbackIndices) != 0 || prototype.compactFallback != nil {
+			return nil, fmt.Errorf("exact APVSS fallback carries compact proof fields")
+		}
+		indices := make([]int, len(prototype.fallbackProofs))
+		for i := range prototype.fallbackProofs {
+			indices[i] = prototype.fallbackProofs[i].receiverIndex
+		}
+		return indices, nil
+	case apvssFallbackCompactBatchProfileV1:
+		if len(prototype.fallbackProofs) != 0 {
+			return nil, fmt.Errorf("compact APVSS fallback carries exact proofs")
+		}
+		indices := append([]int(nil), prototype.fallbackIndices...)
+		if len(indices) == 0 {
+			if prototype.compactFallback != nil {
+				return nil, fmt.Errorf("empty compact APVSS fallback set carries a proof")
+			}
+			return indices, nil
+		}
+		if prototype.compactFallback == nil || prototype.compactFallback.link == nil {
+			return nil, fmt.Errorf("missing compact APVSS fallback proof")
+		}
+		proofIndices := apvssCompactLinkReceiverIndicesV1(prototype.compactFallback.link)
+		if len(proofIndices) != len(indices) {
+			return nil, fmt.Errorf("compact APVSS fallback proof set mismatch")
+		}
+		for i := range indices {
+			if indices[i] != proofIndices[i] {
+				return nil, fmt.Errorf("compact APVSS fallback proof order mismatch")
+			}
+		}
+		return indices, nil
+	default:
+		return nil, fmt.Errorf("unsupported APVSS fallback proof profile %q", prototype.fallbackProfile)
+	}
+}
+
+func apvssPrototypeFallbackCountV1(prototype *apvssLeafPrototypeV1) int {
+	indices, err := apvssPrototypeFallbackIndicesV1(prototype)
+	if err != nil {
+		return 0
+	}
+	return len(indices)
+}
+
+func apvssRequireProductionFallbackBackendV1(profile string) error {
+	switch apvssNormalizeFallbackProfileV1(profile) {
+	case apvssFallbackExactLaneProfileV1:
+		return fmt.Errorf("APVSS exact-lane fallback lacks a public canonical <q comparator")
+	case apvssFallbackCompactBatchProfileV1:
+		return fmt.Errorf("APVSS compact batch fallback is experimental pending independent cryptographic review")
+	default:
+		return fmt.Errorf("unsupported APVSS fallback proof profile %q", profile)
+	}
+}
+
+// apvssFallbackSetStatementDigestV1 freezes the joint statement a future
+// compact backend must prove. The digest binds the ordered I set and every
+// complete lane statement; it does not weaken the current exact verifier.
+func apvssFallbackSetStatementDigestV1(
+	leaf *cvLeafV1,
+	receiverIndices []int,
+	profile string,
+) ([]byte, error) {
+	normalizedProfile := apvssNormalizeFallbackProfileV1(profile)
+	switch normalizedProfile {
+	case apvssFallbackExactLaneProfileV1, apvssFallbackCompactBatchProfileV1:
+	default:
+		return nil, fmt.Errorf("unsupported APVSS fallback proof profile %q", profile)
+	}
+	if leaf == nil || len(receiverIndices) > leaf.context.sharingDegree {
+		return nil, fmt.Errorf("invalid APVSS fallback statement")
+	}
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, []byte(apvssFallbackSetDomain)); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, []byte(normalizedProfile)); err != nil {
+		return nil, err
+	}
+	contextDigest := cvLeafContextV1Digest(&leaf.context)
+	if len(contextDigest) == 0 {
+		return nil, fmt.Errorf("encode APVSS fallback context")
+	}
+	if err := cvWriteBytes(&wire, contextDigest); err != nil {
+		return nil, err
+	}
+	cvWriteUint64(&wire, leaf.dealerID)
+	if err := cvWriteUint32(&wire, len(receiverIndices)); err != nil {
+		return nil, err
+	}
+	previous := 0
+	for _, receiverIndex := range receiverIndices {
+		if receiverIndex <= previous || receiverIndex <= 0 || receiverIndex > len(leaf.receivers) {
+			return nil, fmt.Errorf("APVSS fallback indices must be strictly ordered and in range")
+		}
+		statementDigest, err := apvssLaneStatementDigestV1(leaf, receiverIndex)
+		if err != nil {
+			return nil, err
+		}
+		if err := cvWriteUint32(&wire, receiverIndex); err != nil {
+			return nil, err
+		}
+		if err := cvWriteBytes(&wire, statementDigest); err != nil {
+			return nil, err
+		}
+		previous = receiverIndex
+	}
+	return hashBytes([]byte(apvssFallbackSetDomain), wire.Bytes()), nil
 }
 
 func apvssValidateStructuralLeafV1(context *cvLeafContextV1, leaf *cvLeafV1) error {
@@ -334,6 +479,57 @@ func apvssFallbackLeafV1(
 	return &context, proxy, nil
 }
 
+func apvssEqualCiphertextV1(left, right *cvElGamalCiphertext) bool {
+	return left != nil && right != nil && left.r.Equal(&right.r) && left.c.Equal(&right.c)
+}
+
+// apvssValidateFallbackLaneWitnessV1 is the reference conformance gate for a
+// future compact prover. Re-encryption from a canonical fr scalar enforces
+// digit range/radix reconstruction, ciphertext plaintext and randomness links,
+// and the same rho in the blinding ciphertext and Pedersen evaluation. The
+// current exact prover already proves these equations and does not repeat this
+// relatively expensive check on its hot path.
+func apvssValidateFallbackLaneWitnessV1(
+	leaf *cvLeafV1,
+	receiverIndex int,
+	scalar, blinding fr.Element,
+	scalarCoins []fr.Element,
+	blindingCoin fr.Element,
+) error {
+	lane, err := apvssLaneV1(leaf, receiverIndex)
+	if err != nil {
+		return err
+	}
+	expected, err := cvReferenceEncryptShare(
+		leaf.context.profile,
+		lane.receiverPublicKey,
+		scalar,
+		blinding,
+		scalarCoins,
+		blindingCoin,
+	)
+	if err != nil {
+		return err
+	}
+	actual := lane.encryptedShare
+	if actual == nil || !actual.receiverPublicKey.Equal(&expected.receiverPublicKey) ||
+		!actual.commitment.Equal(&expected.commitment) ||
+		len(actual.scalarChunks) != len(expected.scalarChunks) ||
+		!apvssEqualCiphertextV1(&actual.blinding, &expected.blinding) {
+		return fmt.Errorf("APVSS fallback witness does not open receiver %d lane", receiverIndex)
+	}
+	for chunk := range actual.scalarChunks {
+		if !apvssEqualCiphertextV1(&actual.scalarChunks[chunk], &expected.scalarChunks[chunk]) {
+			return fmt.Errorf(
+				"APVSS fallback witness does not open receiver %d scalar chunk %d",
+				receiverIndex,
+				chunk,
+			)
+		}
+	}
+	return nil
+}
+
 func apvssProveFallbackLaneV1(
 	leaf *cvLeafV1,
 	receiverIndex int,
@@ -389,7 +585,28 @@ func apvssBuildPrototypeV1(
 	witness *apvssDealerWitnessV1,
 	fallbackIndices []int,
 ) (*apvssLeafPrototypeV1, error) {
+	return apvssBuildPrototypeWithFallbackProfileV1(
+		context,
+		leaf,
+		receiverSecrets,
+		witness,
+		fallbackIndices,
+		apvssFallbackExactLaneProfileV1,
+	)
+}
+
+func apvssBuildPrototypeWithFallbackProfileV1(
+	context *cvLeafContextV1,
+	leaf *cvLeafV1,
+	receiverSecrets []fr.Element,
+	witness *apvssDealerWitnessV1,
+	fallbackIndices []int,
+	fallbackProfile string,
+) (*apvssLeafPrototypeV1, error) {
 	if err := apvssValidateStructuralLeafV1(context, leaf); err != nil {
+		return nil, err
+	}
+	if err := apvssRequireFallbackBackendV1(fallbackProfile); err != nil {
 		return nil, err
 	}
 	if witness == nil || len(receiverSecrets) != len(leaf.receivers) ||
@@ -410,22 +627,32 @@ func apvssBuildPrototypeV1(
 	if len(fallbackIndices) > context.sharingDegree {
 		return nil, fmt.Errorf("APVSS fallback set exceeds f")
 	}
+	if _, err := apvssFallbackSetStatementDigestV1(leaf, fallbackIndices, fallbackProfile); err != nil {
+		return nil, err
+	}
 
-	prototype := &apvssLeafPrototypeV1{leaf: leaf}
+	prototype := &apvssLeafPrototypeV1{
+		leaf:            leaf,
+		fallbackProfile: apvssNormalizeFallbackProfileV1(fallbackProfile),
+	}
 	for receiverIndex := 1; receiverIndex <= len(leaf.receivers); receiverIndex++ {
 		if _, fallback := fallbackSet[receiverIndex]; fallback {
-			proof, err := apvssProveFallbackLaneV1(
-				leaf,
-				receiverIndex,
-				witness.scalars[receiverIndex-1],
-				witness.blindings[receiverIndex-1],
-				witness.scalarCoins[receiverIndex-1],
-				witness.blindingCoins[receiverIndex-1],
-			)
-			if err != nil {
-				return nil, err
+			if prototype.fallbackProfile == apvssFallbackExactLaneProfileV1 {
+				proof, err := apvssProveFallbackLaneV1(
+					leaf,
+					receiverIndex,
+					witness.scalars[receiverIndex-1],
+					witness.blindings[receiverIndex-1],
+					witness.scalarCoins[receiverIndex-1],
+					witness.blindingCoins[receiverIndex-1],
+				)
+				if err != nil {
+					return nil, err
+				}
+				prototype.fallbackProofs = append(prototype.fallbackProofs, proof)
+			} else {
+				prototype.fallbackIndices = append(prototype.fallbackIndices, receiverIndex)
 			}
-			prototype.fallbackProofs = append(prototype.fallbackProofs, proof)
 			continue
 		}
 		ack, err := apvssIssueLaneACKV1(context, leaf, receiverIndex, receiverSecrets[receiverIndex-1])
@@ -433,6 +660,13 @@ func apvssBuildPrototypeV1(
 			return nil, err
 		}
 		prototype.acks = append(prototype.acks, ack)
+	}
+	if prototype.fallbackProfile == apvssFallbackCompactBatchProfileV1 && len(fallbackIndices) > 0 {
+		proof, err := apvssProveCompactFallbackV1(leaf, witness, fallbackIndices)
+		if err != nil {
+			return nil, err
+		}
+		prototype.compactFallback = proof
 	}
 	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
 	if err != nil {
@@ -460,7 +694,22 @@ func apvssAssembleVerifiedPrototypeV1(
 	witness *apvssDealerWitnessV1,
 	acks []apvssLaneACKV1,
 ) (*apvssLeafPrototypeV1, error) {
+	return apvssAssembleVerifiedPrototypeWithFallbackProfileV1(
+		context, leaf, witness, acks, apvssFallbackExactLaneProfileV1,
+	)
+}
+
+func apvssAssembleVerifiedPrototypeWithFallbackProfileV1(
+	context *cvLeafContextV1,
+	leaf *cvLeafV1,
+	witness *apvssDealerWitnessV1,
+	acks []apvssLaneACKV1,
+	fallbackProfile string,
+) (*apvssLeafPrototypeV1, error) {
 	n := len(leaf.receivers)
+	if err := apvssRequireFallbackBackendV1(fallbackProfile); err != nil {
+		return nil, err
+	}
 	if witness == nil || len(witness.scalars) != n || len(witness.blindings) != n ||
 		len(witness.scalarCoins) != n || len(witness.blindingCoins) != n {
 		return nil, fmt.Errorf("invalid APVSS dealer witness dimensions")
@@ -480,26 +729,40 @@ func apvssAssembleVerifiedPrototypeV1(
 		ackSet[ack.receiverIndex] = ack
 	}
 	if len(ackSet) < n-context.sharingDegree {
-		return nil, fmt.Errorf("APVSS ACK set is below n-f")
+		return nil, fmt.Errorf("APVSS ACK set is below n_n-f_n")
 	}
-	prototype := &apvssLeafPrototypeV1{leaf: leaf}
+	prototype := &apvssLeafPrototypeV1{
+		leaf:            leaf,
+		fallbackProfile: apvssNormalizeFallbackProfileV1(fallbackProfile),
+	}
 	for receiverIndex := 1; receiverIndex <= n; receiverIndex++ {
 		if ack, ok := ackSet[receiverIndex]; ok {
 			prototype.acks = append(prototype.acks, ack)
 			continue
 		}
-		fallback, err := apvssProveFallbackLaneV1(
-			leaf,
-			receiverIndex,
-			witness.scalars[receiverIndex-1],
-			witness.blindings[receiverIndex-1],
-			witness.scalarCoins[receiverIndex-1],
-			witness.blindingCoins[receiverIndex-1],
-		)
+		if prototype.fallbackProfile == apvssFallbackExactLaneProfileV1 {
+			fallback, err := apvssProveFallbackLaneV1(
+				leaf,
+				receiverIndex,
+				witness.scalars[receiverIndex-1],
+				witness.blindings[receiverIndex-1],
+				witness.scalarCoins[receiverIndex-1],
+				witness.blindingCoins[receiverIndex-1],
+			)
+			if err != nil {
+				return nil, err
+			}
+			prototype.fallbackProofs = append(prototype.fallbackProofs, fallback)
+		} else {
+			prototype.fallbackIndices = append(prototype.fallbackIndices, receiverIndex)
+		}
+	}
+	if prototype.fallbackProfile == apvssFallbackCompactBatchProfileV1 && len(prototype.fallbackIndices) > 0 {
+		proof, err := apvssProveCompactFallbackV1(leaf, witness, prototype.fallbackIndices)
 		if err != nil {
 			return nil, err
 		}
-		prototype.fallbackProofs = append(prototype.fallbackProofs, fallback)
+		prototype.compactFallback = proof
 	}
 	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
 	if err != nil {
@@ -524,8 +787,15 @@ func apvssVerifyPrototypePartitionV1(prototype *apvssLeafPrototypeV1) error {
 		return fmt.Errorf("invalid APVSS prototype leaf")
 	}
 	n := len(prototype.leaf.receivers)
-	if len(prototype.fallbackProofs) > prototype.leaf.context.sharingDegree ||
-		len(prototype.acks)+len(prototype.fallbackProofs) != n {
+	if err := apvssRequireFallbackBackendV1(prototype.fallbackProfile); err != nil {
+		return err
+	}
+	fallbackIndices, err := apvssPrototypeFallbackIndicesV1(prototype)
+	if err != nil {
+		return err
+	}
+	if len(fallbackIndices) > prototype.leaf.context.sharingDegree ||
+		len(prototype.acks)+len(fallbackIndices) != n {
 		return fmt.Errorf("APVSS ACK and fallback sets do not cover receivers exactly")
 	}
 	covered := make([]bool, n)
@@ -543,17 +813,31 @@ func apvssVerifyPrototypePartitionV1(prototype *apvssLeafPrototypeV1) error {
 		previous = ack.receiverIndex
 	}
 	previous = 0
-	for i := range prototype.fallbackProofs {
-		fallback := &prototype.fallbackProofs[i]
-		if fallback.receiverIndex <= previous || fallback.receiverIndex <= 0 || fallback.receiverIndex > n ||
-			covered[fallback.receiverIndex-1] {
+	for i, receiverIndex := range fallbackIndices {
+		if receiverIndex <= previous || receiverIndex <= 0 || receiverIndex > n ||
+			covered[receiverIndex-1] {
 			return fmt.Errorf("APVSS fallback indices are not the ACK complement")
 		}
-		if err := apvssVerifyFallbackLaneV1(prototype.leaf, fallback); err != nil {
+		if apvssNormalizeFallbackProfileV1(prototype.fallbackProfile) == apvssFallbackExactLaneProfileV1 {
+			if err := apvssVerifyFallbackLaneV1(prototype.leaf, &prototype.fallbackProofs[i]); err != nil {
+				return err
+			}
+		}
+		covered[receiverIndex-1] = true
+		previous = receiverIndex
+	}
+	if _, err := apvssFallbackSetStatementDigestV1(
+		prototype.leaf,
+		fallbackIndices,
+		prototype.fallbackProfile,
+	); err != nil {
+		return err
+	}
+	if apvssNormalizeFallbackProfileV1(prototype.fallbackProfile) == apvssFallbackCompactBatchProfileV1 &&
+		len(fallbackIndices) > 0 {
+		if err := apvssVerifyCompactFallbackV1(prototype.leaf, prototype.compactFallback); err != nil {
 			return err
 		}
-		covered[fallback.receiverIndex-1] = true
-		previous = fallback.receiverIndex
 	}
 	for receiver, ok := range covered {
 		if !ok {
@@ -567,6 +851,9 @@ func apvssProofMaterialBytesV1(prototype *apvssLeafPrototypeV1) (int, error) {
 	if prototype == nil {
 		return 0, fmt.Errorf("nil APVSS prototype")
 	}
+	if _, err := apvssPrototypeFallbackIndicesV1(prototype); err != nil {
+		return 0, err
+	}
 	// receiver index + compressed nonce + scalar response
 	total := len(prototype.acks) * (4 + bls12381.SizeOfG1AffineCompressed + fr.Bytes)
 	for i := range prototype.fallbackProofs {
@@ -575,6 +862,13 @@ func apvssProofMaterialBytesV1(prototype *apvssLeafPrototypeV1) (int, error) {
 			return 0, err
 		}
 		total += 4 + len(wire)
+	}
+	if prototype.compactFallback != nil {
+		wire, err := apvssCompactFallbackProofV1CanonicalBytes(prototype.leaf, prototype.compactFallback)
+		if err != nil {
+			return 0, err
+		}
+		total += 4*len(prototype.fallbackIndices) + len(wire)
 	}
 	return total, nil
 }

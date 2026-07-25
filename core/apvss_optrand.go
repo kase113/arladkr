@@ -43,7 +43,7 @@ func OptrandShareVerify(cfg Config, art *DealerArtifact) error {
 			transcript.Version,
 		)
 	}
-	shareThreshold := len(c.runtime.receiverOrder) - c.F
+	shareThreshold := len(c.runtime.receiverOrder) - c.FNew
 	if shareThreshold <= 0 {
 		shareThreshold = 1
 	}
@@ -98,7 +98,7 @@ func buildOptrandAggregatedTranscript(
 	if len(dealers) == 0 {
 		return nil, fmt.Errorf("empty dealers")
 	}
-	threshold := c.F + 1
+	threshold := c.FOld + 1
 	if threshold <= 0 {
 		threshold = 1
 	}

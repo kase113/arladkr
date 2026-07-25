@@ -68,7 +68,7 @@ func runFallbackLegacyMVBA(
 		return nil, nil, fmt.Errorf("runtime not initialized")
 	}
 	start := time.Now()
-	required := c.F + 1
+	required := c.FOld + 1
 	if required <= 0 {
 		required = 1
 	}
@@ -100,7 +100,7 @@ func runFallbackLegacyMVBA(
 	if maxRounds <= 0 {
 		maxRounds = 3
 	}
-	threshold := len(c.runtime.oldOrder) - c.F
+	threshold := len(c.runtime.oldOrder) - c.FOld
 	if threshold <= 0 {
 		threshold = 1
 	}
@@ -221,7 +221,7 @@ func runFallbackRoundNode(
 	if roundTimeout <= 0 {
 		roundTimeout = 2 * time.Second
 	}
-	leaderProposalTarget := len(cfg.runtime.oldOrder) - cfg.F
+	leaderProposalTarget := len(cfg.runtime.oldOrder) - cfg.FOld
 	if leaderProposalTarget <= 0 {
 		leaderProposalTarget = 1
 	}

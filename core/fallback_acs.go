@@ -97,7 +97,7 @@ func runFallbackACSMVBA(
 	}
 	start := time.Now()
 	localNodes := localOldNodes(c)
-	required := c.F + 1
+	required := c.FOld + 1
 	if required <= 0 {
 		required = 1
 	}
@@ -195,7 +195,7 @@ func runFallbackACSMVBA(
 		})
 	}
 
-	decided := pickMostFrequentSet(setCounts, setByKey, c.F, targetSize, c.runtime.oldOrder)
+	decided := pickMostFrequentSet(setCounts, setByKey, c.FOld, targetSize, c.runtime.oldOrder)
 	if linger := fallbackShutdownGrace(c); linger > 0 {
 		timer := time.NewTimer(linger)
 		defer timer.Stop()
@@ -236,9 +236,9 @@ func runRBCAllWithTransport(
 	localSet := nodeSet(localNodes)
 
 	n := len(cfg.runtime.oldOrder)
-	echoThreshold := n - cfg.F
-	readyRelayThreshold := cfg.F + 1
-	deliverThreshold := n - cfg.F
+	echoThreshold := n - cfg.FOld
+	readyRelayThreshold := cfg.FOld + 1
+	deliverThreshold := n - cfg.FOld
 	if echoThreshold <= 0 {
 		echoThreshold = 1
 	}
@@ -555,7 +555,7 @@ func runBinaryABAForDealerWithTransport(
 	}
 
 	n := len(cfg.runtime.oldOrder)
-	threshold := n - cfg.F
+	threshold := n - cfg.FOld
 	if threshold <= 0 {
 		threshold = 1
 	}

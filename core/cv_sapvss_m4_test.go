@@ -19,13 +19,13 @@ func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(materialized.rlo.Header.Dealers) != cfg.F+1 {
-		t.Fatalf("M4 dealer count mismatch: have=%d want=%d", len(materialized.rlo.Header.Dealers), cfg.F+1)
+	if len(materialized.rlo.Header.Dealers) != cfg.FOld+1 {
+		t.Fatalf("M4 dealer count mismatch: have=%d want=%d", len(materialized.rlo.Header.Dealers), cfg.FOld+1)
 	}
 	if len(materialized.rlo.Header.PayloadDigest) != 32 || len(materialized.rlo.Header.FreshShardRoot) != 32 {
 		t.Fatal("M4 ARC header did not bind the aggregate payload and fresh shard root")
 	}
-	if !materialized.rlo.Lock.Ready() || materialized.rlo.Lock.Threshold != len(cfg.OldCommittee)-cfg.F {
+	if !materialized.rlo.Lock.Ready() || materialized.rlo.Lock.Threshold != len(cfg.OldCommittee)-cfg.FOld {
 		t.Fatal("M4 ARC did not use the n_o-f_o signer quorum")
 	}
 
@@ -39,7 +39,7 @@ func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
 		t.Fatal("M4 agreement did not decide the materialized AggRLO digest")
 	}
 
-	recoveryThreshold := len(cfg.OldCommittee) - 2*cfg.F
+	recoveryThreshold := len(cfg.OldCommittee) - 2*cfg.FOld
 	available := make([]int, recoveryThreshold)
 	for i := range available {
 		available[i] = i
@@ -136,7 +136,7 @@ func TestCVSAPVSSM4FreshBuilderMatchesCheckedBuilder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.F)
+	dispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestCVSAPVSSM4FromVerifiedRejectsAggregateDigestMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.F)
+	dispersal, err := cvDisperseAggregateV1(agg, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,12 @@ func TestCVSAPVSSM4DecodeAggregateRejectsCommitmentCountBeyondRemainingWire(t *t
 
 func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeafV1) {
 	t.Helper()
-	receiverSecrets := []fr.Element{cvTestScalar(13), cvTestScalar(17)}
+	receiverSecrets := []fr.Element{
+		cvTestScalar(13),
+		cvTestScalar(17),
+		cvTestScalar(19),
+		cvTestScalar(23),
+	}
 	receiverKeys := make([]bls12381.G1Affine, len(receiverSecrets))
 	for i := range receiverSecrets {
 		var err error
@@ -524,8 +529,9 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContextV1, []fr.Element, []*cvLeaf
 		SID:                sid,
 		Epoch:              1,
 		OldCommittee:       []int{0, 1, 2, 3},
-		NewCommittee:       []int{0, 1},
-		F:                  1,
+		NewCommittee:       []int{0, 1, 2, 3},
+		FOld:               1,
+		FNew:               1,
 		Kappa:              2,
 		APVSSProvider:      "cv-sapvss",
 		ARCMode:            "materialized",

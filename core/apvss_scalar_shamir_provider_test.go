@@ -22,7 +22,8 @@ func TestScalarShamirDealerArtifactUsesProviderLocalSchemaV1(t *testing.T) {
 		Epoch:         1,
 		OldCommittee:  []int{3, 1, 2, 0},
 		NewCommittee:  []int{13, 10, 12, 11},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "scalar-shamir",
 	})
 	if err := ensureRuntime(&cfg); err != nil {
@@ -43,8 +44,8 @@ func TestScalarShamirDealerArtifactUsesProviderLocalSchemaV1(t *testing.T) {
 	if transcript.Provider != "scalar-shamir" {
 		t.Fatalf("transcript provider=%q, want scalar-shamir", transcript.Provider)
 	}
-	if transcript.Threshold != cfg.F+1 {
-		t.Fatalf("transcript threshold=%d, want %d", transcript.Threshold, cfg.F+1)
+	if transcript.Threshold != cfg.FNew+1 {
+		t.Fatalf("transcript threshold=%d, want %d", transcript.Threshold, cfg.FNew+1)
 	}
 	if !reflect.DeepEqual(transcript.ReceiverIDs, cfg.runtime.receiverOrder) {
 		t.Fatalf("receiver IDs=%v, want runtime order %v", transcript.ReceiverIDs, cfg.runtime.receiverOrder)
@@ -282,7 +283,7 @@ func TestScalarShamirUsesProviderNeutralSharedModules(t *testing.T) {
 func expectedLegacyOptrandCommitmentsForTest(t *testing.T, cfg Config, dealer int) []string {
 	t.Helper()
 	suite := edwards25519.NewBlakeSHA256Ed25519()
-	threshold := len(cfg.runtime.receiverOrder) - cfg.F
+	threshold := len(cfg.runtime.receiverOrder) - cfg.FNew
 	if threshold < 1 {
 		threshold = 1
 	}
@@ -1006,7 +1007,7 @@ func TestScalarShamirProviderAVerRejectsAggregateTampering(t *testing.T) {
 func TestScalarShamirProviderRecReturnsReconstructableThresholdShares(t *testing.T) {
 	cfg, artifacts := scalarShamirProviderFixture(t)
 	provider := NewScalarShamirAPVSS()
-	dealers := append([]int(nil), cfg.runtime.oldOrder[:cfg.F+1]...)
+	dealers := append([]int(nil), cfg.runtime.oldOrder[:cfg.FOld+1]...)
 	agg, err := provider.Agg(cfg, dealers, artifacts)
 	if err != nil {
 		t.Fatalf("Agg failed: %v", err)
@@ -1018,8 +1019,8 @@ func TestScalarShamirProviderRecReturnsReconstructableThresholdShares(t *testing
 	if recovered.OutputKind != APVSSOutputScalar {
 		t.Fatalf("output kind=%q, want scalar", recovered.OutputKind)
 	}
-	if recovered.ScalarThreshold != cfg.F+1 {
-		t.Fatalf("scalar threshold=%d, want %d", recovered.ScalarThreshold, cfg.F+1)
+	if recovered.ScalarThreshold != cfg.FNew+1 {
+		t.Fatalf("scalar threshold=%d, want %d", recovered.ScalarThreshold, cfg.FNew+1)
 	}
 	if !bytes.Equal(recovered.AggregateDigest, agg.AggregateDigest) {
 		t.Fatal("recovered aggregate digest mismatch")
@@ -1100,7 +1101,7 @@ func TestScalarShamirProviderRecReturnsReconstructableThresholdShares(t *testing
 
 	wantMaterialParts := [][]byte{
 		agg.AggregateDigest,
-		encodeInts([]int{cfg.F + 1}),
+		encodeInts([]int{cfg.FNew + 1}),
 		encodeInts(agg.Dealers),
 	}
 	for _, dealer := range agg.Dealers {
@@ -1135,7 +1136,7 @@ func TestScalarShamirProviderRecReturnsReconstructableThresholdShares(t *testing
 func TestScalarShamirProviderRecMatchesEveryVerifiedDealerShareAndCommitment(t *testing.T) {
 	cfg, artifacts := scalarShamirProviderFixture(t)
 	provider := NewScalarShamirAPVSS()
-	dealers := append([]int(nil), cfg.runtime.oldOrder[:cfg.F+2]...)
+	dealers := append([]int(nil), cfg.runtime.oldOrder[:cfg.FOld+2]...)
 	agg, err := provider.Agg(cfg, dealers, artifacts)
 	if err != nil {
 		t.Fatalf("Agg failed: %v", err)
@@ -1209,7 +1210,7 @@ func TestScalarShamirProviderRecMatchesEveryVerifiedDealerShareAndCommitment(t *
 func TestScalarShamirProviderRecRejectsIncompleteOrTamperedSharesAtomically(t *testing.T) {
 	cfg, artifacts := scalarShamirProviderFixture(t)
 	provider := NewScalarShamirAPVSS()
-	dealers := append([]int(nil), cfg.runtime.oldOrder[:cfg.F+1]...)
+	dealers := append([]int(nil), cfg.runtime.oldOrder[:cfg.FOld+1]...)
 	validAgg, err := provider.Agg(cfg, dealers, artifacts)
 	if err != nil {
 		t.Fatalf("Agg failed: %v", err)
@@ -1368,7 +1369,7 @@ func rebuildScalarShamirArtifactPayloadForTest(
 	root := hashBytes([]byte("rladkr-root"), payload)
 	commitment := hashBytes([]byte("rladkr-commit"), payload)
 	holders := append([]int(nil), cfg.runtime.oldOrder...)
-	lockThreshold := len(holders) - cfg.F
+	lockThreshold := len(holders) - cfg.FOld
 	if lockThreshold < 1 {
 		lockThreshold = 1
 	}

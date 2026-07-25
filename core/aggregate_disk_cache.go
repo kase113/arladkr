@@ -16,7 +16,15 @@ func aggregateCacheDir(cfg Config) string {
 	return filepath.Join(
 		cfg.ArtifactCacheDir,
 		safeCacheComponent(cfg.SID),
-		fmt.Sprintf("epoch-%d-n-%d-f-%d-provider-%s", cfg.Epoch, len(cfg.runtime.oldOrder), cfg.F, safeCacheComponent(cfg.APVSSProvider)),
+		fmt.Sprintf(
+			"epoch-%d-no-%d-fo-%d-nn-%d-fn-%d-provider-%s",
+			cfg.Epoch,
+			len(cfg.runtime.oldOrder),
+			cfg.FOld,
+			len(cfg.runtime.receiverOrder),
+			cfg.FNew,
+			safeCacheComponent(cfg.APVSSProvider),
+		),
 		"aggregates",
 	)
 }

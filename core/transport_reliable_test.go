@@ -34,7 +34,8 @@ func TestSendWithRetry_RetriesAndSucceeds(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 		SendRetryMax: 3,
 	})
 	cfg.SendRetryBackoff = 1 * time.Millisecond
@@ -54,7 +55,8 @@ func TestSendWithRetry_FailsAfterMaxRetries(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 		SendRetryMax: 2,
 	})
 	cfg.SendRetryBackoff = 1 * time.Millisecond
@@ -74,7 +76,8 @@ func TestSendWithRetry_RBCINITGetsExtendedStartupGrace(t *testing.T) {
 		Epoch:           1,
 		OldCommittee:    []int{0, 1, 2, 3},
 		NewCommittee:    []int{0, 1, 2, 3},
-		F:               1,
+		FOld:            1,
+		FNew:            1,
 		SendRetryMax:    2,
 		WaitSPBCTimeout: 40 * time.Millisecond,
 	})
@@ -95,7 +98,8 @@ func TestSendWithRetry_FallbackABAMessagesGetExtendedStartupGrace(t *testing.T) 
 		Epoch:           1,
 		OldCommittee:    []int{0, 1, 2, 3},
 		NewCommittee:    []int{0, 1, 2, 3},
-		F:               1,
+		FOld:            1,
+		FNew:            1,
 		SendRetryMax:    2,
 		WaitSPBCTimeout: 40 * time.Millisecond,
 	})
@@ -116,7 +120,8 @@ func TestSendWithRetry_RecoverMessagesGetExtendedGrace(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 		SendRetryMax: 2,
 	})
 	cfg.SendRetryBackoff = 1 * time.Millisecond

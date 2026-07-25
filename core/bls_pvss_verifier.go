@@ -47,7 +47,7 @@ func blsPVSSVerify(
 			return fmt.Errorf("transcript receiver order mismatch at index=%d", i)
 		}
 	}
-	t := n - c.F - 1
+	t := n - c.FNew - 1
 	if t < 0 {
 		t = 0
 	}

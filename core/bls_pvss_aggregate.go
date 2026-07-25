@@ -93,7 +93,7 @@ func blsPVSSAggregateVerify(
 
 	receiverOrder := c.runtime.receiverOrder
 	n := len(receiverOrder)
-	t := n - c.F - 1
+	t := n - c.FNew - 1
 	if t < 0 {
 		t = 0
 	}

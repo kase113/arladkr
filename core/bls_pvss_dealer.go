@@ -33,7 +33,7 @@ func blsPVSSDistribute(
 
 	receiverOrder := c.runtime.receiverOrder
 	n := len(receiverOrder)
-	t := n - c.F - 1 // degree of sharing polynomial
+	t := n - c.FNew - 1 // degree of sharing polynomial
 	if t < 0 {
 		t = 0
 	}

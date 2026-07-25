@@ -117,7 +117,7 @@ func selectDealersForLockAgg(cfg Config, candidates []readyCandidate) ([]int, er
 	}
 	targetSize := cfg.Kappa
 	if targetSize <= 0 {
-		targetSize = cfg.F + 1
+		targetSize = cfg.FOld + 1
 	}
 	if targetSize <= 0 {
 		targetSize = 1
@@ -151,7 +151,7 @@ func fastlaneReadyPoolMinimum(cfg Config) int {
 	if cfg.FastlaneMin > 0 {
 		return cfg.FastlaneMin
 	}
-	if readyMin := len(cfg.OldCommittee) - cfg.F; readyMin > 0 {
+	if readyMin := len(cfg.OldCommittee) - cfg.FOld; readyMin > 0 {
 		return readyMin
 	}
 	return 1
@@ -357,7 +357,7 @@ func fallbackSeedDealers(cfg Config, descriptors map[int]Descriptor, artifacts m
 		return nil
 	}
 	targetSize := cfg.Kappa
-	required := cfg.F + 1
+	required := cfg.FOld + 1
 	if required <= 0 {
 		required = 1
 	}

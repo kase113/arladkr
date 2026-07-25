@@ -14,7 +14,8 @@ func baseTestConfig() Config {
 		Epoch:              1,
 		OldCommittee:       []int{0, 1, 2, 3},
 		NewCommittee:       []int{0, 1, 2, 3},
-		F:                  1,
+		FOld:               1,
+		FNew:               1,
 		Kappa:              2,
 		AgreementTransport: "tcp-distributed",
 	})
@@ -110,7 +111,8 @@ func TestRunEpoch_FallbackMVBA_N6(t *testing.T) {
 		Epoch:              1,
 		OldCommittee:       []int{0, 1, 2, 3, 4, 5},
 		NewCommittee:       []int{0, 1, 2, 3, 4, 5},
-		F:                  1,
+		FOld:               1,
+		FNew:               1,
 		Kappa:              2,
 		ForceFallback:      true,
 		AgreementTransport: "tcp-distributed",
@@ -145,7 +147,8 @@ func TestRunEpoch_ForwardSecrecyStateProgression(t *testing.T) {
 		Epoch:               2,
 		OldCommittee:        append([]int(nil), cfg1.OldCommittee...),
 		NewCommittee:        append([]int(nil), cfg1.NewCommittee...),
-		F:                   cfg1.F,
+		FOld:                cfg1.FOld,
+		FNew:                cfg1.FNew,
 		Kappa:               cfg1.Kappa,
 		InputReceiverStates: res1.ReceiverStates,
 	})
@@ -173,7 +176,8 @@ func TestRunEpoch_MissingInputReceiverStatesForEpoch2(t *testing.T) {
 		Epoch:        2,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 		Kappa:        2,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -198,7 +202,8 @@ func TestRunEpoch_ForwardSecrecyPosteriorCorruptionCannotDecryptPastCiphertext(t
 		Epoch:               2,
 		OldCommittee:        append([]int(nil), cfg1.OldCommittee...),
 		NewCommittee:        append([]int(nil), cfg1.NewCommittee...),
-		F:                   cfg1.F,
+		FOld:                cfg1.FOld,
+		FNew:                cfg1.FNew,
 		Kappa:               cfg1.Kappa,
 		InputReceiverStates: epoch2States,
 	})
@@ -230,7 +235,8 @@ func TestRunEpoch_ForwardSecrecyPosteriorCorruptionCannotDecryptPastCiphertext(t
 		Epoch:               3,
 		OldCommittee:        append([]int(nil), cfg1.OldCommittee...),
 		NewCommittee:        append([]int(nil), cfg1.NewCommittee...),
-		F:                   cfg1.F,
+		FOld:                cfg1.FOld,
+		FNew:                cfg1.FNew,
 		Kappa:               cfg1.Kappa,
 		InputReceiverStates: cloneReceiverStateMap(res2.ReceiverStates),
 	})

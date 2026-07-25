@@ -82,7 +82,8 @@ func TestValidateConfigRejectsUnknownDeriveMode(t *testing.T) {
 		SID:           "invalid-derive-mode",
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11, 12, 13},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		DeriveMode:    "unknown",
 		APVSSProvider: "optrand",
 	})
@@ -103,7 +104,8 @@ func TestValidateConfigRejectsUnknownAPVSSProvider(t *testing.T) {
 		SID:           "invalid-provider",
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11, 12, 13},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "unknown",
 	})
 	if err := ValidateConfig(cfg); err == nil {

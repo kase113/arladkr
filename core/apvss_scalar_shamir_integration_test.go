@@ -195,15 +195,15 @@ func TestRunEpoch_ScalarShamirReconstructsReturnedPublicKey(t *testing.T) {
 		t.Fatalf("initialize scalar test runtime failed: %v", err)
 	}
 	suite := edwards25519.NewBlakeSHA256Ed25519()
-	shares := make([]*share.PriShare, 0, cfg.F+1)
-	for _, receiver := range cfg.runtime.receiverOrder[:cfg.F+1] {
+	shares := make([]*share.PriShare, 0, cfg.FNew+1)
+	for _, receiver := range cfg.runtime.receiverOrder[:cfg.FNew+1] {
 		scalar := suite.Scalar()
 		if err := scalar.UnmarshalBinary(result.NewShares[receiver]); err != nil {
 			t.Fatalf("decode receiver=%d scalar failed: %v", receiver, err)
 		}
 		shares = append(shares, &share.PriShare{I: cfg.runtime.receiverIndex[receiver], V: scalar})
 	}
-	secret, err := share.RecoverSecret(suite, shares, cfg.F+1, len(cfg.runtime.receiverOrder))
+	secret, err := share.RecoverSecret(suite, shares, cfg.FNew+1, len(cfg.runtime.receiverOrder))
 	if err != nil {
 		t.Fatalf("reconstruct epoch scalar failed: %v", err)
 	}

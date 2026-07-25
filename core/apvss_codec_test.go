@@ -49,6 +49,67 @@ func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
 	}
 }
 
+func TestAPVSSLeafPrototypeCodecLegacyExactFallbackV1(t *testing.T) {
+	fixture := apvssFixtureV1(t, 7, 2)
+	prototype, err := apvssBuildPrototypeV1(
+		&fixture.context,
+		fixture.leaf,
+		fixture.receiverSecrets,
+		&fixture.witness,
+		[]int{1, 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prototype.fallbackProfile = ""
+	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := apvssDecodeLeafPrototypeV1(wire, &fixture.context)
+	if err != nil {
+		t.Fatalf("decode legacy exact fallback wire: %v", err)
+	}
+	if decoded.fallbackProfile != "" {
+		t.Fatalf("legacy exact fallback profile changed to %q", decoded.fallbackProfile)
+	}
+	encodedAgain, err := apvssLeafPrototypeV1CanonicalBytes(decoded)
+	if err != nil || !bytes.Equal(encodedAgain, wire) {
+		t.Fatal("legacy exact fallback wire was not preserved")
+	}
+}
+
+func TestAPVSSLeafPrototypeCodecRejectsUnknownFallbackProfileV1(t *testing.T) {
+	fixture := apvssFixtureV1(t, 7, 2)
+	prototype, err := apvssBuildPrototypeV1(
+		&fixture.context,
+		fixture.leaf,
+		fixture.receiverSecrets,
+		&fixture.witness,
+		[]int{1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := apvssLeafPrototypeV1CanonicalBytes(prototype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset := bytes.Index(wire, []byte(apvssFallbackExactLaneProfileV1))
+	if offset < 0 {
+		t.Fatal("explicit fallback profile is absent from canonical wire")
+	}
+	unknown := []byte("unknown-v1xxx")
+	if len(unknown) != len(apvssFallbackExactLaneProfileV1) {
+		t.Fatal("test unknown profile must preserve canonical field length")
+	}
+	bad := append([]byte(nil), wire...)
+	copy(bad[offset:offset+len(unknown)], unknown)
+	if _, err := apvssDecodeLeafPrototypeV1(bad, &fixture.context); err == nil {
+		t.Fatal("decoded APVSS leaf with an unknown fallback profile")
+	}
+}
+
 func TestAPVSSLeafPrototypeCodecRejectsMutationV1(t *testing.T) {
 	fixture := apvssFixtureV1(t, 7, 2)
 	prototype, err := apvssBuildPrototypeV1(

@@ -15,7 +15,8 @@ func TestLoadOrCreateVEKeyCache_ReusesPersistedKey(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 	})
 
 	first, err := loadOrCreateVEKeyCache(&cfg, 2)

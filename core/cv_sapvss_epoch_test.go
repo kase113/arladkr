@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
@@ -15,7 +16,8 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 		SID:                      "cv-epoch-config",
 		OldCommittee:             []int{0, 1, 2, 3},
 		NewCommittee:             []int{4, 5, 6, 7},
-		F:                        1,
+		FOld:                     1,
+		FNew:                     1,
 		APVSSProvider:            "cv-sapvss",
 		ARCMode:                  "materialized",
 		DeriveMode:               "scalar",
@@ -30,6 +32,30 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 	})
 	if err := validateCVEpochConfig(base); err != nil {
 		t.Fatalf("valid CV epoch config rejected: %v", err)
+	}
+	compact := base
+	compact.APVSSFallbackProfile = apvssFallbackCompactBatchProfileV1
+	if err := validateCVEpochConfig(compact); err == nil || !strings.Contains(err.Error(), "experimental") {
+		t.Fatalf("compact profile crossed production admission without opt-in: %v", err)
+	}
+	compact.AllowExperimentalAPVSS = true
+	compact.APVSSBenchmarkFallbackCount = compact.FNew
+	if err := validateCVEpochConfig(compact); err != nil {
+		t.Fatalf("explicit experimental compact profile rejected: %v", err)
+	}
+	forced := base
+	forced.APVSSBenchmarkFallbackCount = 1
+	if err := validateCVEpochConfig(forced); err == nil || !strings.Contains(err.Error(), "experimental") {
+		t.Fatalf("forced fallback scheduling crossed experimental gate: %v", err)
+	}
+	waitAll := base
+	waitAll.APVSSBenchmarkWaitAllACKs = true
+	if err := validateCVEpochConfig(waitAll); err == nil || !strings.Contains(err.Error(), "experimental") {
+		t.Fatalf("wait-all ACK scheduling crossed experimental gate: %v", err)
+	}
+	waitAll.AllowExperimentalAPVSS = true
+	if err := validateCVEpochConfig(waitAll); err != nil {
+		t.Fatalf("explicit experimental wait-all ACK mode rejected: %v", err)
 	}
 
 	tests := []struct {
@@ -61,9 +87,13 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 }
 
 func TestNormalizeConfigDefaultsToCVOnlyProfile(t *testing.T) {
-	cfg := NormalizeConfig(Config{F: 1})
+	cfg := NormalizeConfig(Config{FOld: 1, FNew: 1})
 	if cfg.APVSSProvider != "cv-sapvss" || cfg.ARCMode != "materialized" || cfg.DeriveMode != "scalar" {
 		t.Fatalf("default profile = %s/%s/%s", cfg.APVSSProvider, cfg.ARCMode, cfg.DeriveMode)
+	}
+	if cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfileV1 || cfg.AllowExperimentalAPVSS {
+		t.Fatalf("default APVSS fallback profile = %q experimental=%t",
+			cfg.APVSSFallbackProfile, cfg.AllowExperimentalAPVSS)
 	}
 	for _, provider := range []string{"optrand", "bls-pvss", "scalar-shamir"} {
 		legacy := NormalizeConfig(Config{
@@ -121,7 +151,7 @@ func TestCVReceiptExchangeReturnsCommonKeyAndLocalShares(t *testing.T) {
 		i := i
 		go func() {
 			shares, receipts, key, exchangeErr := services[i].ExchangeReceipts(
-				ctx, agg, []int{0, 1}, map[int]fr.Element{i: receiverSecrets[i]},
+				ctx, agg, cfg.NewCommittee, map[int]fr.Element{i: receiverSecrets[i]},
 			)
 			results <- result{shares: shares, receipts: receipts, key: key, err: exchangeErr}
 		}()
@@ -214,6 +244,38 @@ func TestCVBuildEpochContextAndRandomDealerLeaf(t *testing.T) {
 	}
 	if err := cvVerifyLeafV1(&leafContext, leaf); err != nil {
 		t.Fatalf("random CV dealer leaf rejected: %v", err)
+	}
+}
+
+func TestCVBuildEpochContextUsesNewCommitteeFaultThreshold(t *testing.T) {
+	receiverIDs := []int{10, 11, 12, 13, 14, 15, 16}
+	receiverKeys := make([]bls12381.G1Affine, len(receiverIDs))
+	for i := range receiverKeys {
+		key, err := cvReceiverPublicKey(cvTestScalar(uint64(i + 1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		receiverKeys[i] = key
+	}
+	cfg := NormalizeConfig(Config{
+		SID:          "cv-asymmetric-thresholds",
+		OldCommittee: []int{0, 1, 2, 3},
+		NewCommittee: receiverIDs,
+		FOld:         1,
+		FNew:         2,
+	})
+	leafContext, err := cvBuildEpochLeafContextV1(cfg, &cvReceiverKeyMaterialV1{
+		receiverPublicKeys: receiverKeys,
+		registryDigest:     make([]byte, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leafContext.sharingDegree != 2 {
+		t.Fatalf("APVSS sharing degree=%d, want f_n=2", leafContext.sharingDegree)
+	}
+	if leafContext.profile.maxComponents != 2 {
+		t.Fatalf("aggregate component bound=%d, want f_o+1=2", leafContext.profile.maxComponents)
 	}
 }
 

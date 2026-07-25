@@ -376,7 +376,7 @@ func TestCVRuntimeUsesRegistryBoundOldLockSigner(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := NormalizeConfig(Config{
-		SID: "cv-runtime-lock", OldCommittee: oldMembers, NewCommittee: newMembers, F: 1,
+		SID: "cv-runtime-lock", OldCommittee: oldMembers, NewCommittee: newMembers, FOld: 1, FNew: 1,
 		APVSSProvider: "cv-sapvss", LocalNodeIDs: []int{2},
 		CVPublicKeyDir: publicDir, CVLocalSecretDir: secretDir,
 	})

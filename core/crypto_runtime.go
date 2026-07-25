@@ -56,6 +56,7 @@ func ensureRuntime(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("nil config")
 	}
+	*cfg = NormalizeConfig(*cfg)
 	if cfg.runtime != nil {
 		return nil
 	}
@@ -85,7 +86,7 @@ func ensureRuntime(cfg *Config) error {
 		receiverIndex[id] = i
 	}
 
-	lockThreshold := len(oldOrder) - cfg.F
+	lockThreshold := len(oldOrder) - cfg.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
@@ -126,7 +127,7 @@ func ensureRuntime(cfg *Config) error {
 		}
 	}
 
-	fastThreshold := 2*cfg.F + 1
+	fastThreshold := 2*cfg.FOld + 1
 	if fastThreshold <= 0 {
 		fastThreshold = 1
 	}
@@ -146,7 +147,7 @@ func ensureRuntime(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	coinThreshold := cfg.F + 1
+	coinThreshold := cfg.FOld + 1
 	if coinThreshold <= 0 {
 		coinThreshold = 1
 	}

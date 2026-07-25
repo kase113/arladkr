@@ -39,19 +39,31 @@ func TestBenchResultIncludesLocalNodeMetrics(t *testing.T) {
 		recoverAggSuccess: 1,
 	}}
 	line := formatBenchResult(benchResultInput{
-		n:                     4,
-		f:                     1,
-		kappa:                 2,
-		runs:                  1,
-		timeoutMs:             1000,
-		policy:                "auto",
-		successRuns:           1,
-		fallbackRuns:          0,
-		localNodes:            []int{1, 3},
-		requiredCompleted:     2,
-		stats:                 stats,
+		n:                        4,
+		fOld:                     1,
+		fNew:                     1,
+		kappa:                    2,
+		runs:                     1,
+		timeoutMs:                1000,
+		policy:                   "auto",
+		apvssFallbackProfile:     "compact-batch-v1",
+		apvssForcedFallbackCount: 1,
+		apvssWaitAllACKs:         false,
+		experimentalAPVSS:        true,
+		successRuns:              1,
+		fallbackRuns:             0,
+		localNodes:               []int{1, 3},
+		requiredCompleted:        2,
+		stats:                    stats,
 	})
-	for _, token := range []string{"local_node_count=2", "required_completed_nodes=2"} {
+	for _, token := range []string{
+		"local_node_count=2",
+		"required_completed_nodes=2",
+		"apvss_fallback_profile=compact-batch-v1",
+		"apvss_forced_fallback_count=1",
+		"apvss_wait_all_acks=false",
+		"experimental_apvss=true",
+	} {
 		if !strings.Contains(line, token) {
 			t.Fatalf("bench output missing token %q: %s", token, line)
 		}

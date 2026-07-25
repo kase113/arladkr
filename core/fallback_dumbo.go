@@ -116,7 +116,7 @@ func extractDecidedDealersFromACS(
 	if len(candidates) < fastlaneReadyPoolMinimum(cfg) {
 		return nil
 	}
-	required := cfg.F + 1
+	required := cfg.FOld + 1
 	if required <= 0 {
 		required = 1
 	}

@@ -2,11 +2,94 @@ package core
 
 import "testing"
 
-func TestValidateConfigRequiresFPlusOneAggregateDealers(t *testing.T) {
+func TestNormalizeConfigSeparatesOldAndNewFaultThresholds(t *testing.T) {
+	balanced := NormalizeConfig(Config{FOld: 2, FNew: 2})
+	if balanced.FOld != 2 || balanced.FNew != 2 || balanced.Kappa != 3 {
+		t.Fatalf(
+			"balanced fault normalization = FOld/FNew/Kappa %d/%d/%d",
+			balanced.FOld,
+			balanced.FNew,
+			balanced.Kappa,
+		)
+	}
+
+	separate := NormalizeConfig(Config{FOld: 1, FNew: 2})
+	if separate.FOld != 1 || separate.FNew != 2 || separate.Kappa != 2 {
+		t.Fatalf(
+			"separate fault normalization = FOld/FNew/Kappa %d/%d/%d",
+			separate.FOld,
+			separate.FNew,
+			separate.Kappa,
+		)
+	}
+
+	zeroOld := NormalizeConfig(Config{FOld: 0, FNew: 1})
+	if zeroOld.FOld != 0 || zeroOld.FNew != 1 || zeroOld.Kappa != 1 {
+		t.Fatalf("explicit f_o=0/f_n=1 normalization = %d/%d/%d", zeroOld.FOld, zeroOld.FNew, zeroOld.Kappa)
+	}
+}
+
+func TestValidateConfigUsesCommitteeSpecificFaultBounds(t *testing.T) {
+	cfg := NormalizeConfig(Config{
+		SID:          "separate-fault-bounds",
+		OldCommittee: []int{0, 1, 2, 3},
+		NewCommittee: []int{10, 11, 12, 13, 14, 15, 16},
+		FOld:         1,
+		FNew:         2,
+	})
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("valid separate fault thresholds rejected: %v", err)
+	}
+
+	badOld := cfg
+	badOld.OldCommittee = []int{0, 1, 2}
+	if err := ValidateConfig(badOld); err == nil {
+		t.Fatal("accepted n_o < 3f_o+1")
+	}
+	badNew := cfg
+	badNew.NewCommittee = []int{10, 11, 12, 13, 14, 15}
+	if err := ValidateConfig(badNew); err == nil {
+		t.Fatal("accepted n_n < 3f_n+1")
+	}
+}
+
+func TestAsymmetricCommitteeThresholdRoles(t *testing.T) {
+	cfg := NormalizeConfig(Config{
+		SID:           "asymmetric-threshold-roles",
+		OldCommittee:  []int{0, 1, 2, 3},
+		NewCommittee:  []int{10, 11, 12, 13, 14, 15, 16},
+		FOld:          1,
+		FNew:          2,
+		APVSSProvider: "cv-sapvss",
+	})
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Kappa != 2 {
+		t.Fatalf("aggregate dealer count=%d, want f_o+1=2", cfg.Kappa)
+	}
+	if cfg.runtime.lockSigner.t != 3 {
+		t.Fatalf("component/ARC threshold=%d, want n_o-f_o=3", cfg.runtime.lockSigner.t)
+	}
+	if cfg.runtime.coinSigner.t != 2 {
+		t.Fatalf("old-committee coin threshold=%d, want f_o+1=2", cfg.runtime.coinSigner.t)
+	}
+	if got := len(cfg.OldCommittee) - 2*cfg.FOld; got != 2 {
+		t.Fatalf("aggregate RS data shards=%d, want n_o-2f_o=2", got)
+	}
+	if got := cfg.FNew + 1; got != 3 {
+		t.Fatalf("APVSS scalar reconstruction threshold=%d, want f_n+1=3", got)
+	}
+}
+
+func TestValidateConfigRequiresFOldPlusOneAggregateDealers(t *testing.T) {
 	cfg := baseTestConfig()
-	cfg.Kappa = cfg.F + 2
+	cfg.Kappa = cfg.FOld + 2
 	if err := ValidateConfig(cfg); err == nil {
-		t.Fatalf("ValidateConfig accepted Kappa=%d, want F+1=%d", cfg.Kappa, cfg.F+1)
+		t.Fatalf("ValidateConfig accepted Kappa=%d, want f_o+1=%d", cfg.Kappa, cfg.FOld+1)
 	}
 }
 
@@ -14,8 +97,8 @@ func TestNormalizeConfigPreservesNegativeKappaForValidation(t *testing.T) {
 	omitted := baseTestConfig()
 	omitted.Kappa = 0
 	omitted = NormalizeConfig(omitted)
-	if omitted.Kappa != omitted.F+1 {
-		t.Fatalf("NormalizeConfig derived Kappa=%d, want F+1=%d", omitted.Kappa, omitted.F+1)
+	if omitted.Kappa != omitted.FOld+1 {
+		t.Fatalf("NormalizeConfig derived Kappa=%d, want f_o+1=%d", omitted.Kappa, omitted.FOld+1)
 	}
 
 	invalid := baseTestConfig()
@@ -75,7 +158,7 @@ func TestDealerShareThresholdUsesProviderSemanticsAndClamps(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{APVSSProvider: tt.provider, F: tt.f}
+			cfg := Config{APVSSProvider: tt.provider, FOld: tt.f, FNew: tt.f}
 			if got := dealerShareThreshold(cfg, tt.receiverCount); got != tt.want {
 				t.Fatalf("dealerShareThreshold()=%d, want %d", got, tt.want)
 			}
@@ -89,7 +172,8 @@ func TestValidateConfigRejectsScalarShamirReceiverSetBelowThreshold(t *testing.T
 		Epoch:         1,
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "scalar-shamir",
 	})
 	if err := ValidateConfig(cfg); err == nil {
@@ -109,7 +193,8 @@ func TestValidateConfigRejectsDuplicateCommitteeIDs(t *testing.T) {
 				Epoch:         1,
 				OldCommittee:  []int{0, 1, 2, 3},
 				NewCommittee:  []int{10, 10},
-				F:             1,
+				FOld:          1,
+				FNew:          1,
 				APVSSProvider: "scalar-shamir",
 			},
 		},
@@ -120,7 +205,8 @@ func TestValidateConfigRejectsDuplicateCommitteeIDs(t *testing.T) {
 				Epoch:         1,
 				OldCommittee:  []int{0, 0, 1, 2},
 				NewCommittee:  []int{10, 11, 12, 13},
-				F:             1,
+				FOld:          1,
+				FNew:          1,
 				APVSSProvider: "optrand",
 			},
 		},
@@ -141,7 +227,8 @@ func TestValidateConfigAcceptsUniqueScalarShamirCommittees(t *testing.T) {
 		Epoch:         1,
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10, 11},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "scalar-shamir",
 	})
 	if err := ValidateConfig(cfg); err != nil {
@@ -155,7 +242,8 @@ func TestBuildDealerArtifactsRejectsScalarShamirReceiverSetBelowThreshold(t *tes
 		Epoch:         1,
 		OldCommittee:  []int{0, 1, 2, 3},
 		NewCommittee:  []int{10},
-		F:             1,
+		FOld:          1,
+		FNew:          1,
 		APVSSProvider: "scalar-shamir",
 	})
 	if _, err := BuildDealerArtifacts(cfg); err == nil {
@@ -169,7 +257,8 @@ func TestBuildDealerArtifactsAndValidate(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 	})
 	artifacts, err := BuildDealerArtifacts(cfg)
 	if err != nil {

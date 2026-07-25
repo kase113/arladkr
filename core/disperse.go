@@ -91,7 +91,15 @@ func buildDealerArtifactsWithCache(cfg Config) (map[int]*DealerArtifact, DealerA
 	dir := filepath.Join(
 		cfg.ArtifactCacheDir,
 		safeCacheComponent(cfg.SID),
-		fmt.Sprintf("epoch-%d-n-%d-f-%d-provider-%s", cfg.Epoch, len(cfg.runtime.oldOrder), cfg.F, safeCacheComponent(cfg.APVSSProvider)),
+		fmt.Sprintf(
+			"epoch-%d-no-%d-fo-%d-nn-%d-fn-%d-provider-%s",
+			cfg.Epoch,
+			len(cfg.runtime.oldOrder),
+			cfg.FOld,
+			len(cfg.runtime.receiverOrder),
+			cfg.FNew,
+			safeCacheComponent(cfg.APVSSProvider),
+		),
 	)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, breakdown, err
@@ -326,7 +334,7 @@ func buildDealerArtifactsOverNetwork(cfg Config) (map[int]*DealerArtifact, Deale
 func networkDisperseTargetDealers(cfg Config) []int {
 	targetSize := cfg.FastlaneMin
 	if targetSize <= 0 {
-		targetSize = len(cfg.runtime.oldOrder) - cfg.F
+		targetSize = len(cfg.runtime.oldOrder) - cfg.FOld
 	}
 	if targetSize <= 0 {
 		targetSize = 1
@@ -516,7 +524,7 @@ func aggregatePrewarmDisabled() bool {
 func buildDealerArtifactsOptrand(cfg Config) (map[int]*DealerArtifact, error) {
 	c := cfg
 	artifacts := make(map[int]*DealerArtifact, len(c.runtime.oldOrder))
-	lockThreshold := len(c.runtime.oldOrder) - c.F
+	lockThreshold := len(c.runtime.oldOrder) - c.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
@@ -535,7 +543,7 @@ func buildDealerArtifactsOptrand(cfg Config) (map[int]*DealerArtifact, error) {
 func buildDealerArtifactsBlsPWSS(cfg Config) (map[int]*DealerArtifact, error) {
 	c := cfg
 	artifacts := make(map[int]*DealerArtifact, len(c.runtime.oldOrder))
-	lockThreshold := len(c.runtime.oldOrder) - c.F
+	lockThreshold := len(c.runtime.oldOrder) - c.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
@@ -552,7 +560,7 @@ func buildDealerArtifactsBlsPWSS(cfg Config) (map[int]*DealerArtifact, error) {
 }
 
 func buildSingleDealerArtifact(cfg Config, dealer int) (*DealerArtifact, error) {
-	lockThreshold := len(cfg.runtime.oldOrder) - cfg.F
+	lockThreshold := len(cfg.runtime.oldOrder) - cfg.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
@@ -781,7 +789,7 @@ func ValidateDescriptor(cfg Config, desc Descriptor) bool {
 	if !desc.Lock.Ready() {
 		return false
 	}
-	lockThreshold := len(c.runtime.oldOrder) - c.F
+	lockThreshold := len(c.runtime.oldOrder) - c.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}

@@ -13,7 +13,8 @@ func TestNormalizeConfig_FiltersAndSortsLocalNodeIDs(t *testing.T) {
 		Epoch:        1,
 		OldCommittee: []int{0, 1, 2, 3},
 		NewCommittee: []int{0, 1, 2, 3},
-		F:            1,
+		FOld:         1,
+		FNew:         1,
 		LocalNodeIDs: []int{3, 99, 1, 3},
 	})
 	if got, want := toKey(cfg.LocalNodeIDs), "1,3"; got != want {
@@ -80,13 +81,14 @@ func TestWaitForRemoteNodeReadiness_SucceedsOnceRemoteListenerAppears(t *testing
 	}()
 
 	cfg := NormalizeConfig(Config{
-		SID:             "remote-ready",
-		Epoch:           1,
-		OldCommittee:    []int{0, 1},
-		NewCommittee:    []int{0, 1},
-		F:               0,
-		LocalNodeIDs:    []int{0},
-		SendRetryMax:    2,
+		SID:              "remote-ready",
+		Epoch:            1,
+		OldCommittee:     []int{0, 1},
+		NewCommittee:     []int{0, 1},
+		FOld:             0,
+		FNew:             0,
+		LocalNodeIDs:     []int{0},
+		SendRetryMax:     2,
 		SendRetryBackoff: 5 * time.Millisecond,
 	})
 	transport, err := NewTCPLoopbackTransportWithOptions(cfg, []int{0, 1}, []int{0}, 8, "127.0.0.1", 0)

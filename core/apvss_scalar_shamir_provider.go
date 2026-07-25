@@ -100,7 +100,7 @@ func (p *ScalarShamirProvider) Agg(
 	if len(canonDealers) != len(dealers) {
 		return nil, fmt.Errorf("scalar-shamir aggregate dealers must be distinct")
 	}
-	threshold := c.F + 1
+	threshold := c.FOld + 1
 	if threshold < 1 {
 		threshold = 1
 	}
@@ -167,7 +167,7 @@ func (p *ScalarShamirProvider) AVer(cfg Config, agg *APVSSAggregate, artifacts m
 	if len(canonDealers) != len(agg.Dealers) || !scalarShamirIntSlicesEqual(canonDealers, agg.Dealers) {
 		return fmt.Errorf("scalar-shamir outer dealers must be canonical and distinct")
 	}
-	threshold := c.F + 1
+	threshold := c.FOld + 1
 	if threshold < 1 {
 		threshold = 1
 	}

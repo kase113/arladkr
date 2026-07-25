@@ -32,7 +32,7 @@ func cvBuildEpochLeafContextV1(cfg Config, material *cvReceiverKeyMaterialV1) (c
 	context := cvLeafContextV1{
 		sessionID:          []byte(c.SID),
 		epoch:              uint64(c.Epoch),
-		sharingDegree:      c.F,
+		sharingDegree:      c.FNew,
 		profile:            cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
 		receiverPublicKeys: append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
 		dealerSetPolicy:    policy,
@@ -162,7 +162,7 @@ func cvDecodeMaterializedAggRLOWitnessV1(wire []byte, cfg Config) (*AggRLO, erro
 		return nil, err
 	}
 	threshold, err := r.uint32()
-	wantThreshold := len(c.OldCommittee) - c.F
+	wantThreshold := len(c.OldCommittee) - c.FOld
 	if err != nil || threshold != wantThreshold {
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC threshold")
 	}
@@ -426,12 +426,12 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		TotalSentBytes: totalSent, TotalRecvBytes: totalRecv, PhaseSentBytes: phaseSent, PhaseRecvBytes: phaseRecv,
 		NewShares: shares, NewPublicKey: publicKey, CVReceipts: receipts,
 		CVComponentCount: len(descriptors), CVARCHolderCount: len(decidedRLO.Lock.Holders),
-		CVRecoveredShardCount: len(cfg.OldCommittee) - 2*cfg.F, CVVerifiedReceiptCount: len(receipts),
+		CVRecoveredShardCount: len(cfg.OldCommittee) - 2*cfg.FOld, CVVerifiedReceiptCount: len(receipts),
 		CVLeafBuildLatency:         leafBuildLatency,
 		CVComponentDisperseLatency: componentLatency, CVCommonCandidateLatency: commonLatency,
 		CVAggregateDisperseLatency: aggregateLatency, CVAggregateAgreementLatency: aggregateAgreementLatency,
 		CVRecoverShardLatency: recoverLatency, CVReceiptLatency: receiptLatency,
-		CVAPVSSACKCount: len(prototype.acks), CVAPVSSFallbackCount: len(prototype.fallbackProofs),
+		CVAPVSSACKCount: len(prototype.acks), CVAPVSSFallbackCount: apvssPrototypeFallbackCountV1(prototype),
 		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: len(prototypeWire),
 		CVAggregateGateWaitLatency:    materialized.metrics.gateWait,
 		CVAggregateLeafLoadLatency:    materialized.metrics.leafLoad,

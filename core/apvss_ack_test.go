@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 
@@ -88,6 +89,8 @@ func apvssClonePrototypeV1ForTest(in *apvssLeafPrototypeV1) *apvssLeafPrototypeV
 	out := *in
 	out.acks = append([]apvssLaneACKV1(nil), in.acks...)
 	out.fallbackProofs = append([]apvssFallbackProofV1(nil), in.fallbackProofs...)
+	out.fallbackIndices = append([]int(nil), in.fallbackIndices...)
+	out.compactFallback = apvssCloneCompactFallbackProofV1ForTest(in.compactFallback)
 	return &out
 }
 
@@ -130,6 +133,175 @@ func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
 			}
 			previousBytes = proofBytes
 		})
+	}
+}
+
+func TestAPVSSFallbackBackendSelectionFailsClosedV1(t *testing.T) {
+	fixture := apvssFixtureV1(t, 7, 2)
+	compact, err := apvssBuildPrototypeWithFallbackProfileV1(
+		&fixture.context,
+		fixture.leaf,
+		fixture.receiverSecrets,
+		&fixture.witness,
+		[]int{1, 2},
+		apvssFallbackCompactBatchProfileV1,
+	)
+	if err != nil {
+		t.Fatalf("build experimental compact APVSS fallback: %v", err)
+	}
+	if err := apvssVerifyPrototypeV1(&fixture.context, compact); err != nil {
+		t.Fatalf("verify experimental compact APVSS fallback: %v", err)
+	}
+	if _, err := apvssBuildPrototypeWithFallbackProfileV1(
+		&fixture.context,
+		fixture.leaf,
+		fixture.receiverSecrets,
+		&fixture.witness,
+		[]int{1, 2},
+		"unknown-fallback-v1",
+	); err == nil {
+		t.Fatal("built APVSS fallback using an unknown profile")
+	}
+
+	prototype, err := apvssBuildPrototypeV1(
+		&fixture.context,
+		fixture.leaf,
+		fixture.receiverSecrets,
+		&fixture.witness,
+		[]int{1, 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []string{apvssFallbackCompactBatchProfileV1, "unknown-fallback-v1"} {
+		bad := apvssClonePrototypeV1ForTest(prototype)
+		bad.fallbackProfile = profile
+		if err := apvssVerifyPrototypeV1(&fixture.context, bad); err == nil {
+			t.Fatalf("verified APVSS fallback after profile replay to %q", profile)
+		}
+	}
+	for _, profile := range []string{
+		apvssFallbackExactLaneProfileV1,
+		apvssFallbackCompactBatchProfileV1,
+		"unknown-fallback-v1",
+	} {
+		if err := apvssRequireProductionFallbackBackendV1(profile); err == nil {
+			t.Fatalf("admitted incomplete APVSS production fallback profile %q", profile)
+		}
+	}
+}
+
+func TestAPVSSFallbackSetStatementBindingV1(t *testing.T) {
+	fixture := apvssFixtureV1(t, 7, 2)
+	digest, err := apvssFallbackSetStatementDigestV1(
+		fixture.leaf,
+		[]int{1, 2},
+		apvssFallbackExactLaneProfileV1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactDigest, err := apvssFallbackSetStatementDigestV1(
+		fixture.leaf,
+		[]int{1, 2},
+		apvssFallbackCompactBatchProfileV1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(digest, compactDigest) {
+		t.Fatal("fallback statement digest did not bind proof profile")
+	}
+	otherSetDigest, err := apvssFallbackSetStatementDigestV1(
+		fixture.leaf,
+		[]int{1},
+		apvssFallbackExactLaneProfileV1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(digest, otherSetDigest) {
+		t.Fatal("fallback statement digest did not bind ordered I")
+	}
+	if _, err := apvssFallbackSetStatementDigestV1(
+		fixture.leaf,
+		[]int{2, 1},
+		apvssFallbackExactLaneProfileV1,
+	); err == nil {
+		t.Fatal("fallback statement accepted a reordered I")
+	}
+
+	mutated := cvCloneLeafV1ForTest(fixture.leaf)
+	mutated.receivers[0].encryptedShare.scalarChunks[0].c.Add(
+		&mutated.receivers[0].encryptedShare.scalarChunks[0].c,
+		&genG1,
+	)
+	mutatedDigest, err := apvssFallbackSetStatementDigestV1(
+		mutated,
+		[]int{1, 2},
+		apvssFallbackExactLaneProfileV1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(digest, mutatedDigest) {
+		t.Fatal("fallback statement digest did not bind complete ciphertexts")
+	}
+}
+
+func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
+	fixture := apvssFixtureV1(t, 4, 1)
+	if err := apvssValidateFallbackLaneWitnessV1(
+		fixture.leaf,
+		1,
+		fixture.witness.scalars[0],
+		fixture.witness.blindings[0],
+		fixture.witness.scalarCoins[0],
+		fixture.witness.blindingCoins[0],
+	); err != nil {
+		t.Fatalf("valid APVSS fallback witness rejected: %v", err)
+	}
+
+	badScalar := fixture.witness.scalars[0]
+	one := fr.One()
+	badScalar.Add(&badScalar, &one)
+	if err := apvssValidateFallbackLaneWitnessV1(
+		fixture.leaf,
+		1,
+		badScalar,
+		fixture.witness.blindings[0],
+		fixture.witness.scalarCoins[0],
+		fixture.witness.blindingCoins[0],
+	); err == nil {
+		t.Fatal("fallback relation accepted a different scalar/radix witness")
+	}
+
+	badBlinding := fixture.witness.blindings[0]
+	badBlinding.Add(&badBlinding, &one)
+	if err := apvssValidateFallbackLaneWitnessV1(
+		fixture.leaf,
+		1,
+		fixture.witness.scalars[0],
+		badBlinding,
+		fixture.witness.scalarCoins[0],
+		fixture.witness.blindingCoins[0],
+	); err == nil {
+		t.Fatal("fallback relation accepted a different Pedersen blinding witness")
+	}
+
+	badCoin := fixture.witness.scalarCoins[0][0]
+	badCoin.Add(&badCoin, &one)
+	badCoins := append([]fr.Element(nil), fixture.witness.scalarCoins[0]...)
+	badCoins[0] = badCoin
+	if err := apvssValidateFallbackLaneWitnessV1(
+		fixture.leaf,
+		1,
+		fixture.witness.scalars[0],
+		fixture.witness.blindings[0],
+		badCoins,
+		fixture.witness.blindingCoins[0],
+	); err == nil {
+		t.Fatal("fallback relation accepted a different ciphertext randomness witness")
 	}
 }
 
