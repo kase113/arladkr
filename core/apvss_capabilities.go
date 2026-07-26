@@ -1,13 +1,9 @@
 package core
 
-import "fmt"
-
 type APVSSOutputKind string
 
 const (
-	APVSSOutputEmulated APVSSOutputKind = "emulated"
-	APVSSOutputGroup    APVSSOutputKind = "group-element"
-	APVSSOutputScalar   APVSSOutputKind = "scalar"
+	APVSSOutputScalar APVSSOutputKind = "scalar"
 )
 
 type APVSSCapabilities struct {
@@ -20,45 +16,13 @@ type APVSSCapabilities struct {
 	SecurityProfile            string
 }
 
-func (o *OptrandAPVSS) Capabilities() APVSSCapabilities {
+func CurrentAPVSSCapabilities() APVSSCapabilities {
 	return APVSSCapabilities{
-		OutputKind:      APVSSOutputEmulated,
-		SecurityProfile: "protocol-emulator",
-	}
-}
-
-func (p *BlsPVSSProvider) Capabilities() APVSSCapabilities {
-	return APVSSCapabilities{
-		OutputKind:                 APVSSOutputGroup,
+		OutputKind:                 APVSSOutputScalar,
 		VerifiesReceivedTranscript: true,
 		AggregatesReceivedInputs:   true,
-		SecurityProfile:            "group-element-prototype",
+		ProducesVerifiableShares:   true,
+		SupportsThresholdKeyOutput: true,
+		SecurityProfile:            "static-cv-sapvss-phase1-materialized",
 	}
-}
-
-func APVSSCapabilitiesForConfig(cfg Config) APVSSCapabilities {
-	return (&cvSAPVSSMaterializedProvider{}).Capabilities()
-}
-
-type apvssCapabilityProvider interface {
-	Capabilities() APVSSCapabilities
-}
-
-func validateAPVSSDeriveMode(cfg Config, provider apvssCapabilityProvider) error {
-	if cfg.DeriveMode != "scalar" {
-		return nil
-	}
-	caps := provider.Capabilities()
-	if caps.OutputKind != APVSSOutputScalar ||
-		!caps.VerifiesReceivedTranscript ||
-		!caps.AggregatesReceivedInputs ||
-		!caps.ProducesVerifiableShares ||
-		!caps.SupportsThresholdKeyOutput {
-		return fmt.Errorf(
-			"derive mode scalar requires scalar-output APVSS with verified inputs and shares; provider=%s profile=%s",
-			cfg.APVSSProvider,
-			caps.SecurityProfile,
-		)
-	}
-	return nil
 }

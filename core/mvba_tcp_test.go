@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -65,22 +64,6 @@ func TestArladkrMVBAWireGobRoundTripWithRealMVBAProposalBody(t *testing.T) {
 	}
 }
 
-func TestSelectAgreedPayloadChoosesFirstNonEmptyVectorEntry(t *testing.T) {
-	wantPayload, err := json.Marshal("digest-hex")
-	if err != nil {
-		t.Fatalf("marshal payload failed: %v", err)
-	}
-	vec := []*dmvba.ProposalValue{
-		nil,
-		{Payload: wantPayload, Round: 0, Hint: "acs-vacs"},
-	}
-
-	got := selectAgreedPayload(vec)
-	if !bytes.Equal(got, wantPayload) {
-		t.Fatalf("unexpected selected payload: got=%q want=%q", got, wantPayload)
-	}
-}
-
 func TestSelectAgreedPayloadsAppliesPredicateAndPreservesProposerOrder(t *testing.T) {
 	vec := []*dmvba.ProposalValue{
 		{Payload: []byte("bad"), Round: 1, Hint: "cv-component-candidate"},
@@ -99,11 +82,11 @@ func TestSelectAgreedPayloadsAppliesPredicateAndPreservesProposerOrder(t *testin
 }
 
 func TestArladkrMVBAInstanceDomainsAreDistinct(t *testing.T) {
-	component, err := arlMVBAInstanceSID("sid", "cv-component-candidate", false)
+	component, err := arlMVBAInstanceSID("sid", "cv-component-candidate")
 	if err != nil {
 		t.Fatal(err)
 	}
-	aggregate, err := arlMVBAInstanceSID("sid", "cv-materialized-aggrlo", false)
+	aggregate, err := arlMVBAInstanceSID("sid", "cv-materialized-aggrlo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,33 +96,14 @@ func TestArladkrMVBAInstanceDomainsAreDistinct(t *testing.T) {
 	}
 }
 
-func TestPredicateBearingMVBATCPRejectsDirectKernel(t *testing.T) {
-	cfg := NormalizeConfig(Config{
-		SID:             "mvba-predicate-direct",
-		OldCommittee:    []int{0, 1, 2, 3},
-		NewCommittee:    []int{4, 5, 6, 7},
-		FOld:            1,
-		FNew:            1,
-		AgreementKernel: "dumbomvba-direct",
-	})
-	_, _, err := runArladkrMVBATCPInstance(
-		context.Background(), cfg, "cv-component-candidate", []byte("candidate"),
-		func(_ int, _ []byte) bool { return true },
-	)
-	if err == nil || !strings.Contains(err.Error(), "external predicate") {
-		t.Fatalf("predicate-bearing direct MVBA was not rejected: %v", err)
-	}
-}
-
 func TestPredicateBearingMVBATCPRequiresOneLocalOldNode(t *testing.T) {
 	cfg := NormalizeConfig(Config{
-		SID:             "mvba-predicate-local-node",
-		OldCommittee:    []int{0, 1, 2, 3},
-		NewCommittee:    []int{4, 5, 6, 7},
-		FOld:            1,
-		FNew:            1,
-		AgreementKernel: "commonsubset-tcp",
-		LocalNodeIDs:    []int{0, 1},
+		SID:          "mvba-predicate-local-node",
+		OldCommittee: []int{0, 1, 2, 3},
+		NewCommittee: []int{4, 5, 6, 7},
+		FOld:         1,
+		FNew:         1,
+		LocalNodeIDs: []int{0, 1},
 	})
 	_, _, err := runArladkrMVBATCPInstance(
 		context.Background(), cfg, "cv-component-candidate", []byte("candidate"),

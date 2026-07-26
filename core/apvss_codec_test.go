@@ -49,36 +49,6 @@ func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
 	}
 }
 
-func TestAPVSSLeafPrototypeCodecLegacyExactFallbackV1(t *testing.T) {
-	fixture := apvssFixture(t, 7, 2)
-	prototype, err := apvssBuildPrototype(
-		&fixture.context,
-		fixture.leaf,
-		fixture.receiverSecrets,
-		&fixture.witness,
-		[]int{1, 2},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prototype.fallbackProfile = ""
-	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := apvssDecodeLeafPrototype(wire, &fixture.context)
-	if err != nil {
-		t.Fatalf("decode legacy exact fallback wire: %v", err)
-	}
-	if decoded.fallbackProfile != "" {
-		t.Fatalf("legacy exact fallback profile changed to %q", decoded.fallbackProfile)
-	}
-	encodedAgain, err := apvssLeafPrototypeCanonicalBytes(decoded)
-	if err != nil || !bytes.Equal(encodedAgain, wire) {
-		t.Fatal("legacy exact fallback wire was not preserved")
-	}
-}
-
 func TestAPVSSLeafPrototypeCodecRejectsUnknownFallbackProfileV1(t *testing.T) {
 	fixture := apvssFixture(t, 7, 2)
 	prototype, err := apvssBuildPrototype(
@@ -99,7 +69,7 @@ func TestAPVSSLeafPrototypeCodecRejectsUnknownFallbackProfileV1(t *testing.T) {
 	if offset < 0 {
 		t.Fatal("explicit fallback profile is absent from canonical wire")
 	}
-	unknown := []byte("unknown-v1xxx")
+	unknown := []byte("unknown-xx")
 	if len(unknown) != len(apvssFallbackExactLaneProfile) {
 		t.Fatal("test unknown profile must preserve canonical field length")
 	}

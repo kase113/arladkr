@@ -52,46 +52,6 @@ type cvAggregateMaterializeMetrics struct {
 	certificate time.Duration
 }
 
-// cvSAPVSSMaterializedProvider prevents the generic factory from silently
-// substituting Optrand. Phase 1 uses the typed M4 API below because APVSS.Rec
-// cannot carry public decryption receipts.
-type cvSAPVSSMaterializedProvider struct{}
-
-func (*cvSAPVSSMaterializedProvider) Capabilities() APVSSCapabilities {
-	return APVSSCapabilities{
-		OutputKind:                 APVSSOutputScalar,
-		VerifiesReceivedTranscript: true,
-		AggregatesReceivedInputs:   true,
-		ProducesVerifiableShares:   true,
-		SupportsThresholdKeyOutput: true,
-		SecurityProfile:            "static-cv-sapvss-phase1-materialized",
-	}
-}
-
-func cvMaterializedAPIError(operation string) error {
-	return fmt.Errorf("cv-sapvss %s requires the typed materialized Phase-1 API", operation)
-}
-
-func (*cvSAPVSSMaterializedProvider) ADist(Config, *DealerArtifact) (*APVSSTranscript, error) {
-	return nil, cvMaterializedAPIError("ADist")
-}
-
-func (*cvSAPVSSMaterializedProvider) Ver(Config, *APVSSTranscript, *DealerArtifact) error {
-	return cvMaterializedAPIError("Ver")
-}
-
-func (*cvSAPVSSMaterializedProvider) Agg(Config, []int, map[int]*DealerArtifact) (*APVSSAggregate, error) {
-	return nil, cvMaterializedAPIError("Agg")
-}
-
-func (*cvSAPVSSMaterializedProvider) AVer(Config, *APVSSAggregate, map[int]*DealerArtifact) error {
-	return cvMaterializedAPIError("AVer")
-}
-
-func (*cvSAPVSSMaterializedProvider) Rec(Config, *APVSSAggregate, map[int]*DealerArtifact) (*APVSSRecovered, error) {
-	return nil, cvMaterializedAPIError("Rec")
-}
-
 func cvMaterializeAndLockAggregate(
 	cfg Config,
 	leafContext *cvLeafContext,
@@ -100,9 +60,6 @@ func cvMaterializeAndLockAggregate(
 	c := NormalizeConfig(cfg)
 	if err := ValidateConfig(c); err != nil {
 		return nil, err
-	}
-	if c.APVSSProvider != "cv-sapvss" || c.ARCMode != "materialized" {
-		return nil, fmt.Errorf("CV-sAPVSS M4 requires cv-sapvss/materialized configuration")
 	}
 	if leafContext == nil || string(leafContext.sessionID) != c.SID || int(leafContext.epoch) != c.Epoch {
 		return nil, fmt.Errorf("CV-sAPVSS M4 context does not match ARL session")
@@ -185,7 +142,7 @@ func cvBuildMaterializedAggRLOFromVerifiedAggregate(
 		}
 		return cvVerifyAggregateShard(dispersal, &dispersal.shards[index])
 	}
-	rlo, _, err := buildAggRLO(cfg, dealers, providerAggregate, &aggRLOMaterializedBinding{
+	rlo, err := buildAggRLO(cfg, dealers, providerAggregate, &aggRLOMaterializedBinding{
 		payloadDigest:  dispersal.payloadDigest,
 		freshShardRoot: dispersal.root,
 		beforeSign:     beforeSign,
@@ -225,7 +182,7 @@ func cvRecoverMaterializedAggregate(
 	if _, err := validateAggRLOShape(c, rlo); err != nil {
 		return nil, err
 	}
-	if err := validateAggRLOLock(c, rlo, true); err != nil {
+	if err := validateAggRLOLock(c, rlo); err != nil {
 		return nil, err
 	}
 	if err := validateAggRLODigest(rlo); err != nil {

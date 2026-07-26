@@ -7,10 +7,18 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sync"
 
+	"github.com/consensys/gnark-crypto/ecc"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
+
+type cvEvaluationPowerKey struct {
+	degree, receivers int
+}
+
+var cvEvaluationPowerCache sync.Map
 
 const (
 	cvMaxChunkBits               = 20
@@ -734,16 +742,51 @@ func cvLeafDigest(leaf *cvLeaf) []byte {
 }
 
 func cvEvaluateCommitments(commitments []bls12381.G1Affine, receiverIndex int) bls12381.G1Affine {
-	var x, power fr.Element
-	x.SetInt64(int64(receiverIndex))
-	power.SetOne()
+	if len(commitments) == 0 || receiverIndex <= 0 {
+		return bls12381.G1Affine{}
+	}
+	powers := cvEvaluationPowers(len(commitments), receiverIndex)
+	return cvEvaluateCommitmentsWithPowers(commitments, powers[receiverIndex-1])
+}
+
+func cvEvaluationPowers(degree, receivers int) [][]fr.Element {
+	if degree <= 0 || receivers <= 0 {
+		return nil
+	}
+	key := cvEvaluationPowerKey{degree: degree, receivers: receivers}
+	if cached, ok := cvEvaluationPowerCache.Load(key); ok {
+		return cached.([][]fr.Element)
+	}
+	powers := make([][]fr.Element, receivers)
+	for receiver := 1; receiver <= receivers; receiver++ {
+		powers[receiver-1] = make([]fr.Element, degree)
+		var x fr.Element
+		x.SetInt64(int64(receiver))
+		powers[receiver-1][0].SetOne()
+		for index := 1; index < degree; index++ {
+			powers[receiver-1][index].Mul(&powers[receiver-1][index-1], &x)
+		}
+	}
+	actual, _ := cvEvaluationPowerCache.LoadOrStore(key, powers)
+	return actual.([][]fr.Element)
+}
+
+func cvEvaluateCommitmentsWithPowers(commitments []bls12381.G1Affine, powers []fr.Element) bls12381.G1Affine {
+	if len(commitments) != len(powers) || len(commitments) == 0 {
+		return bls12381.G1Affine{}
+	}
+	if len(commitments) >= 32 {
+		var result bls12381.G1Affine
+		if _, err := result.MultiExp(commitments, powers, ecc.MultiExpConfig{NbTasks: 4}); err == nil {
+			return result
+		}
+	}
 	var result bls12381.G1Affine
 	result.ScalarMultiplication(&genG1, big.NewInt(0))
 	for i := range commitments {
 		var term bls12381.G1Affine
-		term.ScalarMultiplication(&commitments[i], power.BigInt(new(big.Int)))
+		term.ScalarMultiplication(&commitments[i], powers[i].BigInt(new(big.Int)))
 		result.Add(&result, &term)
-		power.Mul(&power, &x)
 	}
 	return result
 }
@@ -788,6 +831,7 @@ func cvVerifyLeaf(expectedContext *cvLeafContext, leaf *cvLeaf) error {
 			return fmt.Errorf("invalid CV-sAPVSS coefficient commitment %d", i)
 		}
 	}
+	evaluationPowers := cvEvaluationPowers(len(leaf.coefficientCommitments), len(leaf.receivers))
 	for i := range leaf.receivers {
 		receiver := &leaf.receivers[i]
 		expectedKey := &expectedContext.receiverPublicKeys[i]
@@ -798,7 +842,7 @@ func cvVerifyLeaf(expectedContext *cvLeafContext, leaf *cvLeaf) error {
 		if err := cvValidateShare(receiver.encryptedShare, chunks); err != nil {
 			return err
 		}
-		expectedCommitment := cvEvaluateCommitments(leaf.coefficientCommitments, i+1)
+		expectedCommitment := cvEvaluateCommitmentsWithPowers(leaf.coefficientCommitments, evaluationPowers[i])
 		if !receiver.encryptedShare.commitment.Equal(&expectedCommitment) {
 			return fmt.Errorf("CV-sAPVSS Leaf evaluation commitment mismatch at index %d", i+1)
 		}

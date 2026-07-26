@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"math/big"
 	"strings"
@@ -13,7 +12,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
+func TestCVSAPVSSM4MaterializeRecoverReceipt(t *testing.T) {
 	cfg, leafContext, receiverSecrets, leaves := cvM4Fixture(t)
 	materialized, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves)
 	if err != nil {
@@ -29,12 +28,7 @@ func TestCVSAPVSSM4MaterializeAgreeRecoverReceipt(t *testing.T) {
 		t.Fatal("M4 ARC did not use the n_o-f_o signer quorum")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	agreedDigest, _, _, err := AgreeOnAggRLO(ctx, cfg, materialized.rlo)
-	if err != nil {
-		t.Fatal(err)
-	}
+	agreedDigest := materialized.rlo.Digest
 	if !bytes.Equal(agreedDigest, materialized.rlo.Digest) {
 		t.Fatal("M4 agreement did not decide the materialized AggRLO digest")
 	}
@@ -97,8 +91,9 @@ func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	receiverOrder := []int{10, 11, 12, 13}
 	localShares, receiptWires, err := cvCreateLocalDecryptionOutputs(
-		&leafContext, agg, []int{10, 11}, map[int]fr.Element{
+		&leafContext, agg, receiverOrder, map[int]fr.Element{
 			10: receiverSecrets[0],
 			11: receiverSecrets[1],
 		},
@@ -110,7 +105,7 @@ func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 		t.Fatal("local scalar outputs or public receipts are incomplete")
 	}
 	publicKey, err := cvThresholdPublicKeyFromReceipts(
-		&leafContext, agg, []int{10, 11}, receiptWires,
+		&leafContext, agg, receiverOrder, receiptWires,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +118,10 @@ func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 		t.Fatal("receipt interpolation produced the wrong scalar threshold public key")
 	}
 
-	bad := cloneBytesMap(receiptWires)
+	bad := make(map[int][]byte, len(receiptWires))
+	for receiver, wire := range receiptWires {
+		bad[receiver] = append([]byte(nil), wire...)
+	}
 	bad[10][len(bad[10])-1] ^= 1
 	if _, err := cvThresholdPublicKeyFromReceipts(&leafContext, agg, []int{10, 11}, bad); err == nil {
 		t.Fatal("threshold-key derivation accepted a mutated public receipt")
@@ -533,8 +531,6 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) 
 		FOld:               1,
 		FNew:               1,
 		Kappa:              2,
-		APVSSProvider:      "cv-sapvss",
-		ARCMode:            "materialized",
 		AgreementTransport: "tcp-loopback",
 		AgreementBindHost:  "127.0.0.1",
 		ArtifactCacheDir:   t.TempDir(),

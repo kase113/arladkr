@@ -2,34 +2,6 @@ package core
 
 import "time"
 
-type Header struct {
-	SID          string
-	Epoch        int
-	Dealer       int
-	Root         []byte
-	Commitment   []byte
-	MetadataHash []byte
-}
-
-type RecoverabilityLock struct {
-	Threshold       int
-	Holders         []int
-	ShareSignatures map[int][]byte
-	Certificate     []byte
-}
-
-func (l RecoverabilityLock) Ready() bool {
-	return len(l.Holders) >= l.Threshold
-}
-
-type Descriptor struct {
-	Dealer      int
-	Header      Header
-	Lock        RecoverabilityLock
-	Digest      []byte
-	Fingerprint []byte
-}
-
 type AggHeader struct {
 	SID             string
 	Epoch           int
@@ -40,44 +12,23 @@ type AggHeader struct {
 	MetadataHash    []byte
 }
 
-// AggLock is a quorum certificate over AggHeader only.
-// It proves that enough old-committee holders accepted the aggregate header
-// as a recoverable obligation; it does not carry materialized aggregate
-// fragments or fragment-correctness proofs.
+// AggLock is the recovered old-committee threshold certificate over AggHeader.
 type AggLock struct {
-	Threshold       int
-	Holders         []int
-	ShareSignatures map[int][]byte
-	Certificate     []byte
-}
-
-// ARCHeaderShare is the explicit header-only recovery-obligation share carried
-// by LockAgg. It binds an old-committee holder to a specific aggregate header
-// digest for a specific epoch without carrying aggregate fragment material.
-type ARCHeaderShare struct {
-	Holder          int
-	Epoch           int
-	AggHeaderDigest []byte
-	ObligationKind  string
-	Signature       []byte
+	Threshold   int
+	Certificate []byte
 }
 
 func (l AggLock) Ready() bool {
-	return len(l.Holders) >= l.Threshold
+	return l.Threshold > 0 && len(l.Certificate) > 0
 }
 
 type APVSSAggregate struct {
-	Provider          string
-	Dealers           []int
-	AggregateDigest   []byte
-	ListTranscript    *ListBackedAggregateTranscript // list-backed prototype providers
-	BlsPVSSTranscript *BlsPVSSAggregateTranscript    // BLS12-381 pairing-based
+	Provider        string
+	Dealers         []int
+	AggregateDigest []byte
 }
 
-// AggRLO is the aggregate recovery-lock object agreed by LockAgg/AgreeAgg.
-// In header-only ARC mode, the lock certifies an aggregate header plus the
-// obligation that Recover may later materialize and verify the aggregate
-// fragment/object bound to Header.AggregateDigest.
+// AggRLO is the materialized aggregate recovery-lock object decided by MVBA.
 type AggRLO struct {
 	Header    AggHeader
 	Lock      AggLock
@@ -85,38 +36,10 @@ type AggRLO struct {
 	Digest    []byte
 }
 
-// AggFragResponse is the recover-time response object bound to a single
-// aggregate contribution under a header-only AggRLO.
-type AggFragResponse struct {
-	Provider           string
-	Dealer             int
-	ContributionDigest []byte
-	Payload            []byte
-	Ciphertexts        map[int][]byte
-}
-
-type DealerArtifact struct {
-	Dealer             int
-	Descriptor         Descriptor
-	Payload            []byte
-	Ciphertexts        map[int][]byte
-	ContributionDigest []byte
-	Fingerprint        []byte
-}
-
 type NodeOutput struct {
 	NodeID     int
 	DecidedSet []int
 	Latency    time.Duration
-}
-
-type ReceiverState struct {
-	NodeID           int
-	Epoch            int
-	PublicKey        []byte
-	SecretKey        []byte
-	ChainKey         []byte
-	TransportKeyHash []byte
 }
 
 type EpochResult struct {
@@ -193,6 +116,5 @@ type EpochResult struct {
 	CVAggregateARCWaitLatency       time.Duration
 	CVAggregateCertificateLatency   time.Duration
 
-	PerNode        []NodeOutput
-	ReceiverStates map[int]ReceiverState
+	PerNode []NodeOutput
 }

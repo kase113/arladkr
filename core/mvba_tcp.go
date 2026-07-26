@@ -683,21 +683,6 @@ func (h *arladkrTCPHub) closeConns() {
 
 type arladkrMVBAPredicate func(proposer int, payload []byte) bool
 
-func runArladkrMVBATCP(
-	ctx context.Context,
-	cfg Config,
-	payload []byte,
-) ([]byte, time.Duration, error) {
-	vec, peerWait, err := runArladkrMVBATCPInstance(ctx, cfg, "", payload, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(vec) == 0 {
-		return nil, 0, fmt.Errorf("arladkr mvba tcp: no output")
-	}
-	return append([]byte(nil), vec[0]...), peerWait, nil
-}
-
 func runArladkrMVBATCPInstance(
 	ctx context.Context,
 	cfg Config,
@@ -708,23 +693,12 @@ func runArladkrMVBATCPInstance(
 	var peerWaitLatency time.Duration
 	n := len(cfg.OldCommittee)
 	f := cfg.FOld
-	kernel := strings.ToLower(strings.TrimSpace(cfg.AgreementKernel))
-	if predicate != nil && kernel == "dumbomvba-direct" {
-		return nil, 0, fmt.Errorf("external predicate requires the common-subset MVBA kernel")
-	}
-	direct := kernel == "dumbomvba-direct"
-	mvbaSID, err := arlMVBAInstanceSID(
-		fmt.Sprintf("%s|epoch=%d", cfg.SID, cfg.Epoch),
-		instance,
-		direct,
-	)
+	mvbaSID, err := arlMVBAInstanceSID(fmt.Sprintf("%s|epoch=%d", cfg.SID, cfg.Epoch), instance)
 	if err != nil {
 		return nil, 0, err
 	}
 	hint := "arladkr-mvba-tcp-cs"
-	if direct {
-		hint = "arladkr-mvba-tcp-direct"
-	} else if instance != "" {
+	if instance != "" {
 		hint = instance
 	}
 	localIDs := sortedUnique(cfg.LocalNodeIDs)
@@ -836,59 +810,34 @@ func runArladkrMVBATCPInstance(
 			defer wg.Done()
 			signer := dmvba.NewBLS12381Signer(i, blsShares[i], blsPubKey, blsPKs, n, blsThreshold)
 			neti := &arladkrTCPNet{id: i, hub: hub}
-			var runErr error
-			if kernel == "dumbomvba-direct" {
-				node, err := dmvba.NewDumboMVBA(dmvba.Config{
+			var mvbaPredicate func(int, dmvba.ProposalValue) bool
+			if predicate != nil {
+				mvbaPredicate = func(proposer int, value dmvba.ProposalValue) bool {
+					return value.Round == 1 && value.Hint == hint && predicate(proposer, value.Payload)
+				}
+			}
+			vec, runErr := dmvba.RunMVBACCommonSubset(ctx,
+				dmvba.Config{
 					SID: mvbaSID,
 					ID:  i, N: n, F: f,
 					MaxRounds:         maxR,
 					WaitSPBCTimeout:   spbcTimeout,
 					RouteSendTimeout:  routeSendTimeout,
 					UseEquivalentPath: true,
-				}, neti, signer, nil, recv[i], nil)
-				if err != nil {
-					runErr = err
+				},
+				neti, signer, recv[i],
+				dmvba.ProposalValue{Payload: payload, Round: 1, Hint: hint},
+				mvbaPredicate,
+			)
+			if runErr == nil {
+				selected := selectAgreedPayloads(vec, 1, hint, predicate)
+				if predicate != nil && len(selected) < n-f {
+					runErr = fmt.Errorf(
+						"common-subset output has too few valid proposals: have=%d need=%d",
+						len(selected), n-f,
+					)
 				} else {
-					dec, err := node.Run(ctx, dmvba.ProposalValue{Payload: payload, Round: 1, Hint: hint})
-					if err != nil {
-						runErr = err
-					} else {
-						outs[i] = [][]byte{append([]byte(nil), dec.Payload...)}
-					}
-				}
-			} else {
-				var mvbaPredicate func(int, dmvba.ProposalValue) bool
-				if predicate != nil {
-					mvbaPredicate = func(proposer int, value dmvba.ProposalValue) bool {
-						return value.Round == 1 && value.Hint == hint &&
-							predicate(proposer, value.Payload)
-					}
-				}
-				vec, err := dmvba.RunMVBACCommonSubset(ctx,
-					dmvba.Config{
-						SID: mvbaSID,
-						ID:  i, N: n, F: f,
-						MaxRounds:         maxR,
-						WaitSPBCTimeout:   spbcTimeout,
-						RouteSendTimeout:  routeSendTimeout,
-						UseEquivalentPath: true,
-					},
-					neti, signer, recv[i],
-					dmvba.ProposalValue{Payload: payload, Round: 1, Hint: hint},
-					mvbaPredicate,
-				)
-				if err != nil {
-					runErr = err
-				} else {
-					selected := selectAgreedPayloads(vec, 1, hint, predicate)
-					if predicate != nil && len(selected) < n-f {
-						runErr = fmt.Errorf(
-							"common-subset output has too few valid proposals: have=%d need=%d",
-							len(selected), n-f,
-						)
-					} else {
-						outs[i] = selected
-					}
+					outs[i] = selected
 				}
 			}
 			if runErr != nil {
@@ -912,14 +861,11 @@ func runArladkrMVBATCPInstance(
 	return nil, 0, fmt.Errorf("arladkr mvba tcp: no output")
 }
 
-func arlMVBAInstanceSID(base, instance string, direct bool) (string, error) {
+func arlMVBAInstanceSID(base, instance string) (string, error) {
 	if strings.TrimSpace(base) == "" {
 		return "", fmt.Errorf("empty ARL MVBA SID")
 	}
 	suffix := "-arl-mvba-tcp-cs"
-	if direct {
-		suffix = "-arl-mvba-tcp-direct"
-	}
 	if instance == "" {
 		return base + suffix, nil
 	}
@@ -946,15 +892,6 @@ func selectAgreedPayloads(
 		out = append(out, append([]byte(nil), pv.Payload...))
 	}
 	return out
-}
-
-func selectAgreedPayload(vec []*dmvba.ProposalValue) []byte {
-	for _, pv := range vec {
-		if pv != nil && len(pv.Payload) > 0 {
-			return append([]byte(nil), pv.Payload...)
-		}
-	}
-	return nil
 }
 
 // ── Key derivation ─────────────────────────────────────────────────────────

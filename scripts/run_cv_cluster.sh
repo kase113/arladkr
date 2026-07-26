@@ -52,9 +52,8 @@ for ((i=0; i<n; i++)); do
     export RLADKR_LISTENER_READY_DIR="$root/ready"
     export RLADKR_LISTENER_READY_NODE_COUNT="$n"
     "$binary" -n "$n" -f "$f" -runs 1 -epochs 1 \
-      -transport tcp-distributed -agreement-kernel commonsubset-tcp \
+      -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \
-      -apvss-provider cv-sapvss -arc-mode materialized -derive-mode scalar \
       -apvss-fallback-profile "$apvss_fallback_profile" \
       -allow-experimental-apvss="$allow_experimental_apvss" \
       -apvss-forced-fallback-count "$apvss_forced_fallback_count" \

@@ -36,8 +36,9 @@ type cvComponentGet struct {
 }
 
 type cvPendingComponentLeaf struct {
-	allowed map[int]struct{}
-	values  chan *cvLeaf
+	allowed    map[int]struct{}
+	descriptor *cvComponentDescriptor
+	values     chan cvComponentShard
 }
 
 type cvPendingARCShare struct {
@@ -74,6 +75,7 @@ type cvComponentService struct {
 	localNode            int
 	transport            agreementTransport
 	store                *cvComponentLeafStore
+	shardStore           *cvComponentShardStore
 	freshStore           *cvFreshShardStore
 	inbox                <-chan Message
 	receiverOrder        []int
@@ -82,19 +84,27 @@ type cvComponentService struct {
 
 	mu                         sync.Mutex
 	aggregateBuildMu           sync.Mutex
+	reselectionOnce            sync.Once
 	pendingACKs                map[string]chan cvComponentAck
+	pendingComponentStatements map[string][]byte
 	pendingLeaves              map[string]*cvPendingComponentLeaf
 	pendingARCs                map[string]*cvPendingARCShare
 	pendingRecoveries          map[string]*cvPendingRecovery
 	pendingReceipts            *cvPendingReceiptExchange
 	pendingLaneACKs            map[string]*apvssPendingLaneACKs
 	processingOffers           map[string]struct{}
-	candidateByMaterializer    map[int]string
+	componentStatementByDealer map[int][]byte
+	localARCShareByHeader      map[string][]byte
+	publishedReadyRoots        map[string]struct{}
+	acceptedReadyRoots         map[string]struct{}
+	readyDescriptorsByRoot     map[string][]*cvComponentDescriptor
+	pendingReadyCertificates   map[string]*cvComponentReadyCertificate
+	pendingReadyOffers         map[string][]Message
+	readyCandidates            chan []*cvComponentDescriptor
 	verifiedLeaves             map[string]*cvVerifiedLeaf
 	aggregateCertificates      map[string][]byte
 	verifiedAggregates         map[string]*cvAggregateTranscript
 	componentDescriptors       map[int]*cvComponentDescriptor
-	componentCandidatesChanged chan struct{}
 	done                       chan struct{}
 }
 
@@ -144,6 +154,10 @@ func newCVComponentServiceWithReceivers(
 	if err != nil {
 		return nil, err
 	}
+	shardStore, err := newCVComponentShardStore(c.ArtifactCacheDir)
+	if err != nil {
+		return nil, err
+	}
 	receiverIndex := make(map[int]int, len(receiverOrder))
 	if len(receiverOrder) > 0 {
 		expectedOrder := sortedUnique(c.NewCommittee)
@@ -177,23 +191,31 @@ func newCVComponentServiceWithReceivers(
 		localNode:                  localNode,
 		transport:                  transport,
 		store:                      store,
+		shardStore:                 shardStore,
 		freshStore:                 freshStore,
 		inbox:                      mergedInbox,
 		receiverOrder:              append([]int(nil), receiverOrder...),
 		receiverIndex:              receiverIndex,
 		localReceiverSecrets:       localSecrets,
 		pendingACKs:                make(map[string]chan cvComponentAck),
+		pendingComponentStatements: make(map[string][]byte),
 		pendingLeaves:              make(map[string]*cvPendingComponentLeaf),
 		pendingARCs:                make(map[string]*cvPendingARCShare),
 		pendingRecoveries:          make(map[string]*cvPendingRecovery),
 		pendingLaneACKs:            make(map[string]*apvssPendingLaneACKs),
 		processingOffers:           make(map[string]struct{}),
-		candidateByMaterializer:    make(map[int]string),
+		componentStatementByDealer: make(map[int][]byte),
+		localARCShareByHeader:      make(map[string][]byte),
+		publishedReadyRoots:        make(map[string]struct{}),
+		acceptedReadyRoots:         make(map[string]struct{}),
+		readyDescriptorsByRoot:     make(map[string][]*cvComponentDescriptor),
+		pendingReadyCertificates:   make(map[string]*cvComponentReadyCertificate),
+		pendingReadyOffers:         make(map[string][]Message),
+		readyCandidates:            make(chan []*cvComponentDescriptor, len(c.OldCommittee)+1),
 		verifiedLeaves:             make(map[string]*cvVerifiedLeaf),
 		aggregateCertificates:      make(map[string][]byte),
 		verifiedAggregates:         make(map[string]*cvAggregateTranscript),
 		componentDescriptors:       make(map[int]*cvComponentDescriptor),
-		componentCandidatesChanged: make(chan struct{}, 1),
 		done:                       make(chan struct{}),
 	}
 	for _, actorID := range actorIDs {
@@ -359,8 +381,19 @@ func (s *cvComponentService) disperseComponentWire(
 		!bytes.Equal(leafDigest, cvComponentLeafPayloadDigest(leafWire)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component payload")
 	}
-	artifactWire, err := cvComponentLeafArtifactCanonicalBytes(&cvComponentLeafArtifact{
-		dealer: dealer, leafDigest: leafDigest, leafWire: leafWire,
+	oldOrder := sortedUnique(s.cfg.OldCommittee)
+	dispersal, shards, err := cvDisperseComponent(
+		leafWire, len(oldOrder), len(oldOrder)-2*s.cfg.FOld,
+	)
+	if err != nil {
+		return nil, err
+	}
+	localIndex := sort.SearchInts(oldOrder, s.localNode)
+	if localIndex >= len(oldOrder) || oldOrder[localIndex] != s.localNode {
+		return nil, fmt.Errorf("CV-sAPVSS local component holder is outside old roster")
+	}
+	localArtifactWire, err := cvComponentShardArtifactCanonicalBytes(&cvComponentShardArtifact{
+		dealer: dealer, leafDigest: leafDigest, dispersal: *dispersal, shard: shards[localIndex],
 	})
 	if err != nil {
 		return nil, err
@@ -368,9 +401,15 @@ func (s *cvComponentService) disperseComponentWire(
 	if err := s.store.Put(s.cfg.SID, s.cfg.Epoch, dealer, s.localNode, leafDigest, leafWire); err != nil {
 		return nil, err
 	}
-	statement, err := cvComponentStatementDigest(dealer, leafDigest)
+	if err := s.shardStore.Put(s.cfg.SID, s.cfg.Epoch, dealer, s.localNode, leafDigest, localArtifactWire); err != nil {
+		return nil, err
+	}
+	statement, err := cvComponentStatementDigest(dealer, leafDigest, dispersal)
 	if err != nil {
 		return nil, err
+	}
+	if !s.claimComponentStatement(dealer, statement) {
+		return nil, fmt.Errorf("CV-sAPVSS dealer attempted a conflicting component statement")
 	}
 	localHolderSig, err := s.cfg.runtime.lockSigner.SignShare(
 		s.localNode, cvComponentLockSignatureDomain, statement,
@@ -384,14 +423,6 @@ func (s *cvComponentService) disperseComponentWire(
 	if err != nil {
 		return nil, err
 	}
-	initWire, err := cvComponentInitCanonicalBytes(&cvComponentInit{
-		artifactWire: artifactWire,
-		dealerSig:    dealerSig,
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	key := cvComponentKey(dealer, leafDigest)
 	acks := make(chan cvComponentAck, len(s.cfg.OldCommittee))
 	s.mu.Lock()
@@ -400,16 +431,28 @@ func (s *cvComponentService) disperseComponentWire(
 		return nil, fmt.Errorf("CV-sAPVSS component dispersal already active")
 	}
 	s.pendingACKs[key] = acks
+	s.pendingComponentStatements[key] = append([]byte(nil), statement...)
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.pendingACKs, key)
+		delete(s.pendingComponentStatements, key)
 		s.mu.Unlock()
 	}()
 
 	sent := 0
-	for _, holder := range sortedUnique(s.cfg.OldCommittee) {
+	for index, holder := range oldOrder {
 		if holder == s.localNode {
+			continue
+		}
+		artifactWire, artifactErr := cvComponentShardArtifactCanonicalBytes(&cvComponentShardArtifact{
+			dealer: dealer, leafDigest: leafDigest, dispersal: *dispersal, shard: shards[index],
+		})
+		if artifactErr != nil {
+			continue
+		}
+		initWire, initErr := cvComponentInitCanonicalBytes(&cvComponentInit{artifactWire: artifactWire, dealerSig: dealerSig})
+		if initErr != nil {
 			continue
 		}
 		if s.send(holder, cvTagComponentInit, initWire) == nil {
@@ -433,11 +476,6 @@ func (s *cvComponentService) disperseComponentWire(
 			}
 		}
 	}
-	holders := make([]int, 0, len(shares))
-	for holder := range shares {
-		holders = append(holders, holder)
-	}
-	sort.Ints(holders)
 	certificate, err := s.cfg.runtime.lockSigner.Recover(
 		cvComponentLockSignatureDomain, statement, shares,
 	)
@@ -445,11 +483,8 @@ func (s *cvComponentService) disperseComponentWire(
 		return nil, err
 	}
 	descriptor := &cvComponentDescriptor{
-		dealer:          dealer,
-		leafDigest:      append([]byte(nil), leafDigest...),
-		holders:         holders,
-		shareSignatures: shares,
-		certificate:     certificate,
+		dealer: dealer, leafDigest: append([]byte(nil), leafDigest...),
+		dispersal: *dispersal, certificate: certificate,
 	}
 	if err := cvValidateComponentDescriptor(s.cfg, descriptor); err != nil {
 		return nil, err
@@ -478,59 +513,15 @@ func (s *cvComponentService) CollectComponentCandidates(
 	if s.cfg.Kappa != want || ready < want {
 		return nil, fmt.Errorf("CV-sAPVSS component candidate selection requires K=f_o+1")
 	}
-	batchWindow := durationEnvMs("RLADKR_CV_CANDIDATE_BATCH_MS", 50*time.Millisecond)
-	var batchTimer *time.Timer
-	var batchDone <-chan time.Time
-	defer func() {
-		if batchTimer != nil {
-			batchTimer.Stop()
-		}
-	}()
-	for {
-		s.mu.Lock()
-		dealers := make([]int, 0, len(s.componentDescriptors))
-		for dealer := range s.componentDescriptors {
-			dealers = append(dealers, dealer)
-		}
-		sort.Ints(dealers)
-		if len(dealers) >= ready && batchTimer == nil {
-			batchTimer = time.NewTimer(batchWindow)
-			batchDone = batchTimer.C
-		}
-		if len(dealers) == len(s.cfg.OldCommittee) {
-			selected := make([]*cvComponentDescriptor, 0, ready)
-			for _, dealer := range dealers[:ready] {
-				selected = append(selected, s.componentDescriptors[dealer])
-			}
-			s.mu.Unlock()
-			return selected, nil
-		}
-		s.mu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-s.ctx.Done():
-			return nil, s.ctx.Err()
-		case <-batchDone:
-			s.mu.Lock()
-			dealers := make([]int, 0, len(s.componentDescriptors))
-			for dealer := range s.componentDescriptors {
-				dealers = append(dealers, dealer)
-			}
-			sort.Ints(dealers)
-			if len(dealers) < ready {
-				s.mu.Unlock()
-				return nil, fmt.Errorf("CV-sAPVSS candidate batch fell below availability threshold")
-			}
-			selected := make([]*cvComponentDescriptor, 0, ready)
-			for _, dealer := range dealers[:ready] {
-				selected = append(selected, s.componentDescriptors[dealer])
-			}
-			s.mu.Unlock()
-			return selected, nil
-		case <-s.componentCandidatesChanged:
-		}
+	s.maybePublishCanonicalReadyCertificate()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
+	case selected := <-s.readyCandidates:
+		s.reselectionOnce.Do(func() { go s.runReadyReselection() })
+		return selected, nil
 	}
 }
 
@@ -540,15 +531,208 @@ func (s *cvComponentService) acceptComponentDescriptorWire(wire []byte) error {
 		return err
 	}
 	s.mu.Lock()
-	if _, exists := s.componentDescriptors[descriptor.dealer]; !exists {
+	added := false
+	if existing, exists := s.componentDescriptors[descriptor.dealer]; !exists {
 		s.componentDescriptors[descriptor.dealer] = descriptor
+		added = true
+	} else {
+		existingWire, existingErr := cvComponentDescriptorCanonicalBytes(existing)
+		if existingErr != nil || !bytes.Equal(existingWire, wire) {
+			s.mu.Unlock()
+			return fmt.Errorf("conflicting certified CV-sAPVSS component for dealer=%d", descriptor.dealer)
+		}
 	}
 	s.mu.Unlock()
-	select {
-	case s.componentCandidatesChanged <- struct{}{}:
-	default:
+	if !added {
+		return nil
 	}
+	s.maybePublishCanonicalReadyCertificate()
+	s.retryPendingReadyCertificates()
 	return nil
+}
+
+func (s *cvComponentService) maybePublishCanonicalReadyCertificate() {
+	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
+	s.mu.Lock()
+	if len(s.componentDescriptors) < ready {
+		s.mu.Unlock()
+		return
+	}
+	dealers := make([]int, 0, len(s.componentDescriptors))
+	for dealer := range s.componentDescriptors {
+		dealers = append(dealers, dealer)
+	}
+	sort.Ints(dealers)
+	descriptors := make([]*cvComponentDescriptor, ready)
+	for i, dealer := range dealers[:ready] {
+		descriptors[i] = s.componentDescriptors[dealer]
+	}
+	s.mu.Unlock()
+	certificate, err := cvBuildComponentReadyCertificate(s.localNode, descriptors)
+	if err != nil {
+		return
+	}
+	key := fmt.Sprintf("%x", certificate.root)
+	s.mu.Lock()
+	if _, exists := s.publishedReadyRoots[key]; exists {
+		s.mu.Unlock()
+		return
+	}
+	s.publishedReadyRoots[key] = struct{}{}
+	s.acceptedReadyRoots[key] = struct{}{}
+	s.readyDescriptorsByRoot[key] = append([]*cvComponentDescriptor(nil), descriptors...)
+	s.mu.Unlock()
+	wire, err := cvComponentReadyCertificateCanonicalBytes(certificate)
+	if err != nil {
+		return
+	}
+	for _, node := range sortedUnique(s.cfg.OldCommittee) {
+		if node != s.localNode {
+			_ = s.send(node, cvTagComponentReady, wire)
+		}
+	}
+	select {
+	case s.readyCandidates <- descriptors:
+	case <-s.ctx.Done():
+	}
+}
+
+func (s *cvComponentService) resolveReadyCertificate(certificate *cvComponentReadyCertificate) ([]*cvComponentDescriptor, error) {
+	if certificate == nil || len(certificate.references) != len(s.cfg.OldCommittee)-s.cfg.FOld {
+		return nil, fmt.Errorf("invalid CV-sAPVSS ReadyCert")
+	}
+	s.mu.Lock()
+	descriptors := make([]*cvComponentDescriptor, len(certificate.references))
+	for i, reference := range certificate.references {
+		descriptor := s.componentDescriptors[reference.dealer]
+		descriptorWire, descriptorErr := cvComponentDescriptorCanonicalBytes(descriptor)
+		if descriptorErr != nil || !bytes.Equal(descriptor.leafDigest, reference.leafDigest) ||
+			!bytes.Equal(descriptorWire, reference.descriptorWire) {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("unresolved CV-sAPVSS ReadyCert component")
+		}
+		descriptors[i] = descriptor
+	}
+	s.mu.Unlock()
+	return descriptors, nil
+}
+
+func (s *cvComponentService) isCanonicalReadyPool(descriptors []*cvComponentDescriptor) bool {
+	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
+	if len(descriptors) != ready {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.componentDescriptors) < ready {
+		return false
+	}
+	dealers := make([]int, 0, len(s.componentDescriptors))
+	for dealer := range s.componentDescriptors {
+		dealers = append(dealers, dealer)
+	}
+	sort.Ints(dealers)
+	for i, dealer := range dealers[:ready] {
+		want := s.componentDescriptors[dealer]
+		got := descriptors[i]
+		wantWire, wantErr := cvComponentDescriptorCanonicalBytes(want)
+		gotWire, gotErr := cvComponentDescriptorCanonicalBytes(got)
+		if wantErr != nil || gotErr != nil || !bytes.Equal(wantWire, gotWire) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *cvComponentService) handleReadyCertificate(msg Message) {
+	certificate, err := cvDecodeComponentReadyCertificate(msg.Body, s.cfg)
+	if err != nil || certificate.proposer != msg.From {
+		return
+	}
+	for _, reference := range certificate.references {
+		if err := s.acceptComponentDescriptorWire(reference.descriptorWire); err != nil {
+			return
+		}
+	}
+	key := fmt.Sprintf("%x", certificate.root)
+	descriptors, err := s.resolveReadyCertificate(certificate)
+	if err != nil {
+		s.mu.Lock()
+		s.pendingReadyCertificates[key] = certificate
+		s.mu.Unlock()
+		return
+	}
+	if !s.isCanonicalReadyPool(descriptors) {
+		return
+	}
+	s.mu.Lock()
+	s.acceptedReadyRoots[key] = struct{}{}
+	s.readyDescriptorsByRoot[key] = append([]*cvComponentDescriptor(nil), descriptors...)
+	delete(s.pendingReadyCertificates, key)
+	s.mu.Unlock()
+	s.retryPendingReadyOffers(key)
+}
+
+func (s *cvComponentService) retryPendingReadyCertificates() {
+	s.mu.Lock()
+	pending := make(map[string]*cvComponentReadyCertificate, len(s.pendingReadyCertificates))
+	for key, certificate := range s.pendingReadyCertificates {
+		pending[key] = certificate
+	}
+	s.mu.Unlock()
+	for key, certificate := range pending {
+		descriptors, err := s.resolveReadyCertificate(certificate)
+		if err != nil {
+			continue
+		}
+		if !s.isCanonicalReadyPool(descriptors) {
+			s.mu.Lock()
+			delete(s.pendingReadyCertificates, key)
+			s.mu.Unlock()
+			continue
+		}
+		s.mu.Lock()
+		s.acceptedReadyRoots[key] = struct{}{}
+		s.readyDescriptorsByRoot[key] = append([]*cvComponentDescriptor(nil), descriptors...)
+		delete(s.pendingReadyCertificates, key)
+		s.mu.Unlock()
+		s.retryPendingReadyOffers(key)
+	}
+}
+
+func (s *cvComponentService) retryPendingReadyOffers(key string) {
+	s.mu.Lock()
+	pending := append([]Message(nil), s.pendingReadyOffers[key]...)
+	delete(s.pendingReadyOffers, key)
+	s.mu.Unlock()
+	for _, msg := range pending {
+		msg := msg
+		go s.handleAggregateOffer(msg)
+	}
+}
+
+func (s *cvComponentService) runReadyReselection() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case descriptors := <-s.readyCandidates:
+			_, _ = s.MaterializeAndCollectARC(s.ctx, descriptors)
+		}
+	}
+}
+
+func (s *cvComponentService) claimComponentStatement(dealer int, statement []byte) bool {
+	if dealer < 0 || len(statement) != 32 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.componentStatementByDealer[dealer]; len(existing) > 0 {
+		return bytes.Equal(existing, statement)
+	}
+	s.componentStatementByDealer[dealer] = append([]byte(nil), statement...)
+	return true
 }
 
 func (s *cvComponentService) Retrieve(
@@ -567,8 +751,9 @@ func (s *cvComponentService) Retrieve(
 		// Compact descriptors intentionally omit holder identities. Requests are
 		// sent to the complete old roster and authenticated leaf responses are
 		// accepted only after digest/dealer checks.
-		allowed: nodeSet(oldOrder),
-		values:  make(chan *cvLeaf, len(oldOrder)),
+		allowed:    nodeSet(oldOrder),
+		descriptor: descriptor,
+		values:     make(chan cvComponentShard, len(oldOrder)),
 	}
 	s.mu.Lock()
 	if _, exists := s.pendingLeaves[key]; exists {
@@ -597,14 +782,34 @@ func (s *cvComponentService) Retrieve(
 	if sent == 0 {
 		return nil, fmt.Errorf("CV-sAPVSS component retrieval reached no certificate holder")
 	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-s.ctx.Done():
-		return nil, s.ctx.Err()
-	case leaf := <-pending.values:
-		return leaf, nil
+	shards := make(map[int]cvComponentShard, descriptor.dispersal.dataShards)
+	for len(shards) < descriptor.dispersal.dataShards {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		case shard := <-pending.values:
+			if _, exists := shards[shard.index]; !exists {
+				shards[shard.index] = shard
+			}
+		}
 	}
+	leafWire, err := cvRecoverComponentWire(&descriptor.dispersal, len(oldOrder), shards)
+	if err != nil {
+		return nil, fmt.Errorf("recover CV-sAPVSS component: %w", err)
+	}
+	if !bytes.Equal(cvComponentLeafPayloadDigest(leafWire), descriptor.leafDigest) {
+		return nil, fmt.Errorf("recovered CV-sAPVSS component leaf digest mismatch")
+	}
+	if err := s.store.Put(s.cfg.SID, s.cfg.Epoch, descriptor.dealer, s.localNode, descriptor.leafDigest, leafWire); err != nil {
+		return nil, err
+	}
+	accepted, err := s.cacheVerifiedWire(descriptor.dealer, descriptor.leafDigest, leafWire)
+	if err != nil {
+		return nil, err
+	}
+	return accepted.leaf, nil
 }
 
 func (s *cvComponentService) run() {
@@ -630,6 +835,8 @@ func (s *cvComponentService) handle(msg Message) {
 		s.handleACK(msg)
 	case cvTagComponentCert:
 		_ = s.acceptComponentDescriptorWire(msg.Body)
+	case cvTagComponentReady:
+		s.handleReadyCertificate(msg)
 	case cvTagComponentGet:
 		s.handleGet(msg)
 	case cvTagComponentLeaf:
@@ -804,23 +1011,25 @@ func (s *cvComponentService) handleInit(msg Message) {
 	if err != nil {
 		return
 	}
-	dealer, digest, err := cvComponentLeafArtifactIdentity(init.artifactWire)
-	if err != nil || dealer != msg.From {
+	oldOrder := sortedUnique(s.cfg.OldCommittee)
+	expectedIndex := sort.SearchInts(oldOrder, s.localNode)
+	if expectedIndex >= len(oldOrder) || oldOrder[expectedIndex] != s.localNode {
 		return
 	}
-	statement, err := cvComponentStatementDigest(dealer, digest)
+	artifact, err := cvDecodeComponentShardArtifact(init.artifactWire, msg.From, len(s.cfg.OldCommittee))
+	if err != nil || artifact.dealer != msg.From || artifact.shard.index != expectedIndex {
+		return
+	}
+	statement, err := cvComponentStatementDigest(artifact.dealer, artifact.leafDigest, &artifact.dispersal)
 	if err != nil || !s.cfg.runtime.lockSigner.VerifyShare(
-		dealer, cvComponentDealerSignatureDomain, statement, init.dealerSig,
+		artifact.dealer, cvComponentDealerSignatureDomain, statement, init.dealerSig,
 	) {
 		return
 	}
-	artifact, err := cvDecodeAvailableComponentLeafArtifact(init.artifactWire, dealer)
-	if err != nil || !bytes.Equal(artifact.leafDigest, digest) {
+	if !s.claimComponentStatement(artifact.dealer, statement) {
 		return
 	}
-	if err := s.store.Put(
-		s.cfg.SID, s.cfg.Epoch, dealer, s.localNode, digest, artifact.leafWire,
-	); err != nil {
+	if err := s.shardStore.Put(s.cfg.SID, s.cfg.Epoch, artifact.dealer, s.localNode, artifact.leafDigest, init.artifactWire); err != nil {
 		return
 	}
 	sig, err := s.cfg.runtime.lockSigner.SignShare(
@@ -830,10 +1039,10 @@ func (s *cvComponentService) handleInit(msg Message) {
 		return
 	}
 	ackWire, err := cvComponentAckCanonicalBytes(&cvComponentAck{
-		dealer: dealer, holder: s.localNode, leafDigest: digest, signature: sig,
+		dealer: artifact.dealer, holder: s.localNode, leafDigest: artifact.leafDigest, signature: sig,
 	})
 	if err == nil {
-		_ = s.send(dealer, cvTagComponentAck, ackWire)
+		_ = s.send(artifact.dealer, cvTagComponentAck, ackWire)
 	}
 }
 
@@ -842,16 +1051,16 @@ func (s *cvComponentService) handleACK(msg Message) {
 	if err != nil || ack.holder != msg.From || ack.dealer != s.localNode {
 		return
 	}
-	statement, err := cvComponentStatementDigest(ack.dealer, ack.leafDigest)
-	if err != nil || !s.cfg.runtime.lockSigner.VerifyShare(
+	key := cvComponentKey(ack.dealer, ack.leafDigest)
+	s.mu.Lock()
+	ch := s.pendingACKs[key]
+	statement := append([]byte(nil), s.pendingComponentStatements[key]...)
+	s.mu.Unlock()
+	if len(statement) == 0 || !s.cfg.runtime.lockSigner.VerifyShare(
 		ack.holder, cvComponentLockSignatureDomain, statement, ack.signature,
 	) {
 		return
 	}
-	key := cvComponentKey(ack.dealer, ack.leafDigest)
-	s.mu.Lock()
-	ch := s.pendingACKs[key]
-	s.mu.Unlock()
 	if ch != nil {
 		select {
 		case ch <- *ack:
@@ -865,56 +1074,76 @@ func (s *cvComponentService) handleGet(msg Message) {
 	if err != nil {
 		return
 	}
-	leafWire, err := s.store.Read(
+	artifactWire, err := s.shardStore.Read(
 		s.cfg.SID, s.cfg.Epoch, request.dealer, s.localNode, request.leafDigest,
 	)
 	if err != nil {
 		return
 	}
-	artifactWire, err := cvComponentLeafArtifactCanonicalBytes(&cvComponentLeafArtifact{
-		dealer: request.dealer, leafDigest: request.leafDigest, leafWire: leafWire,
-	})
-	if err == nil {
-		_ = s.send(msg.From, cvTagComponentLeaf, artifactWire)
-	}
+	_ = s.send(msg.From, cvTagComponentLeaf, artifactWire)
 }
 
 func (s *cvComponentService) handleLeaf(msg Message) {
-	dealer, digest, err := cvComponentLeafArtifactIdentity(msg.Body)
-	if err != nil {
+	oldOrder := sortedUnique(s.cfg.OldCommittee)
+	expectedIndex := sort.SearchInts(oldOrder, msg.From)
+	if expectedIndex >= len(oldOrder) || oldOrder[expectedIndex] != msg.From {
 		return
 	}
-	key := cvComponentKey(dealer, digest)
 	s.mu.Lock()
-	pending := s.pendingLeaves[key]
+	pendingLeaves := make([]*cvPendingComponentLeaf, 0, len(s.pendingLeaves))
+	for _, pending := range s.pendingLeaves {
+		pendingLeaves = append(pendingLeaves, pending)
+	}
 	s.mu.Unlock()
-	if pending == nil {
+	for _, pending := range pendingLeaves {
+		if _, ok := pending.allowed[msg.From]; !ok || pending.descriptor == nil {
+			continue
+		}
+		artifact, err := cvDecodeComponentShardArtifact(msg.Body, pending.descriptor.dealer, len(s.cfg.OldCommittee))
+		if err != nil || !bytes.Equal(artifact.leafDigest, pending.descriptor.leafDigest) ||
+			artifact.shard.index != expectedIndex ||
+			!bytes.Equal(artifact.dispersal.root, pending.descriptor.dispersal.root) ||
+			artifact.dispersal.dataShards != pending.descriptor.dispersal.dataShards ||
+			!bytes.Equal(artifact.dispersal.payloadDigest, pending.descriptor.dispersal.payloadDigest) ||
+			!bytes.Equal(artifact.dispersal.nonce, pending.descriptor.dispersal.nonce) {
+			continue
+		}
+		select {
+		case pending.values <- artifact.shard:
+		default:
+		}
 		return
-	}
-	if _, ok := pending.allowed[msg.From]; !ok {
-		return
-	}
-	artifact, err := cvDecodeAvailableComponentLeafArtifact(msg.Body, dealer)
-	if err != nil {
-		return
-	}
-	if err := s.store.Put(
-		s.cfg.SID, s.cfg.Epoch, dealer, s.localNode, digest, artifact.leafWire,
-	); err != nil {
-		return
-	}
-	accepted, err := s.cacheVerifiedWire(dealer, digest, artifact.leafWire)
-	if err != nil {
-		return
-	}
-	select {
-	case pending.values <- accepted.leaf:
-	default:
 	}
 }
 
 func (s *cvComponentService) send(to int, tag string, payload []byte) error {
 	return s.sendFrom(s.localNode, to, tag, payload)
+}
+
+func (s *cvComponentService) localARCShare(headerDigest []byte) ([]byte, error) {
+	if len(headerDigest) != 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS ARC header digest")
+	}
+	key := fmt.Sprintf("%x", headerDigest)
+	s.mu.Lock()
+	if existing := s.localARCShareByHeader[key]; len(existing) > 0 {
+		share := append([]byte(nil), existing...)
+		s.mu.Unlock()
+		return share, nil
+	}
+	s.mu.Unlock()
+	share, err := s.cfg.runtime.lockSigner.SignShare(s.localNode, "RL_AGG_LOCK", headerDigest)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if existing := s.localARCShareByHeader[key]; len(existing) > 0 {
+		share = append([]byte(nil), existing...)
+	} else {
+		s.localARCShareByHeader[key] = append([]byte(nil), share...)
+	}
+	s.mu.Unlock()
+	return share, nil
 }
 
 func (s *cvComponentService) sendFrom(from, to int, tag string, payload []byte) error {
@@ -923,19 +1152,6 @@ func (s *cvComponentService) sendFrom(from, to int, tag string, payload []byte) 
 		return err
 	}
 	return s.transport.Send(Message{From: from, To: to, Tag: tag, Body: envelope})
-}
-
-func (s *cvComponentService) cacheVerifiedLeaf(
-	dealer int,
-	digest []byte,
-	leaf *cvLeaf,
-	canonicalWire []byte,
-) error {
-	accepted, err := cvAcceptedLeaf(s.leafCtx, leaf, canonicalWire)
-	if err != nil || !bytes.Equal(accepted.leafDigest, digest) {
-		return fmt.Errorf("invalid verified CV-sAPVSS component cache entry")
-	}
-	return s.cacheAcceptedLeaf(dealer, digest, accepted)
 }
 
 func (s *cvComponentService) cacheVerifiedWire(
@@ -1124,29 +1340,4 @@ func cvDecodeComponentGet(wire []byte) (*cvComponentGet, error) {
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS component GET")
 	}
 	return request, nil
-}
-
-func cvComponentLeafArtifactIdentity(wire []byte) (int, []byte, error) {
-	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvComponentLeafArtifactDomain))
-	if err != nil || !bytes.Equal(domain, []byte(cvComponentLeafArtifactDomain)) {
-		return 0, nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact domain")
-	}
-	dealer, err := r.uint64()
-	if err != nil || dealer > uint64(^uint(0)>>1) {
-		return 0, nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact dealer")
-	}
-	digest, err := r.bytes(32)
-	if err != nil || len(digest) != 32 {
-		return 0, nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact digest")
-	}
-	leafWire, err := r.bytes(cvMaxLeafWireBytes)
-	if err != nil || len(leafWire) == 0 || r.reader.Len() != 0 {
-		return 0, nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact framing")
-	}
-	leafDigest := cvComponentLeafPayloadDigest(leafWire)
-	if !bytes.Equal(digest, leafDigest) {
-		return 0, nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact framing")
-	}
-	return int(dealer), append([]byte(nil), digest...), nil
 }

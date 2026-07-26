@@ -91,18 +91,11 @@ func apvssLeafPrototypeCanonicalBytes(prototype *apvssLeafPrototype) ([]byte, er
 		cvWritePoint(&wire, &ack.signature.r)
 		cvWriteScalar(&wire, &ack.signature.z)
 	}
-	// An empty profile preserves the legacy exact-lane v1 wire. New encodings
-	// carry an unambiguous marker and explicit profile before the fallback count.
-	if prototype.fallbackProfile != "" {
-		if err := cvWriteUint32(&wire, apvssFallbackProfileMarker); err != nil {
-			return nil, err
-		}
-		if err := cvWriteBytes(
-			&wire,
-			[]byte(apvssNormalizeFallbackProfile(prototype.fallbackProfile)),
-		); err != nil {
-			return nil, err
-		}
+	if err := cvWriteUint32(&wire, apvssFallbackProfileMarker); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, []byte(prototype.fallbackProfile)); err != nil {
+		return nil, err
 	}
 	fallbackIndices, err := apvssPrototypeFallbackIndices(prototype)
 	if err != nil {
@@ -148,14 +141,6 @@ func apvssLeafPrototypeCanonicalBytes(prototype *apvssLeafPrototype) ([]byte, er
 		return nil, fmt.Errorf("APVSS leaf exceeds the wire safety limit")
 	}
 	return wire.Bytes(), nil
-}
-
-func apvssLeafPrototypeDigest(prototype *apvssLeafPrototype) []byte {
-	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
-	if err != nil {
-		return nil
-	}
-	return hashBytes([]byte(apvssLeafDigestDomain), wire)
 }
 
 func apvssDecodeLeafPrototype(
@@ -204,18 +189,18 @@ func apvssDecodeLeafPrototype(
 	if err != nil {
 		return nil, fmt.Errorf("decode APVSS fallback profile/count: %w", err)
 	}
-	fallbackCount := profileMarkerOrCount
-	if profileMarkerOrCount == apvssFallbackProfileMarker {
-		profileWire, err := r.bytes(128)
-		if err != nil {
-			return nil, fmt.Errorf("decode APVSS fallback proof profile: %w", err)
-		}
-		prototype.fallbackProfile = string(profileWire)
-		if err := apvssRequireFallbackBackend(prototype.fallbackProfile); err != nil {
-			return nil, err
-		}
-		fallbackCount, err = r.uint32()
+	if profileMarkerOrCount != apvssFallbackProfileMarker {
+		return nil, fmt.Errorf("missing APVSS fallback proof profile marker")
 	}
+	profileWire, err := r.bytes(128)
+	if err != nil {
+		return nil, fmt.Errorf("decode APVSS fallback proof profile: %w", err)
+	}
+	prototype.fallbackProfile = string(profileWire)
+	if err := apvssRequireFallbackBackend(prototype.fallbackProfile); err != nil {
+		return nil, err
+	}
+	fallbackCount, err := r.uint32()
 	if err != nil || fallbackCount < 0 || fallbackCount > expectedContext.sharingDegree {
 		return nil, fmt.Errorf("invalid APVSS fallback proof count")
 	}

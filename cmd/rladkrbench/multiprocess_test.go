@@ -14,8 +14,8 @@ import (
 	"rladkr_go/core"
 )
 
-func TestBenchMultiProcessLegacyOffPolicyStillRunsMVBA(t *testing.T) {
-	results := runBenchProcesses(t, "off")
+func TestBenchMultiProcessSingleMVBA(t *testing.T) {
+	results := runBenchProcesses(t)
 	if len(results) != 2 {
 		t.Fatalf("expected 2 bench results, got=%d", len(results))
 	}
@@ -24,7 +24,7 @@ func TestBenchMultiProcessLegacyOffPolicyStillRunsMVBA(t *testing.T) {
 			"success_runs=1",
 			"local_node_count=1",
 			"required_completed_nodes=1",
-			"fallback_policy=off",
+			"agreement_path=single-mvba",
 		} {
 			if !strings.Contains(line, token) {
 				t.Fatalf("legacy-off bench output missing token %q: %s", token, line)
@@ -33,32 +33,12 @@ func TestBenchMultiProcessLegacyOffPolicyStillRunsMVBA(t *testing.T) {
 	}
 }
 
-func TestBenchMultiProcessFallbackLocalNodeSubsets(t *testing.T) {
-	results := runBenchProcesses(t, "force")
-	if len(results) != 2 {
-		t.Fatalf("expected 2 bench results, got=%d", len(results))
-	}
-	for _, line := range results {
-		for _, token := range []string{
-			"success_runs=1",
-			"local_node_count=1",
-			"required_completed_nodes=1",
-			"fallback_policy=force",
-		} {
-			if !strings.Contains(line, token) {
-				t.Fatalf("fallback bench output missing token %q: %s", token, line)
-			}
-		}
-	}
-}
-
-func TestBenchMultiProcessFourNodePrivateStyleForceFallbackSubsets(t *testing.T) {
+func TestBenchMultiProcessFourNodePrivateStyleSubsets(t *testing.T) {
 	results := runBenchProcessesDetailedWithTopology(t, benchProcessTopology{
-		n:              4,
-		f:              1,
-		kappa:          2,
-		timeout:        20 * time.Second,
-		fallbackPolicy: "force",
+		n:       4,
+		f:       1,
+		kappa:   2,
+		timeout: 20 * time.Second,
 		localNodeSets: [][]int{
 			{0},
 			{1},
@@ -78,7 +58,7 @@ func TestBenchMultiProcessFourNodePrivateStyleForceFallbackSubsets(t *testing.T)
 			"success_runs=1",
 			"local_node_count=1",
 			"required_completed_nodes=1",
-			"fallback_policy=force",
+			"agreement_path=single-mvba",
 		} {
 			if !strings.Contains(line, token) {
 				t.Fatalf("four-node force bench output missing token %q: %s", token, line)
@@ -87,14 +67,13 @@ func TestBenchMultiProcessFourNodePrivateStyleForceFallbackSubsets(t *testing.T)
 	}
 }
 
-func runBenchProcesses(t *testing.T, fallbackPolicy string) []string {
+func runBenchProcesses(t *testing.T) []string {
 	t.Helper()
 	return runBenchLines(runBenchProcessesDetailedWithTopology(t, benchProcessTopology{
-		n:              2,
-		f:              0,
-		kappa:          1,
-		timeout:        20 * time.Second,
-		fallbackPolicy: fallbackPolicy,
+		n:       2,
+		f:       0,
+		kappa:   1,
+		timeout: 20 * time.Second,
 		localNodeSets: [][]int{
 			{0},
 			{1},
@@ -103,12 +82,11 @@ func runBenchProcesses(t *testing.T, fallbackPolicy string) []string {
 }
 
 type benchProcessTopology struct {
-	n              int
-	f              int
-	kappa          int
-	timeout        time.Duration
-	fallbackPolicy string
-	localNodeSets  [][]int
+	n             int
+	f             int
+	kappa         int
+	timeout       time.Duration
+	localNodeSets [][]int
 }
 
 func runBenchProcessesWithTopology(t *testing.T, topo benchProcessTopology) []string {
@@ -160,7 +138,6 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 		"-bind-host", "127.0.0.1",
 		"-base-port", fmt.Sprintf("%d", basePort),
 		"-timeout", topo.timeout.String(),
-		"-fallback-policy", topo.fallbackPolicy,
 	}
 	results := make([]benchProcResult, len(topo.localNodeSets))
 	chans := make([]chan benchProcResult, len(topo.localNodeSets))
@@ -190,14 +167,6 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 	for idx, res := range results {
 		if res.err != nil {
 			t.Fatalf("bench process %d failed: %v\nstdout:\n%s\nstderr:\n%s", idx, res.err, res.stdout, res.stderr)
-		}
-	}
-	if topo.fallbackPolicy == "force" {
-		for idx, res := range results {
-			t.Logf("fallback process %d stdout:\n%s", idx, res.stdout)
-			if strings.TrimSpace(res.stderr) != "" {
-				t.Logf("fallback process %d stderr:\n%s", idx, res.stderr)
-			}
 		}
 	}
 	return results

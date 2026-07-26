@@ -19,7 +19,6 @@ func TestAPVSSReceiverActorsCollectACKsV1(t *testing.T) {
 	cfg := NormalizeConfig(Config{
 		SID: string(fixture.context.sessionID), Epoch: int(fixture.context.epoch),
 		OldCommittee: oldNodes, NewCommittee: receiverOrder, FOld: 1, FNew: 1, Kappa: 2,
-		APVSSProvider: "cv-sapvss", ARCMode: "materialized",
 		APVSSFallbackProfile:   apvssFallbackCompactBatchProfile,
 		AllowExperimentalAPVSS: true, APVSSBenchmarkFallbackCount: 1,
 		LocalNodeIDs: oldNodes, ArtifactCacheDir: t.TempDir(),
@@ -85,7 +84,6 @@ func TestAPVSSReceiverActorsFeedAvailabilityAndVerifiedCacheV1(t *testing.T) {
 	cfg := NormalizeConfig(Config{
 		SID: string(fixture.context.sessionID), Epoch: int(fixture.context.epoch),
 		OldCommittee: oldNodes, NewCommittee: receiverOrder, FOld: 1, FNew: 1, Kappa: 2,
-		APVSSProvider: "cv-sapvss", ARCMode: "materialized",
 		LocalNodeIDs: oldNodes, ArtifactCacheDir: t.TempDir(),
 	})
 	if err := ensureRuntime(&cfg); err != nil {

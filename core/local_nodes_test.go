@@ -3,6 +3,7 @@ package core
 import (
 	"net"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -17,8 +18,8 @@ func TestNormalizeConfig_FiltersAndSortsLocalNodeIDs(t *testing.T) {
 		FNew:         1,
 		LocalNodeIDs: []int{3, 99, 1, 3},
 	})
-	if got, want := toKey(cfg.LocalNodeIDs), "1,3"; got != want {
-		t.Fatalf("unexpected normalized local node ids: got=%s want=%s", got, want)
+	if got, want := cfg.LocalNodeIDs, []int{1, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected normalized local node ids: got=%v want=%v", got, want)
 	}
 }
 
@@ -46,8 +47,8 @@ func TestParseLocalNodeIDsEnv(t *testing.T) {
 		t.Fatalf("Setenv failed: %v", err)
 	}
 	got := parseLocalNodeIDsEnv([]int{0, 1, 2, 3})
-	if want := "1,3"; toKey(got) != want {
-		t.Fatalf("unexpected parsed local ids: got=%s want=%s", toKey(got), want)
+	if want := []int{1, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected parsed local ids: got=%v want=%v", got, want)
 	}
 }
 

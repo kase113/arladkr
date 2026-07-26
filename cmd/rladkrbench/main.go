@@ -14,14 +14,11 @@ import (
 	"time"
 )
 
-const apvssProviderUsage = "APVSS provider: cv-sapvss"
-
 type runStat struct {
 	latencyMs                  float64
 	setupMs                    float64
 	completedNodes             float64
 	decidedSetMean             float64
-	fallbackUsed               bool
 	aggRLOReadyMs              float64
 	admitAggAttempts           float64
 	admitAggPasses             float64
@@ -91,7 +88,6 @@ type benchResultInput struct {
 	kappa                    int
 	runs                     int
 	timeoutMs                int64
-	policy                   string
 	apvssProvider            string
 	apvssFallbackProfile     string
 	apvssForcedFallbackCount int
@@ -102,11 +98,9 @@ type benchResultInput struct {
 	deriveMode               string
 	arcMode                  string
 	successRuns              int
-	fallbackRuns             int
 	localNodes               []int
 	requiredCompleted        int
 	ablationMode             string
-	adversaryMode            string
 	commMetrics              bool
 	stats                    []runStat
 }
@@ -126,23 +120,15 @@ func main() {
 		runTimeout               = flag.Duration("timeout", 90*time.Second, "timeout per epoch run")
 		waitSPBCTimeout          = flag.Duration("wait-spbc-timeout", 30*time.Second, "MVBA/SPBC wait timeout")
 		routeSendTimeout         = flag.Duration("route-send-timeout", 2*time.Second, "MVBA route send timeout")
-		fallbackPolicy           = flag.String("fallback-policy", "force", "legacy compatibility flag: off|auto|force; active ARL path always runs dumbomvba")
-		agreementKernel          = flag.String("agreement-kernel", "commonsubset-tcp", "agreement kernel: commonsubset-tcp|dumbomvba-direct|distributed-actor|legacy-sim")
-		apvssProvider            = flag.String("apvss-provider", "cv-sapvss", apvssProviderUsage)
 		apvssFallbackProfile     = flag.String("apvss-fallback-profile", "exact-lane", "APVSS fallback proof: exact-lane|compact-batch")
 		allowExperimentalAPVSS   = flag.Bool("allow-experimental-apvss", false, "allow an APVSS proof profile that has not passed production admission")
 		apvssForcedFallbackCount = flag.Int("apvss-forced-fallback-count", 0, "benchmark-only forced |I| (0 = natural ACK scheduling)")
 		apvssWaitAllACKs         = flag.Bool("apvss-wait-all-acks", false, "benchmark-only wait for all receiver ACKs to produce |I|=0")
-		deriveMode               = flag.String("derive-mode", "scalar", "derive mode: scalar")
 		precomputeRuntime        = flag.Bool("precompute-runtime", true, "prepare deterministic runtime/key material before protocol timing")
 		startAt                  = flag.Int64("start-at", 0, "unix timestamp to synchronise start across nodes (0 = start immediately)")
 		prepareOnly              = flag.Bool("prepare-only", false, "prepare deterministic runtime material and exit")
-		ablationMode             = flag.String("ablation-mode", "none", "security ablation mode: none|no-agclock|leader-select")
-		adversaryMode            = flag.String("adversary-mode", "none", "bench-only adversary mode: none|malicious-proposer-bad-agclock|malicious-proposer-leader-select-bias")
+		ablationMode             = flag.String("ablation-mode", "none", "security ablation mode: none|no-agclock")
 		commMetrics              = flag.Bool("comm-metrics", true, "enable protocol-layer communication byte counters")
-		arcMode                  = flag.String("arc-mode", "materialized", "aggregate recovery certificate mode: materialized")
-		recoverResponseMode      = flag.String("recover-response-mode", "network", "recover response mode: network|local")
-		maxARCCandidates         = flag.Int("max-arc-candidates-per-epoch", 0, "cap LockAgg ARC candidates per epoch (0 = protocol default, usually n-f)")
 		strictNetwork            = flag.Bool("strict-network", envBoolDefault("RLADKR_STRICT_NETWORK", true), "fail if benchmark config selects local/cache protocol shortcuts")
 		cvPublicKeyDir           = flag.String("cv-public-key-dir", os.Getenv("RLADKR_CV_PUBLIC_KEY_DIR"), "CV public receiver registry directory")
 		cvLocalSecretDir         = flag.String("cv-local-secret-dir", os.Getenv("RLADKR_CV_LOCAL_SECRET_DIR"), "CV local receiver secret directory")
@@ -171,7 +157,6 @@ func main() {
 	flag.Visit(func(f *flag.Flag) {
 		visited[f.Name] = true
 	})
-	apvssProviderName := strings.ToLower(strings.TrimSpace(*apvssProvider))
 	apvssFallbackProfileName := strings.ToLower(strings.TrimSpace(*apvssFallbackProfile))
 
 	if *runs <= 0 {
@@ -180,12 +165,6 @@ func main() {
 	}
 	if *epochs <= 0 {
 		*epochs = 1
-	}
-
-	policy := strings.ToLower(strings.TrimSpace(*fallbackPolicy))
-	if policy != "off" && policy != "auto" && policy != "force" {
-		fmt.Println("fallback-policy must be off|auto|force")
-		return
 	}
 
 	// Distributed start barrier: wait until --start-at before proceeding.
@@ -255,18 +234,12 @@ func main() {
 			AgreementBasePort:           *basePort,
 			WaitSPBCTimeout:             waitSPBCValue,
 			RouteSendTimeout:            routeSendValue,
-			APVSSProvider:               apvssProviderName,
 			APVSSFallbackProfile:        apvssFallbackProfileName,
 			AllowExperimentalAPVSS:      *allowExperimentalAPVSS,
 			APVSSBenchmarkFallbackCount: *apvssForcedFallbackCount,
 			APVSSBenchmarkWaitAllACKs:   *apvssWaitAllACKs,
-			DeriveMode:                  *deriveMode,
 			AblationMode:                *ablationMode,
-			AdversaryMode:               *adversaryMode,
 			CommMetrics:                 *commMetrics,
-			ARCMode:                     *arcMode,
-			RecoverResponseMode:         *recoverResponseMode,
-			MaxARCCandidatesPerEpoch:    *maxARCCandidates,
 			StrictNetwork:               *strictNetwork,
 			LocalNodeIDs:                localNodeIDs,
 			CVPublicKeyDir:              *cvPublicKeyDir,
@@ -282,14 +255,12 @@ func main() {
 	}
 
 	successRuns := 0
-	fallbackRuns := 0
 	stats := make([]runStat, 0, *runs*(*epochs))
 
 	for i := 0; i < *runs; i++ {
 		if i > 0 {
 			time.Sleep(2 * time.Second)
 		}
-		var states map[int]core.ReceiverState
 		runSuccess := true
 		for epoch := 1; epoch <= *epochs; epoch++ {
 			cfg := core.NormalizeConfig(core.Config{
@@ -300,34 +271,22 @@ func main() {
 				FOld:                        oldFaults,
 				FNew:                        newFaults,
 				Kappa:                       effectiveKappa,
-				ForceFallback:               true,
-				DisableFallback:             false,
-				DisableABAFallbackEstimate:  false,
-				DisableCoinBitFallback:      false,
-				AgreementKernel:             *agreementKernel,
 				AgreementTransport:          *transport,
 				AgreementBindHost:           *bindHost,
 				AgreementBasePort:           *basePort,
 				WaitSPBCTimeout:             waitSPBCValue,
 				RouteSendTimeout:            routeSendValue,
-				APVSSProvider:               apvssProviderName,
 				APVSSFallbackProfile:        apvssFallbackProfileName,
 				AllowExperimentalAPVSS:      *allowExperimentalAPVSS,
 				APVSSBenchmarkFallbackCount: *apvssForcedFallbackCount,
 				APVSSBenchmarkWaitAllACKs:   *apvssWaitAllACKs,
-				DeriveMode:                  *deriveMode,
 				AblationMode:                *ablationMode,
-				AdversaryMode:               *adversaryMode,
 				CommMetrics:                 *commMetrics,
-				ARCMode:                     *arcMode,
-				RecoverResponseMode:         *recoverResponseMode,
-				MaxARCCandidatesPerEpoch:    *maxARCCandidates,
 				StrictNetwork:               *strictNetwork,
 				LocalNodeIDs:                localNodeIDs,
 				CVPublicKeyDir:              *cvPublicKeyDir,
 				CVLocalSecretDir:            *cvLocalSecretDir,
 				CVLocalReceiverIDs:          localReceiverIDs,
-				InputReceiverStates:         states,
 			})
 
 			totalStart := time.Now()
@@ -370,13 +329,11 @@ func main() {
 				runSuccess = false
 				break
 			}
-			usedFallback := (res.AgreementMode == "fallback-mvba")
 			stats = append(stats, runStat{
 				latencyMs:                  float64(time.Since(totalStart).Microseconds()) / 1000.0,
 				setupMs:                    setupMs + float64(res.SetupLatency.Microseconds())/1000.0,
 				completedNodes:             completed,
 				decidedSetMean:             float64(len(res.LockedSet)),
-				fallbackUsed:               usedFallback,
 				aggRLOReadyMs:              float64(res.AggRLOReadyLatency.Microseconds()) / 1000.0,
 				admitAggAttempts:           float64(res.AdmitAggAttempts),
 				admitAggPasses:             float64(res.AdmitAggPasses),
@@ -438,18 +395,14 @@ func main() {
 				cvRecoverShardMs:           float64(res.CVRecoverShardLatency.Microseconds()) / 1000.0,
 				cvReceiptMs:                float64(res.CVReceiptLatency.Microseconds()) / 1000.0,
 			})
-			if usedFallback {
-				fallbackRuns++
-			}
-			states = res.ReceiverStates
-			traceBenchMain(localNodeIDs, "after_append_stats", fmt.Sprintf("run=%d epoch=%d states=%d", i+1, epoch, len(states)))
+			traceBenchMain(localNodeIDs, "after_append_stats", fmt.Sprintf("run=%d epoch=%d", i+1, epoch))
 		}
 		if runSuccess {
 			successRuns++
 		}
 	}
 
-	caps := core.APVSSCapabilitiesForConfig(core.Config{APVSSProvider: apvssProviderName})
+	caps := core.CurrentAPVSSCapabilities()
 	line := formatBenchResult(benchResultInput{
 		n:                        *n,
 		fOld:                     oldFaults,
@@ -457,22 +410,19 @@ func main() {
 		kappa:                    effectiveKappa,
 		runs:                     *runs,
 		timeoutMs:                runTimeoutValue.Milliseconds(),
-		policy:                   policy,
-		apvssProvider:            apvssProviderName,
+		apvssProvider:            "cv-sapvss",
 		apvssFallbackProfile:     apvssFallbackProfileName,
 		apvssForcedFallbackCount: *apvssForcedFallbackCount,
 		apvssWaitAllACKs:         *apvssWaitAllACKs,
 		experimentalAPVSS:        *allowExperimentalAPVSS,
 		apvssOutput:              string(caps.OutputKind),
 		securityProfile:          caps.SecurityProfile,
-		deriveMode:               *deriveMode,
-		arcMode:                  strings.ToLower(strings.TrimSpace(*arcMode)),
+		deriveMode:               "scalar",
+		arcMode:                  "materialized",
 		successRuns:              successRuns,
-		fallbackRuns:             fallbackRuns,
 		localNodes:               append([]int(nil), localNodeIDs...),
 		requiredCompleted:        requiredCompleted,
 		ablationMode:             strings.ToLower(strings.TrimSpace(*ablationMode)),
-		adversaryMode:            strings.ToLower(strings.TrimSpace(*adversaryMode)),
 		commMetrics:              *commMetrics,
 		stats:                    stats,
 	})
@@ -737,7 +687,7 @@ func formatBenchResult(in benchResultInput) string {
 	hashSummary := summarizeConsensusHash(in.stats)
 
 	line := fmt.Sprintf(
-		"E2E_BENCH_RESULT protocol=ARLADKR-GO mode=strict arc_mode=%s start_phase=protocol_start end_phase=local_decide apvss_provider=%s apvss_fallback_profile=%s apvss_forced_fallback_count=%d apvss_wait_all_acks=%t experimental_apvss=%t apvss_output=%s security_profile=%s derive_mode=%s n=%d f_old=%d f_new=%d kappa=%d runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s adversary_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f mean_setup_ms=%.2f mean_recover_barrier_wait_ms=%.2f mean_recover_service_grace_ms=%.2f mean_online_protocol_ms=%.2f mean_online_phase_wall_ms=%.2f mean_online_active_known_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f fallback_runs=%d mean_aggrlo_ready_ms=%.2f mean_header_obligation_ready_ms=%.2f admitagg_pass_ratio=%.4f recoveragg_success_ratio=%.4f disperse_ms=%.0f disperse_local_build_ms=%.0f disperse_broadcast_ms=%.0f disperse_read_wait_ms=%.0f disperse_trusted_ready_ms=%.0f disperse_aggregate_prewarm_ms=%.0f lockagg_ms=%.0f lockagg_ready_candidates_ms=%.0f lockagg_build_aggregate_ms=%.0f lockagg_arcshare_prepare_ms=%.0f lockagg_arcshare_attach_ms=%.0f lockagg_candidate_count=%.0f lockagg_arcshare_signed_count=%.0f lockagg_share_sign_ms=%.0f lockagg_cert_recover_ms=%.0f lockagg_local_admit_ms=%.0f mvba_only_ms=%.0f mvba_peer_wait_ms=%.0f mvba_active_known_ms=%.0f agreeagg_ms=%.0f recover_ms=%.0f recover_only_ms=%.0f recover_verify_ms=%.0f recover_collect_ms=%.0f recover_verify_only_ms=%.0f recover_materialize_ms=%.0f derive_ms=%.0f mean_total_sent_bytes=%.0f mean_total_recv_bytes=%.0f mean_agree_sent_bytes=%.0f mean_agree_recv_bytes=%.0f mean_recover_sent_bytes=%.0f mean_recover_recv_bytes=%.0f mean_recover_response_sent_bytes=%.0f mean_recover_response_recv_bytes=%.0f mean_derive_sent_bytes=%.0f mean_derive_recv_bytes=%.0f mean_agclock_prebroadcast_sent_bytes=%.0f mean_agclock_prebroadcast_recv_bytes=%.0f mean_arc_header_prebroadcast_sent_bytes=%.0f mean_arc_header_prebroadcast_recv_bytes=%.0f local_node_count=%d required_completed_nodes=%d consensus_hash=%s",
+		"E2E_BENCH_RESULT protocol=ARLADKR-GO mode=strict agreement_path=single-mvba arc_mode=%s start_phase=protocol_start end_phase=local_decide apvss_provider=%s apvss_fallback_profile=%s apvss_forced_fallback_count=%d apvss_wait_all_acks=%t experimental_apvss=%t apvss_output=%s security_profile=%s derive_mode=%s n=%d f_old=%d f_new=%d kappa=%d runs=%d timeout_ms=%d ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f mean_setup_ms=%.2f mean_recover_barrier_wait_ms=%.2f mean_recover_service_grace_ms=%.2f mean_online_protocol_ms=%.2f mean_online_phase_wall_ms=%.2f mean_online_active_known_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_aggrlo_ready_ms=%.2f mean_header_obligation_ready_ms=%.2f admitagg_pass_ratio=%.4f recoveragg_success_ratio=%.4f disperse_ms=%.0f disperse_local_build_ms=%.0f disperse_broadcast_ms=%.0f disperse_read_wait_ms=%.0f disperse_trusted_ready_ms=%.0f disperse_aggregate_prewarm_ms=%.0f lockagg_ms=%.0f lockagg_ready_candidates_ms=%.0f lockagg_build_aggregate_ms=%.0f lockagg_arcshare_prepare_ms=%.0f lockagg_arcshare_attach_ms=%.0f lockagg_candidate_count=%.0f lockagg_arcshare_signed_count=%.0f lockagg_share_sign_ms=%.0f lockagg_cert_recover_ms=%.0f lockagg_local_admit_ms=%.0f mvba_only_ms=%.0f mvba_peer_wait_ms=%.0f mvba_active_known_ms=%.0f agreeagg_ms=%.0f recover_ms=%.0f recover_only_ms=%.0f recover_verify_ms=%.0f recover_collect_ms=%.0f recover_verify_only_ms=%.0f recover_materialize_ms=%.0f derive_ms=%.0f mean_total_sent_bytes=%.0f mean_total_recv_bytes=%.0f mean_agree_sent_bytes=%.0f mean_agree_recv_bytes=%.0f mean_recover_sent_bytes=%.0f mean_recover_recv_bytes=%.0f mean_recover_response_sent_bytes=%.0f mean_recover_response_recv_bytes=%.0f mean_derive_sent_bytes=%.0f mean_derive_recv_bytes=%.0f mean_agclock_prebroadcast_sent_bytes=%.0f mean_agclock_prebroadcast_recv_bytes=%.0f mean_arc_header_prebroadcast_sent_bytes=%.0f mean_arc_header_prebroadcast_recv_bytes=%.0f local_node_count=%d required_completed_nodes=%d consensus_hash=%s",
 		arcMode,
 		in.apvssProvider,
 		in.apvssFallbackProfile,
@@ -753,9 +703,7 @@ func formatBenchResult(in benchResultInput) string {
 		in.kappa,
 		in.runs,
 		in.timeoutMs,
-		in.policy,
 		in.ablationMode,
-		in.adversaryMode,
 		in.commMetrics,
 		in.successRuns,
 		successRate,
@@ -771,7 +719,6 @@ func formatBenchResult(in benchResultInput) string {
 		p95Latency,
 		meanCompleted,
 		meanDecidedSet,
-		in.fallbackRuns,
 		meanAggRLOReady,
 		meanAggRLOReady,
 		admitAggPassRatio(admitPasses, admitAttempts),

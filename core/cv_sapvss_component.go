@@ -2,17 +2,46 @@ package core
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
-	"sort"
 )
 
 const (
-	cvComponentLeafArtifactDomain  = "ARL-CV-sAPVSS/component-leaf-artifact"
 	cvComponentDescriptorDomain    = "ARL-CV-sAPVSS/component-descriptor-certificate"
 	cvComponentStatementDomain     = "ARL-CV-sAPVSS/component-statement"
+	cvComponentPayloadDomain       = "ARL-CV-sAPVSS/component-payload"
+	cvComponentShardDomain         = "ARL-CV-sAPVSS/component-shard"
+	cvComponentShardNodeDomain     = "ARL-CV-sAPVSS/component-shard-node"
+	cvComponentShardArtifactDomain = "ARL-CV-sAPVSS/component-shard-artifact"
 	cvComponentLockSignatureDomain = "RL_CV_COMPONENT_LOCK"
 	cvMaxComponentSignatureBytes   = 1 << 20
 )
+
+// cvComponentDispersal is the public, constant-size commitment to a
+// component's RS encoding. A component lock binds this structure, rather than
+// merely binding the leaf digest. Merkle membership proves that each holder
+// stored its designated committed shard; reconstruction and the payload/leaf
+// digests remain mandatory because membership alone is not a proof that a
+// Byzantine dealer supplied a valid RS codeword.
+type cvComponentDispersal struct {
+	nonce         []byte
+	dataShards    int
+	payloadDigest []byte
+	root          []byte
+}
+
+type cvComponentShard struct {
+	index    int
+	payload  []byte
+	siblings [][]byte
+}
+
+type cvComponentShardArtifact struct {
+	dealer     int
+	leafDigest []byte
+	dispersal  cvComponentDispersal
+	shard      cvComponentShard
+}
 
 // cvComponentDescriptorCanonicalBytes is the compact, certificate-only
 // descriptor used on the CV-sAPVSS network path. Holder identities and their
@@ -20,13 +49,17 @@ const (
 // repeatedly embedded in every aggregate offer.
 func cvComponentDescriptorCanonicalBytes(descriptor *cvComponentDescriptor) ([]byte, error) {
 	if descriptor == nil || descriptor.dealer < 0 || len(descriptor.leafDigest) != 32 ||
-		len(descriptor.certificate) == 0 || len(descriptor.certificate) > cvMaxComponentSignatureBytes {
+		!cvValidComponentDispersal(&descriptor.dispersal) || len(descriptor.certificate) == 0 ||
+		len(descriptor.certificate) > cvMaxComponentSignatureBytes {
 		return nil, fmt.Errorf("invalid compact CV-sAPVSS component descriptor")
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvComponentDescriptorDomain))
 	cvWriteUint64(&wire, uint64(descriptor.dealer))
 	_ = cvWriteBytes(&wire, descriptor.leafDigest)
+	if err := cvWriteComponentDispersal(&wire, &descriptor.dispersal); err != nil {
+		return nil, err
+	}
 	_ = cvWriteBytes(&wire, descriptor.certificate)
 	return wire.Bytes(), nil
 }
@@ -52,11 +85,15 @@ func cvDecodeComponentDescriptor(wire []byte, oldNodes []int) (*cvComponentDescr
 	if err != nil || len(leafDigest) != 32 {
 		return nil, fmt.Errorf("invalid compact CV-sAPVSS component leaf digest")
 	}
+	dispersal, err := cvReadComponentDispersal(r)
+	if err != nil || !cvValidComponentDispersalForRoster(dispersal, len(oldNodes)) {
+		return nil, fmt.Errorf("invalid compact CV-sAPVSS component dispersal")
+	}
 	certificate, err := r.bytes(cvMaxComponentSignatureBytes)
 	if err != nil || len(certificate) == 0 || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid compact CV-sAPVSS component certificate")
 	}
-	descriptor := &cvComponentDescriptor{dealer: dealer, leafDigest: append([]byte(nil), leafDigest...), certificate: append([]byte(nil), certificate...)}
+	descriptor := &cvComponentDescriptor{dealer: dealer, leafDigest: append([]byte(nil), leafDigest...), dispersal: *dispersal, certificate: append([]byte(nil), certificate...)}
 	canonical, err := cvComponentDescriptorCanonicalBytes(descriptor)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical compact CV-sAPVSS component descriptor")
@@ -82,7 +119,7 @@ func cvValidateNetworkComponentDescriptor(cfg Config, descriptor *cvComponentDes
 	if _, err := cvDecodeComponentDescriptor(wire, c.OldCommittee); err != nil {
 		return err
 	}
-	statement, err := cvComponentStatementDigest(descriptor.dealer, descriptor.leafDigest)
+	statement, err := cvComponentStatementDigest(descriptor.dealer, descriptor.leafDigest, &descriptor.dispersal)
 	if err != nil {
 		return err
 	}
@@ -92,18 +129,11 @@ func cvValidateNetworkComponentDescriptor(cfg Config, descriptor *cvComponentDes
 	return nil
 }
 
-type cvComponentLeafArtifact struct {
-	dealer     int
-	leafDigest []byte
-	leafWire   []byte
-}
-
 type cvComponentDescriptor struct {
-	dealer          int
-	leafDigest      []byte
-	holders         []int
-	shareSignatures map[int][]byte
-	certificate     []byte
+	dealer      int
+	leafDigest  []byte
+	dispersal   cvComponentDispersal
+	certificate []byte
 }
 
 func cvComponentLeafPayloadDigest(wire []byte) []byte {
@@ -113,8 +143,8 @@ func cvComponentLeafPayloadDigest(wire []byte) []byte {
 	return hashBytes([]byte(cvLeafDigestDomain), wire)
 }
 
-func cvComponentStatementDigest(dealer int, leafDigest []byte) ([]byte, error) {
-	if dealer < 0 || len(leafDigest) != 32 {
+func cvComponentStatementDigest(dealer int, leafDigest []byte, dispersal *cvComponentDispersal) ([]byte, error) {
+	if dealer < 0 || len(leafDigest) != 32 || !cvValidComponentDispersal(dispersal) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component statement")
 	}
 	var wire bytes.Buffer
@@ -125,123 +155,265 @@ func cvComponentStatementDigest(dealer int, leafDigest []byte) ([]byte, error) {
 	if err := cvWriteBytes(&wire, leafDigest); err != nil {
 		return nil, err
 	}
+	if err := cvWriteComponentDispersal(&wire, dispersal); err != nil {
+		return nil, err
+	}
 	return hashBytes([]byte(cvComponentStatementDomain), wire.Bytes()), nil
 }
 
-func cvComponentLeafArtifactCanonicalBytes(artifact *cvComponentLeafArtifact) ([]byte, error) {
-	if artifact == nil || artifact.dealer < 0 || len(artifact.leafDigest) != 32 ||
-		len(artifact.leafWire) == 0 || len(artifact.leafWire) > cvMaxLeafWireBytes {
-		return nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact")
+func cvValidComponentDispersal(dispersal *cvComponentDispersal) bool {
+	return dispersal != nil && len(dispersal.nonce) == 32 && dispersal.dataShards > 0 &&
+		len(dispersal.payloadDigest) == 32 && len(dispersal.root) == 32
+}
+
+func cvValidComponentDispersalForRoster(dispersal *cvComponentDispersal, totalShards int) bool {
+	return totalShards > 0 && cvValidComponentDispersal(dispersal) && dispersal.dataShards <= totalShards
+}
+
+func cvWriteComponentDispersal(wire *bytes.Buffer, dispersal *cvComponentDispersal) error {
+	if !cvValidComponentDispersal(dispersal) {
+		return fmt.Errorf("invalid CV-sAPVSS component dispersal")
 	}
-	if !bytes.Equal(
-		artifact.leafDigest,
-		cvComponentLeafPayloadDigest(artifact.leafWire),
-	) {
-		return nil, fmt.Errorf("CV-sAPVSS component leaf artifact digest mismatch")
+	if err := cvWriteBytes(wire, dispersal.nonce); err != nil {
+		return err
+	}
+	if err := cvWriteUint32(wire, dispersal.dataShards); err != nil {
+		return err
+	}
+	if err := cvWriteBytes(wire, dispersal.payloadDigest); err != nil {
+		return err
+	}
+	return cvWriteBytes(wire, dispersal.root)
+}
+
+func cvReadComponentDispersal(r *cvWireReader) (*cvComponentDispersal, error) {
+	nonce, err := r.bytes(32)
+	if err != nil || len(nonce) != 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component dispersal nonce")
+	}
+	dataShards, err := r.uint32()
+	if err != nil {
+		return nil, err
+	}
+	payloadDigest, err := r.bytes(32)
+	if err != nil || len(payloadDigest) != 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component payload digest")
+	}
+	root, err := r.bytes(32)
+	if err != nil || len(root) != 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard root")
+	}
+	return &cvComponentDispersal{nonce: nonce, dataShards: dataShards, payloadDigest: payloadDigest, root: root}, nil
+}
+
+func cvDisperseComponent(leafWire []byte, totalShards, dataShards int) (*cvComponentDispersal, []cvComponentShard, error) {
+	if len(leafWire) == 0 || len(leafWire) > cvMaxLeafWireBytes || totalShards <= 0 || dataShards <= 0 || dataShards > totalShards {
+		return nil, nil, fmt.Errorf("invalid CV-sAPVSS component dispersal parameters")
+	}
+	packed := make([]byte, 8+len(leafWire))
+	binary.BigEndian.PutUint64(packed[:8], uint64(len(leafWire)))
+	copy(packed[8:], leafWire)
+	shards, err := cvErasureEncode(packed, dataShards, totalShards)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := hashBytes([]byte(cvComponentShardDomain), cvComponentLeafPayloadDigest(leafWire))
+	root, branches := cvBuildComponentMerkle(nonce, shards)
+	dispersal := &cvComponentDispersal{
+		nonce:         nonce,
+		dataShards:    dataShards,
+		payloadDigest: hashBytes([]byte(cvComponentPayloadDomain), leafWire),
+		root:          root,
+	}
+	encoded := make([]cvComponentShard, len(shards))
+	for i := range shards {
+		encoded[i] = cvComponentShard{index: i, payload: append([]byte(nil), shards[i]...), siblings: branches[i]}
+	}
+	return dispersal, encoded, nil
+}
+
+func cvVerifyComponentShard(dispersal *cvComponentDispersal, totalShards int, shard *cvComponentShard) error {
+	if !cvValidComponentDispersalForRoster(dispersal, totalShards) || shard == nil || shard.index < 0 || shard.index >= totalShards || len(shard.payload) == 0 {
+		return fmt.Errorf("invalid CV-sAPVSS component shard")
+	}
+	digest := cvComponentShardHash(dispersal.nonce, shard.index, shard.payload)
+	index := shard.index
+	for _, sibling := range shard.siblings {
+		if len(sibling) != 32 {
+			return fmt.Errorf("invalid CV-sAPVSS component shard branch")
+		}
+		if index%2 == 0 {
+			digest = hashBytes([]byte(cvComponentShardNodeDomain), digest, sibling)
+		} else {
+			digest = hashBytes([]byte(cvComponentShardNodeDomain), sibling, digest)
+		}
+		index /= 2
+	}
+	if !bytes.Equal(digest, dispersal.root) {
+		return fmt.Errorf("CV-sAPVSS component shard root mismatch")
+	}
+	return nil
+}
+
+func cvRecoverComponentWire(dispersal *cvComponentDispersal, totalShards int, available map[int]cvComponentShard) ([]byte, error) {
+	if !cvValidComponentDispersalForRoster(dispersal, totalShards) || len(available) < dispersal.dataShards {
+		return nil, fmt.Errorf("insufficient CV-sAPVSS component shards")
+	}
+	shards := make([][]byte, totalShards)
+	for index, shard := range available {
+		if index != shard.index || cvVerifyComponentShard(dispersal, totalShards, &shard) != nil {
+			return nil, fmt.Errorf("invalid CV-sAPVSS component shard during recovery")
+		}
+		shards[index] = append([]byte(nil), shard.payload...)
+	}
+	packed, err := cvErasureDecode(shards, dispersal.dataShards)
+	if err != nil || len(packed) < 8 {
+		return nil, fmt.Errorf("recover CV-sAPVSS component: %w", err)
+	}
+	length := binary.BigEndian.Uint64(packed[:8])
+	if length > uint64(len(packed)-8) || length > cvMaxLeafWireBytes {
+		return nil, fmt.Errorf("invalid recovered CV-sAPVSS component length")
+	}
+	leafWire := append([]byte(nil), packed[8:8+int(length)]...)
+	if !bytes.Equal(hashBytes([]byte(cvComponentPayloadDomain), leafWire), dispersal.payloadDigest) {
+		return nil, fmt.Errorf("recovered CV-sAPVSS component payload digest mismatch")
+	}
+	return leafWire, nil
+}
+
+func cvComponentShardHash(nonce []byte, index int, payload []byte) []byte {
+	var encoded [4]byte
+	binary.BigEndian.PutUint32(encoded[:], uint32(index))
+	return hashBytes([]byte(cvComponentShardDomain), nonce, encoded[:], payload)
+}
+
+func cvBuildComponentMerkle(nonce []byte, shards [][]byte) ([]byte, [][][]byte) {
+	levels := [][][]byte{make([][]byte, len(shards))}
+	for i := range shards {
+		levels[0][i] = cvComponentShardHash(nonce, i, shards[i])
+	}
+	for len(levels[len(levels)-1]) > 1 {
+		level := levels[len(levels)-1]
+		padded := level
+		if len(level)%2 == 1 {
+			padded = append(append([][]byte(nil), level...), level[len(level)-1])
+		}
+		next := make([][]byte, 0, len(padded)/2)
+		for i := 0; i < len(padded); i += 2 {
+			next = append(next, hashBytes([]byte(cvComponentShardNodeDomain), padded[i], padded[i+1]))
+		}
+		levels = append(levels, next)
+	}
+	branches := make([][][]byte, len(shards))
+	for i := range shards {
+		index := i
+		for depth := 0; depth < len(levels)-1; depth++ {
+			level := levels[depth]
+			sibling := index ^ 1
+			if sibling >= len(level) {
+				sibling = len(level) - 1
+			}
+			branches[i] = append(branches[i], append([]byte(nil), level[sibling]...))
+			index /= 2
+		}
+	}
+	return append([]byte(nil), levels[len(levels)-1][0]...), branches
+}
+
+func cvComponentShardArtifactCanonicalBytes(artifact *cvComponentShardArtifact) ([]byte, error) {
+	if artifact == nil || artifact.dealer < 0 || len(artifact.leafDigest) != 32 ||
+		!cvValidComponentDispersal(&artifact.dispersal) || artifact.shard.index < 0 || len(artifact.shard.payload) == 0 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard artifact")
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(cvComponentLeafArtifactDomain)); err != nil {
-		return nil, err
-	}
+	_ = cvWriteBytes(&wire, []byte(cvComponentShardArtifactDomain))
 	cvWriteUint64(&wire, uint64(artifact.dealer))
-	if err := cvWriteBytes(&wire, artifact.leafDigest); err != nil {
+	_ = cvWriteBytes(&wire, artifact.leafDigest)
+	if err := cvWriteComponentDispersal(&wire, &artifact.dispersal); err != nil {
 		return nil, err
 	}
-	if err := cvWriteBytes(&wire, artifact.leafWire); err != nil {
+	if err := cvWriteUint32(&wire, artifact.shard.index); err != nil {
 		return nil, err
+	}
+	if err := cvWriteBytes(&wire, artifact.shard.payload); err != nil {
+		return nil, err
+	}
+	if err := cvWriteUint32(&wire, len(artifact.shard.siblings)); err != nil {
+		return nil, err
+	}
+	for _, sibling := range artifact.shard.siblings {
+		if err := cvWriteBytes(&wire, sibling); err != nil {
+			return nil, err
+		}
 	}
 	return wire.Bytes(), nil
 }
 
-func cvDecodeComponentLeafArtifact(
-	wire []byte,
-	expectedContext *cvLeafContext,
-	expectedDealer int,
-) (*cvComponentLeafArtifact, *cvLeaf, error) {
-	if expectedContext == nil {
-		return nil, nil, fmt.Errorf("nil expected CV-sAPVSS leaf context")
-	}
-	artifact, err := cvDecodeAvailableComponentLeafArtifact(wire, expectedDealer)
-	if err != nil {
-		return nil, nil, err
-	}
-	leaf, err := cvDecodeLeaf(artifact.leafWire, expectedContext)
-	if err != nil {
-		return nil, nil, err
-	}
-	if leaf.dealerID != uint64(expectedDealer) || !bytes.Equal(leaf.digest, artifact.leafDigest) {
-		return nil, nil, fmt.Errorf("CV-sAPVSS component leaf artifact statement mismatch")
-	}
-	return artifact, leaf, nil
-}
-
-// cvDecodeAvailableComponentLeafArtifact validates only the immutable byte
-// statement certified by a component availability lock. It intentionally does
-// not verify the embedded APVSS proof.
-func cvDecodeAvailableComponentLeafArtifact(
-	wire []byte,
-	expectedDealer int,
-) (*cvComponentLeafArtifact, error) {
-	if expectedDealer < 0 || len(wire) == 0 ||
-		len(wire) > cvMaxLeafWireBytes+1<<20 {
-		return nil, fmt.Errorf("invalid expected CV-sAPVSS component leaf artifact")
+func cvDecodeComponentShardArtifact(wire []byte, expectedDealer, totalShards int) (*cvComponentShardArtifact, error) {
+	if expectedDealer < 0 || totalShards <= 0 {
+		return nil, fmt.Errorf("invalid expected CV-sAPVSS component shard")
 	}
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(cvComponentLeafArtifactDomain))
-	if err != nil || !bytes.Equal(domain, []byte(cvComponentLeafArtifactDomain)) {
-		return nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact domain")
+	domain, err := r.bytes(len(cvComponentShardArtifactDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvComponentShardArtifactDomain)) {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard artifact domain")
 	}
-	dealerWire, err := r.uint64()
-	if err != nil || dealerWire > uint64(^uint(0)>>1) || int(dealerWire) != expectedDealer {
-		return nil, fmt.Errorf("CV-sAPVSS component leaf artifact dealer mismatch")
+	dealer, err := r.uint64()
+	if err != nil || dealer > uint64(^uint(0)>>1) || int(dealer) != expectedDealer {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard dealer")
 	}
 	leafDigest, err := r.bytes(32)
 	if err != nil || len(leafDigest) != 32 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS component leaf digest")
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard digest")
 	}
-	leafWire, err := r.bytes(cvMaxLeafWireBytes)
-	if err != nil || len(leafWire) == 0 || r.reader.Len() != 0 {
-		return nil, fmt.Errorf("invalid CV-sAPVSS component leaf artifact framing")
+	dispersal, err := cvReadComponentDispersal(r)
+	if err != nil || !cvValidComponentDispersalForRoster(dispersal, totalShards) {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard dispersal")
 	}
-	if !bytes.Equal(leafDigest, cvComponentLeafPayloadDigest(leafWire)) {
-		return nil, fmt.Errorf("CV-sAPVSS component leaf artifact digest mismatch")
+	index, err := r.uint32()
+	if err != nil || index < 0 || index >= totalShards {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard index")
 	}
-	artifact := &cvComponentLeafArtifact{
-		dealer:     expectedDealer,
-		leafDigest: append([]byte(nil), leafDigest...),
-		leafWire:   append([]byte(nil), leafWire...),
+	payload, err := r.bytes(cvMaxLeafWireBytes)
+	if err != nil || len(payload) == 0 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard payload")
 	}
-	canonical, err := cvComponentLeafArtifactCanonicalBytes(artifact)
+	count, err := r.uint32()
+	if err != nil || count < 0 || count > 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard branch count")
+	}
+	siblings := make([][]byte, count)
+	for i := range siblings {
+		siblings[i], err = r.bytes(32)
+		if err != nil || len(siblings[i]) != 32 {
+			return nil, fmt.Errorf("invalid CV-sAPVSS component shard branch")
+		}
+	}
+	if r.reader.Len() != 0 {
+		return nil, fmt.Errorf("trailing CV-sAPVSS component shard bytes")
+	}
+	artifact := &cvComponentShardArtifact{dealer: int(dealer), leafDigest: leafDigest, dispersal: *dispersal, shard: cvComponentShard{index: index, payload: payload, siblings: siblings}}
+	if err := cvVerifyComponentShard(&artifact.dispersal, totalShards, &artifact.shard); err != nil {
+		return nil, err
+	}
+	canonical, err := cvComponentShardArtifactCanonicalBytes(artifact)
 	if err != nil || !bytes.Equal(canonical, wire) {
-		return nil, fmt.Errorf("non-canonical CV-sAPVSS component leaf artifact")
+		return nil, fmt.Errorf("non-canonical CV-sAPVSS component shard artifact")
 	}
 	return artifact, nil
 }
 
 func cvValidateComponentDescriptorShape(descriptor *cvComponentDescriptor) error {
 	if descriptor == nil || descriptor.dealer < 0 || len(descriptor.leafDigest) != 32 ||
-		len(descriptor.holders) == 0 ||
-		len(descriptor.shareSignatures) != len(descriptor.holders) ||
+		!cvValidComponentDispersal(&descriptor.dispersal) ||
 		len(descriptor.certificate) == 0 || len(descriptor.certificate) > cvMaxComponentSignatureBytes {
 		return fmt.Errorf("invalid CV-sAPVSS component descriptor")
-	}
-	if !sort.IntsAreSorted(descriptor.holders) {
-		return fmt.Errorf("non-canonical CV-sAPVSS component holder order")
-	}
-	for i, holder := range descriptor.holders {
-		if holder < 0 || (i > 0 && holder == descriptor.holders[i-1]) {
-			return fmt.Errorf("non-canonical CV-sAPVSS component holder order")
-		}
-		sig, ok := descriptor.shareSignatures[holder]
-		if !ok || len(sig) == 0 || len(sig) > cvMaxComponentSignatureBytes {
-			return fmt.Errorf("invalid CV-sAPVSS component holder signature")
-		}
 	}
 	return nil
 }
 
-// cvValidateComponentDescriptor validates the complete local recovery evidence.
-// The network wire carries only the recovered certificate.
+// cvValidateComponentDescriptor validates only the compact recovered
+// threshold certificate; individual signature shares never leave the collector.
 func cvValidateComponentDescriptor(cfg Config, descriptor *cvComponentDescriptor) error {
 	c := NormalizeConfig(cfg)
 	if err := ValidateConfig(c); err != nil {
@@ -260,38 +432,17 @@ func cvValidateComponentDescriptor(cfg Config, descriptor *cvComponentDescriptor
 	if _, ok := oldSet[descriptor.dealer]; !ok {
 		return fmt.Errorf("CV-sAPVSS component dealer is outside old roster")
 	}
-	if len(descriptor.holders) < len(c.OldCommittee)-c.FOld {
-		return fmt.Errorf("CV-sAPVSS component descriptor is below lock threshold")
+	if !cvValidComponentDispersalForRoster(&descriptor.dispersal, len(c.OldCommittee)) ||
+		descriptor.dispersal.dataShards != len(c.OldCommittee)-2*c.FOld {
+		return fmt.Errorf("invalid CV-sAPVSS component recovery threshold")
 	}
-	for _, holder := range descriptor.holders {
-		if _, ok := oldSet[holder]; !ok {
-			return fmt.Errorf("CV-sAPVSS component holder is outside old roster")
-		}
-	}
-	statement, err := cvComponentStatementDigest(descriptor.dealer, descriptor.leafDigest)
+	statement, err := cvComponentStatementDigest(descriptor.dealer, descriptor.leafDigest, &descriptor.dispersal)
 	if err != nil {
 		return err
 	}
-	shares := make(map[int][]byte, len(descriptor.holders))
-	for _, holder := range descriptor.holders {
-		sig := descriptor.shareSignatures[holder]
-		if !c.runtime.lockSigner.VerifyShare(
-			holder, cvComponentLockSignatureDomain, statement, sig,
-		) {
-			return fmt.Errorf("invalid CV-sAPVSS component lock share from holder=%d", holder)
-		}
-		shares[holder] = append([]byte(nil), sig...)
-	}
-	recovered, err := c.runtime.lockSigner.Recover(
-		cvComponentLockSignatureDomain, statement, shares,
-	)
-	if err != nil {
-		return fmt.Errorf("recover CV-sAPVSS component lock: %w", err)
-	}
-	if !bytes.Equal(recovered, descriptor.certificate) ||
-		!c.runtime.lockSigner.VerifyRecovered(
-			cvComponentLockSignatureDomain, statement, descriptor.certificate,
-		) {
+	if !c.runtime.lockSigner.VerifyRecovered(
+		cvComponentLockSignatureDomain, statement, descriptor.certificate,
+	) {
 		return fmt.Errorf("invalid CV-sAPVSS component lock certificate")
 	}
 	return nil

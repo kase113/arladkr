@@ -23,6 +23,29 @@ func cvTestCoins(count int, start uint64) []fr.Element {
 	return coins
 }
 
+func TestCVEvaluateCommitmentsUsesCachedPowersAndMatchesNaiveSum(t *testing.T) {
+	commitments := make([]bls12381.G1Affine, 43)
+	for i := range commitments {
+		scalar := cvTestScalar(uint64(i + 2))
+		commitments[i] = cvPointTimes(&genG1, &scalar)
+	}
+	powers := cvEvaluationPowers(len(commitments), 128)
+	again := cvEvaluationPowers(len(commitments), 128)
+	if &powers[0][0] != &again[0][0] {
+		t.Fatal("CV evaluation powers were not cached")
+	}
+	got := cvEvaluateCommitmentsWithPowers(commitments, powers[127])
+	zero := cvTestScalar(0)
+	want := cvPointTimes(&genG1, &zero)
+	for i := range commitments {
+		term := cvPointTimes(&commitments[i], &powers[127][i])
+		want.Add(&want, &term)
+	}
+	if !got.Equal(&want) {
+		t.Fatal("MSM commitment evaluation changed the accepted relation")
+	}
+}
+
 func TestCVAggregateVerifiedLeavesRejectsMutationAndContextReplay(t *testing.T) {
 	_, context, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&context, leaves)

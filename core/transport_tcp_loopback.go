@@ -110,10 +110,6 @@ func waitForRemoteNodeReadiness(cfg Config, t *tcpLoopbackTransport, nodes []int
 	return nil
 }
 
-func NewTCPLoopbackTransport(nodes []int, buffer int) (agreementTransport, error) {
-	return NewTCPLoopbackTransportWithOptions(Config{}, nodes, nodes, buffer, "0.0.0.0", 0)
-}
-
 func NewTCPLoopbackTransportWithOptions(
 	cfg Config,
 	nodes []int,

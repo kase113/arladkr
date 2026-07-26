@@ -43,17 +43,6 @@ type cvVerifiedLeaf struct {
 	canonicalWire []byte
 }
 
-func cvAcceptedAPVSSLeaf(
-	context *cvLeafContext,
-	prototype *apvssLeafPrototype,
-	canonicalWire []byte,
-) (*cvVerifiedLeaf, error) {
-	if err := apvssVerifyPrototype(context, prototype); err != nil {
-		return nil, err
-	}
-	return cvAcceptedDecodedAPVSSLeaf(context, prototype, canonicalWire)
-}
-
 // cvAcceptedDecodedAPVSSLeaf wraps a prototype returned by
 // apvssDecodeLeafPrototype. That decoder has already verified both the
 // structural leaf and its ACK/fallback partition.

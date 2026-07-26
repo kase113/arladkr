@@ -13,6 +13,10 @@ type cvComponentLeafStore struct {
 	root string
 }
 
+type cvComponentShardStore struct {
+	root string
+}
+
 type cvFreshShardStore struct {
 	root string
 }
@@ -22,6 +26,17 @@ func newCVComponentLeafStore(root string) (*cvComponentLeafStore, error) {
 		return nil, fmt.Errorf("empty CV-sAPVSS component store root")
 	}
 	store := &cvComponentLeafStore{root: filepath.Join(root, "component-leaves")}
+	if err := cvEnsurePrivateStoreDir(store.root); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func newCVComponentShardStore(root string) (*cvComponentShardStore, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, fmt.Errorf("empty CV-sAPVSS component shard store root")
+	}
+	store := &cvComponentShardStore{root: filepath.Join(root, "component-shards")}
 	if err := cvEnsurePrivateStoreDir(store.root); err != nil {
 		return nil, err
 	}
@@ -84,6 +99,33 @@ func (s *cvComponentLeafStore) path(
 	), nil
 }
 
+func (s *cvComponentShardStore) Put(sid string, epoch, dealer, holder int, leafDigest, artifact []byte) error {
+	path, err := s.path(sid, epoch, dealer, holder, leafDigest)
+	if err != nil {
+		return err
+	}
+	return cvPutImmutableFile(path, artifact)
+}
+
+func (s *cvComponentShardStore) Read(sid string, epoch, dealer, holder int, leafDigest []byte) ([]byte, error) {
+	path, err := s.path(sid, epoch, dealer, holder, leafDigest)
+	if err != nil {
+		return nil, err
+	}
+	return cvReadImmutableFile(path)
+}
+
+func (s *cvComponentShardStore) path(sid string, epoch, dealer, holder int, leafDigest []byte) (string, error) {
+	if s == nil || dealer < 0 {
+		return "", fmt.Errorf("invalid CV-sAPVSS component shard store key")
+	}
+	sidComponent, digest, err := cvStoreKeyParts(sid, epoch, holder, leafDigest)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(s.root, sidComponent, fmt.Sprintf("epoch-%d", epoch), fmt.Sprintf("holder-%d", holder), fmt.Sprintf("dealer-%d-%s.shard", dealer, digest)), nil
+}
+
 func (s *cvFreshShardStore) Put(
 	sid string,
 	epoch int,
@@ -137,7 +179,7 @@ func cvStoreKeyParts(sid string, epoch, holder int, digest []byte) (string, stri
 	if strings.TrimSpace(sid) == "" || epoch < 0 || holder < 0 || len(digest) != 32 {
 		return "", "", fmt.Errorf("invalid CV-sAPVSS store key")
 	}
-	base := sanitizeSID(safeCacheComponent(sid))
+	base := safeCacheComponent(sid)
 	base = strings.Trim(base, "._-")
 	if base == "" {
 		base = "sid"

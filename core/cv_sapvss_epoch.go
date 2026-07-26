@@ -62,14 +62,13 @@ func cvDecodeMaterializedAggRLOWitness(wire []byte, cfg Config) (*AggRLO, error)
 	if err != nil || len(digest) != 32 || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid compact CV-sAPVSS materialized AggRLO digest")
 	}
-	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold,
-		Holders: sortedUnique(c.OldCommittee), Certificate: certificate}, Aggregate: APVSSAggregate{
+	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold, Certificate: certificate}, Aggregate: APVSSAggregate{
 		Provider: "cv-sapvss", Dealers: append([]int(nil), header.Dealers...),
 		AggregateDigest: append([]byte(nil), header.AggregateDigest...)}, Digest: digest}
 	if _, err := validateAggRLOShape(c, rlo); err != nil {
 		return nil, err
 	}
-	if err := validateAggRLOLock(c, rlo, true); err != nil {
+	if err := validateAggRLOLock(c, rlo); err != nil {
 		return nil, err
 	}
 	if err := validateAggRLODigest(rlo); err != nil {
@@ -371,7 +370,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		RecoverLatency:      recoverLatency, RecoverOnlyLatency: recoverLatency, DeriveLatency: receiptLatency,
 		TotalSentBytes: totalSent, TotalRecvBytes: totalRecv, PhaseSentBytes: phaseSent, PhaseRecvBytes: phaseRecv,
 		NewShares: shares, NewPublicKey: publicKey, CVReceipts: receipts,
-		CVComponentCount: len(descriptors), CVARCHolderCount: len(decidedRLO.Lock.Holders),
+		CVComponentCount: len(descriptors), CVARCHolderCount: decidedRLO.Lock.Threshold,
 		CVRecoveredShardCount: len(cfg.OldCommittee) - 2*cfg.FOld, CVVerifiedReceiptCount: len(receipts),
 		CVLeafBuildLatency:         leafBuildLatency,
 		CVComponentDisperseLatency: componentLatency, CVCommonCandidateLatency: commonLatency,

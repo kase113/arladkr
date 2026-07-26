@@ -1,93 +1,68 @@
 # ARL-ADKR Go Prototype
 
-This repository is a research prototype for evaluating the ARL-ADKR protocol
-pipeline. Its main contribution boundary is the distributed protocol and its
-recovery-lock integration. PVSS is a replaceable component behind the `APVSS`
-provider interface; this code does not claim a new stand-alone PVSS primitive.
+This repository contains one ARL-ADKR research path built around the
+scalar-output CV-sAPVSS construction. It does not expose interchangeable PVSS
+providers or legacy agreement/recovery modes.
 
-## APVSS providers and security boundary
+## Protocol path
 
-| Provider | Recovered output | Received transcript / aggregate-input checks | Security profile | Scalar threshold-key output |
-|---|---|---|---|---:|
-| `optrand` | digest (`emulated`) | protocol-emulator checks | `protocol-emulator` | no |
-| `bls-pvss` | digest of verified BLS12-381 share material (`group-element`) | yes | `group-element-prototype` | no |
-| `scalar-shamir` | degree-`F` Edwards25519 scalar shares and matching public key (`scalar`) | received artifact, list aggregate, decrypted share, and recovered-output checks | `functional-scalar-prototype` | yes |
-| `paillier-scalar` | scalar candidate | not wired into this Go prototype | unavailable | no |
+```text
+CV-sAPVSS ACK/I leaf
+-> component RS shard availability lock
+-> ReadyCert + deterministic FirstKValid
+-> holder-local aggregate verification and fresh RS dispersal
+-> recovered ARC certificate
+-> one predicate-capable common-subset MVBA
+-> one aggregate recovery
+-> scalar shares and public receipts
+```
 
-The BLS provider encodes `SID`, epoch, dealer, receiver order, commitments,
-encrypted shares, and its Schnorr proof in a canonical transcript. `Ver` and
-`Agg` consume and verify received artifacts. Recover-time fragment responses
-carry that canonical transcript and a separately domain-separated digest.
+The APVSS transcript keeps every receiver ciphertext so the agreed aggregate
+is self-contained. Receivers that acknowledge a lane bind a signed statement;
+the complement set `I` carries an exact-lane proof or the experimental compact
+batch proof. The compact backend remains behind `-allow-experimental-apvss`
+pending proof alignment and independent cryptographic review.
 
-The BLS dealer samples fresh polynomial coefficients. Runtime/setup keys are
-still deterministically generated for this prototype, so the provider does not
-advertise production randomness. Its Schnorr proof establishes knowledge of
-`DLOG_G1(zeta)`; it is not described as a cross-group Chaum-Pedersen equality
-proof. The sharing polynomial currently has degree `n-f-1`, which is distinct
-from the degree-`f` scalar-output construction considered in the paper design.
-
-`scalar-shamir` uses threshold `F+1` and polynomial degree `F`. Its list-backed
-aggregate binds the exact received dealer artifacts; Recover decrypts and
-verifies every receiver share, adds the scalars, and returns the aggregate
-shares and matching constant-term public commitment directly. It is a
-functional integration provider, not a compact homomorphic APVSS: ciphertext
-correctness is not publicly proved before receiver decryption, runtime
-randomness/setup remain prototype-only, and IND2/ZK/ROM security is not closed.
-
-Wire versions are provider-local. Legacy Optrand uses schema-v1 with an omitted
-provider field; scalar Shamir uses `(provider=scalar-shamir, schema=1)` in its
-transcript, share packet, and VE binding. Paillier would own a separate
-`(paillier-scalar, schema=1)` codec; there is no global Edwards-v1/Paillier-v2
-mapping.
-
-`--derive-mode=scalar` fails closed unless a provider explicitly advertises all
-scalar-output, received-input verification, verifiable-share, and threshold-key
-capabilities. In this prototype only `scalar-shamir` satisfies that functional
-gate. The default `--derive-mode=aggregate` remains an explicit hash-derived
-protocol emulator; it must not be reported as a deployed scalar PVSS
-key-derivation path.
-
-## Provider boundary
-
-- `core/apvss_iface.go` contains only shared types, the interface, and provider selection.
-- `core/apvss_optrand_provider.go` adapts the protocol emulator.
-- `core/apvss_bls_provider.go` adapts the BLS12-381 group-element prototype.
-- `core/apvss_scalar_shamir_provider.go` implements the functional scalar path.
-- `core/apvss_list_aggregate.go` contains the provider-neutral list-backed container.
-- `core/apvss_capabilities.go` is the capability gate used by recovery and benchmarks.
-
-Benchmark output includes `apvss_provider`, `apvss_output`, `security_profile`,
-and `derive_mode`, preventing results from silently mixing emulator, BLS, and
-functional scalar runs.
+Component descriptors and aggregate locks carry recovered threshold
+certificates only. Individual signature shares stay at the collector and are
+discarded after certificate recovery. The final agreement object is a compact,
+materialized `AggRLO`; there is no fastlane/fallback agreement selector and no
+second MVBA.
 
 ## Build and test
 
-The module currently expects its MVBA dependency as a sibling checkout because
-`go.mod` contains `replace dumbomvba_go => ../dumbomvba-go`.
+The module expects its MVBA dependency as a sibling checkout because `go.mod`
+contains `replace dumbomvba_go => ../dumbomvba-go`.
 
 ```sh
-go test ./...
-go test -race ./core ./cmd/rladkrbench
-go vet ./core ./cmd/rladkrbench
-go build -buildvcs=false -o /tmp/arladkr-rladkrbench ./cmd/rladkrbench
+go test ./... -run '^$' -count=1
+go test ./core -count=1 -timeout=10m
+go test ./cmd/rladkrbench -count=1 -timeout=5m
+go test -race ./core -run 'Ready|AggregateManifest|LocalARC' -count=1 -timeout=5m
+go build -buildvcs=false -o bin/rladkrbench ./cmd/rladkrbench
 ```
 
-Example benchmark flags:
+Run a local multi-process TCP cluster:
 
 ```sh
-go run ./cmd/rladkrbench --apvss-provider=optrand --derive-mode=aggregate
-go run ./cmd/rladkrbench --apvss-provider=bls-pvss --derive-mode=aggregate
-go run ./cmd/rladkrbench --apvss-provider=scalar-shamir --derive-mode=scalar
+./scripts/run_cv_cluster.sh 4 1 /tmp/arladkr-cv 41000
 ```
 
-Current scalar-provider ledger:
+Relevant benchmark controls are `-f-old`, `-f-new`, `-kappa`,
+`-apvss-fallback-profile`, `-apvss-forced-fallback-count`,
+`-apvss-wait-all-acks`, network timeouts, and CV key/store directories.
+Benchmark output fixes the architecture labels to
+`agreement_path=single-mvba`, `apvss_provider=cv-sapvss`,
+`arc_mode=materialized`, and `derive_mode=scalar`.
 
-```text
-functional degree-F scalar provider wired into Go = true
-real threshold shares/public key returned = true
-compact scalar APVSS = false
-Paillier scalar provider = false
-production setup/randomness = false
-formal IND2/ZK/ROM closure = false
-bare.tex modified = false
-```
+## Security boundary
+
+- Static corruption is the current target; dynamic corruption and forward-secure
+  encryption are outside this implementation scope.
+- `compact-batch` is experimental. It must not be reported as production-ready.
+- Component RS plus Merkle membership is a retrievability prototype, not a full
+  Byzantine codeword proof. Recovered payload, leaf digest, and APVSS validity
+  are still checked before aggregation.
+- ReadyCert plus reselection does not prove that only one candidate header can
+  exist. The protocol keeps one final MVBA but may materialize multiple valid
+  candidates before agreement.

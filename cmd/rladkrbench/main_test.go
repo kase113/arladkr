@@ -48,7 +48,6 @@ func TestFormatBenchResultIncludesARLADKRMetrics(t *testing.T) {
 			recoverServiceGraceMs: 30,
 			completedNodes:        4,
 			decidedSetMean:        3,
-			fallbackUsed:          false,
 			aggRLOReadyMs:         5,
 			admitAggAttempts:      2,
 			admitAggPasses:        2,
@@ -61,7 +60,6 @@ func TestFormatBenchResultIncludesARLADKRMetrics(t *testing.T) {
 			recoverServiceGraceMs: 60,
 			completedNodes:        4,
 			decidedSetMean:        3,
-			fallbackUsed:          true,
 			aggRLOReadyMs:         7,
 			admitAggAttempts:      2,
 			admitAggPasses:        1,
@@ -75,13 +73,11 @@ func TestFormatBenchResultIncludesARLADKRMetrics(t *testing.T) {
 		kappa:           2,
 		runs:            2,
 		timeoutMs:       90000,
-		policy:          "auto",
-		apvssProvider:   "optrand",
-		apvssOutput:     "emulated",
-		securityProfile: "protocol-emulator",
-		deriveMode:      "aggregate",
+		apvssProvider:   "cv-sapvss",
+		apvssOutput:     "scalar",
+		securityProfile: "static-cv-sapvss-phase1-materialized",
+		deriveMode:      "scalar",
 		successRuns:     2,
-		fallbackRuns:    1,
 		stats:           stats,
 	})
 	for _, token := range []string{
@@ -92,20 +88,14 @@ func TestFormatBenchResultIncludesARLADKRMetrics(t *testing.T) {
 		"mean_online_protocol_ms=105.00",
 		"mean_online_phase_wall_ms=60.00",
 		"protocol=ARLADKR-GO",
-		"apvss_provider=optrand",
-		"apvss_output=emulated",
-		"security_profile=protocol-emulator",
-		"derive_mode=aggregate",
+		"apvss_provider=cv-sapvss",
+		"apvss_output=scalar",
+		"security_profile=static-cv-sapvss-phase1-materialized",
+		"derive_mode=scalar",
 	} {
 		if !strings.Contains(line, token) {
 			t.Fatalf("benchmark output missing token %q: %s", token, line)
 		}
-	}
-}
-
-func TestAPVSSProviderFlagUsageIsCVOnly(t *testing.T) {
-	if apvssProviderUsage != "APVSS provider: cv-sapvss" {
-		t.Fatalf("APVSS provider usage is not CV-only: %q", apvssProviderUsage)
 	}
 }
 
@@ -142,34 +132,6 @@ func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
 	} {
 		if !strings.Contains(line, token) {
 			t.Fatalf("CV benchmark output missing %q: %s", token, line)
-		}
-	}
-}
-
-func TestFormatBenchResultIncludesScalarShamirSecurityMetadata(t *testing.T) {
-	line := formatBenchResult(benchResultInput{
-		n:               4,
-		fOld:            1,
-		fNew:            1,
-		kappa:           2,
-		runs:            1,
-		timeoutMs:       90000,
-		policy:          "force",
-		apvssProvider:   "scalar-shamir",
-		apvssOutput:     "scalar",
-		securityProfile: "functional-scalar-prototype",
-		deriveMode:      "scalar",
-		successRuns:     1,
-		stats:           []runStat{{latencyMs: 1, completedNodes: 4}},
-	})
-	for _, token := range []string{
-		"apvss_provider=scalar-shamir",
-		"apvss_output=scalar",
-		"security_profile=functional-scalar-prototype",
-		"derive_mode=scalar",
-	} {
-		if !strings.Contains(line, token) {
-			t.Fatalf("scalar benchmark output missing %q: %s", token, line)
 		}
 	}
 }

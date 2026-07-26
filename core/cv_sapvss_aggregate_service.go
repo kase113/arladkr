@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"time"
 )
@@ -35,6 +36,7 @@ type cvFreshShardArtifact struct {
 type cvAggregateManifestOffer struct {
 	header      AggHeader
 	descriptors []*cvComponentDescriptor
+	readyRoot   []byte
 	root        []byte
 }
 
@@ -56,7 +58,7 @@ func cvComponentManifestRoot(descriptors []*cvComponentDescriptor) ([]byte, erro
 }
 
 func cvAggregateManifestOfferCanonicalBytes(offer *cvAggregateManifestOffer) ([]byte, error) {
-	if offer == nil || len(offer.root) != 32 || (len(offer.descriptors) > 0 && len(offer.descriptors) != len(offer.header.Dealers)) {
+	if offer == nil || len(offer.readyRoot) != 32 || len(offer.root) != 32 || (len(offer.descriptors) > 0 && len(offer.descriptors) != len(offer.header.Dealers)) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest offer")
 	}
 	headerWire, err := cvNetworkAggHeaderCanonicalBytes(offer.header)
@@ -72,6 +74,7 @@ func cvAggregateManifestOfferCanonicalBytes(offer *cvAggregateManifestOffer) ([]
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvAggregateOfferDomain))
 	_ = cvWriteBytes(&wire, headerWire)
+	_ = cvWriteBytes(&wire, offer.readyRoot)
 	_ = cvWriteBytes(&wire, offer.root)
 	return wire.Bytes(), nil
 }
@@ -90,6 +93,10 @@ func cvDecodeAggregateManifestOffer(wire []byte, cfg Config) (*cvAggregateManife
 	if err != nil {
 		return nil, err
 	}
+	readyRoot, err := r.bytes(32)
+	if err != nil || len(readyRoot) != 32 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate ReadyCert root")
+	}
 	root, err := r.bytes(32)
 	if err != nil || len(root) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest root")
@@ -97,7 +104,7 @@ func cvDecodeAggregateManifestOffer(wire []byte, cfg Config) (*cvAggregateManife
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest framing")
 	}
-	offer := &cvAggregateManifestOffer{header: header, root: append([]byte(nil), root...)}
+	offer := &cvAggregateManifestOffer{header: header, readyRoot: append([]byte(nil), readyRoot...), root: append([]byte(nil), root...)}
 	canonical, err := cvAggregateManifestOfferCanonicalBytes(offer)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS aggregate manifest offer")
@@ -358,8 +365,19 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	metrics := cvAggregateMaterializeMetrics{}
 	want := s.cfg.FOld + 1
 	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
-	if ctx == nil || len(descriptors) < want || len(descriptors) > ready {
-		return nil, fmt.Errorf("CV-sAPVSS network materializer requires K through n_o-f_o descriptors")
+	if ctx == nil || len(descriptors) != ready {
+		return nil, fmt.Errorf("CV-sAPVSS network materializer requires one n_o-f_o ReadyCert pool")
+	}
+	readyCertificate, err := cvBuildComponentReadyCertificate(s.localNode, descriptors)
+	if err != nil {
+		return nil, err
+	}
+	readyKey := fmt.Sprintf("%x", readyCertificate.root)
+	s.mu.Lock()
+	_, readyAccepted := s.acceptedReadyRoots[readyKey]
+	s.mu.Unlock()
+	if !readyAccepted {
+		return nil, fmt.Errorf("CV-sAPVSS materializer pool is not backed by an accepted ReadyCert")
 	}
 	phaseStart := time.Now()
 	s.aggregateBuildMu.Lock()
@@ -391,13 +409,26 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			end = len(descriptors)
 		}
 		results := make(chan loadResult, end-cursor)
-		for index := cursor; index < end; index++ {
-			descriptor := descriptors[index]
-			go func(index int) {
-				leaf, _ := s.loadOrRetrieveComponent(ctx, descriptor)
-				results <- loadResult{index: index, leaf: leaf}
-			}(index)
+		jobs := make(chan int)
+		workers := runtime.GOMAXPROCS(0)
+		if workers > 8 {
+			workers = 8
 		}
+		if workers > end-cursor {
+			workers = end - cursor
+		}
+		for worker := 0; worker < workers; worker++ {
+			go func() {
+				for index := range jobs {
+					leaf, _ := s.loadOrRetrieveComponent(ctx, descriptors[index])
+					results <- loadResult{index: index, leaf: leaf}
+				}
+			}()
+		}
+		for index := cursor; index < end; index++ {
+			jobs <- index
+		}
+		close(jobs)
 		loaded := make([]*cvVerifiedLeaf, end-cursor)
 		for range loaded {
 			result := <-results
@@ -443,10 +474,6 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			return nil, fmt.Errorf("conflicting verified CV-sAPVSS aggregate cache entry")
 		}
 	} else {
-		if len(s.verifiedAggregates) >= ready {
-			s.mu.Unlock()
-			return nil, fmt.Errorf("verified CV-sAPVSS aggregate cache is full")
-		}
 		s.verifiedAggregates[key] = agg
 	}
 	s.mu.Unlock()
@@ -472,7 +499,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 		return nil, err
 	}
 	offerWire, err := cvAggregateManifestOfferCanonicalBytes(&cvAggregateManifestOffer{
-		header: header, descriptors: selectedDescriptors, root: manifestRoot,
+		header: header, descriptors: selectedDescriptors, readyRoot: readyCertificate.root, root: manifestRoot,
 	})
 	if err != nil {
 		return nil, err
@@ -501,7 +528,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 		if selfWire, selfErr := cvFreshShardArtifactCanonicalBytes(&selfArtifact); selfErr == nil {
 			_ = s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, headerDigest, s.localNode, selfWire)
 		}
-		if selfSig, selfErr := s.cfg.runtime.lockSigner.SignShare(s.localNode, "RL_AGG_LOCK", headerDigest); selfErr == nil {
+		if selfSig, selfErr := s.localARCShare(headerDigest); selfErr == nil {
 			pending.values <- cvARCShare{holder: s.localNode, headerDigest: append([]byte(nil), headerDigest...), signature: selfSig}
 		}
 	}
@@ -527,11 +554,6 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	}
 	metrics.arcWait = time.Since(phaseStart)
 	phaseStart = time.Now()
-	holders := make([]int, 0, len(shares))
-	for holder := range shares {
-		holders = append(holders, holder)
-	}
-	sort.Ints(holders)
 	certificate, err := s.cfg.runtime.lockSigner.Recover("RL_AGG_LOCK", headerDigest, shares)
 	if err != nil {
 		return nil, err
@@ -541,8 +563,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			_ = s.send(node, cvTagARCCertificate, certificateWire)
 		}
 	}
-	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold, Holders: holders,
-		ShareSignatures: shares, Certificate: certificate}, Aggregate: APVSSAggregate{
+	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold, Certificate: certificate}, Aggregate: APVSSAggregate{
 		Provider: "cv-sapvss", Dealers: append([]int(nil), header.Dealers...),
 		AggregateDigest: append([]byte(nil), header.AggregateDigest...),
 	}}
@@ -550,7 +571,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	if _, err := validateAggRLOShape(s.cfg, rlo); err != nil {
 		return nil, err
 	}
-	if err := validateAggRLOLock(s.cfg, rlo, true); err != nil {
+	if err := validateAggRLOLock(s.cfg, rlo); err != nil {
 		return nil, err
 	}
 	metrics.certificate = time.Since(phaseStart)
@@ -568,6 +589,32 @@ func (s *cvComponentService) handleAggregateOffer(msg Message) {
 		if err != nil {
 			return
 		}
+		readyKey := fmt.Sprintf("%x", manifest.readyRoot)
+		s.mu.Lock()
+		_, accepted := s.acceptedReadyRoots[readyKey]
+		if !accepted {
+			// Keep at most one not-yet-resolved offer per authenticated sender.
+			// Otherwise arbitrary unknown roots would provide an unbounded memory
+			// amplification path before their ReadyCert messages arrive.
+			for key, pending := range s.pendingReadyOffers {
+				kept := pending[:0]
+				for _, candidate := range pending {
+					if candidate.From != msg.From {
+						kept = append(kept, candidate)
+					}
+				}
+				if len(kept) == 0 {
+					delete(s.pendingReadyOffers, key)
+				} else {
+					s.pendingReadyOffers[key] = kept
+				}
+			}
+			pending := s.pendingReadyOffers[readyKey]
+			s.pendingReadyOffers[readyKey] = append(pending, msg)
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
 		s.handleAggregateManifestOffer(msg, manifest)
 	}()
 }
@@ -579,11 +626,6 @@ func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cv
 	key := fmt.Sprintf("%x", digestAggHeaderForLock(offer.header))
 	processingKey := fmt.Sprintf("%s/%d", key, msg.From)
 	s.mu.Lock()
-	if prior, exists := s.candidateByMaterializer[msg.From]; exists && prior != key {
-		s.mu.Unlock()
-		return
-	}
-	s.candidateByMaterializer[msg.From] = key
 	if _, exists := s.processingOffers[processingKey]; exists {
 		s.mu.Unlock()
 		return
@@ -620,7 +662,7 @@ func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cv
 		return
 	}
 	_ = agg // aggregate verification is included in verifyAggregateManifestForARC.
-	sig, err := s.cfg.runtime.lockSigner.SignShare(s.localNode, "RL_AGG_LOCK", artifact.headerDigest)
+	sig, err := s.localARCShare(artifact.headerDigest)
 	if err != nil {
 		return
 	}
@@ -631,20 +673,34 @@ func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cv
 }
 
 func (s *cvComponentService) resolveAggregateManifestDescriptors(offer *cvAggregateManifestOffer) error {
-	if offer == nil || len(offer.header.Dealers) == 0 || len(offer.root) != 32 {
+	if offer == nil || len(offer.header.Dealers) != s.cfg.FOld+1 || len(offer.readyRoot) != 32 || len(offer.root) != 32 {
 		return fmt.Errorf("invalid CV-sAPVSS aggregate manifest reference")
 	}
+	readyKey := fmt.Sprintf("%x", offer.readyRoot)
 	s.mu.Lock()
-	descriptors := make([]*cvComponentDescriptor, len(offer.header.Dealers))
-	for i, dealer := range offer.header.Dealers {
-		descriptor := s.componentDescriptors[dealer]
-		if descriptor == nil {
-			s.mu.Unlock()
-			return fmt.Errorf("missing cached component descriptor for dealer=%d", dealer)
-		}
-		descriptors[i] = descriptor
-	}
+	readyPool := append([]*cvComponentDescriptor(nil), s.readyDescriptorsByRoot[readyKey]...)
 	s.mu.Unlock()
+	if len(readyPool) != len(s.cfg.OldCommittee)-s.cfg.FOld {
+		return fmt.Errorf("missing accepted CV-sAPVSS ReadyCert pool")
+	}
+	descriptors := make([]*cvComponentDescriptor, 0, s.cfg.FOld+1)
+	for _, descriptor := range readyPool {
+		if _, err := s.loadOrRetrieveComponent(s.ctx, descriptor); err != nil {
+			continue
+		}
+		descriptors = append(descriptors, descriptor)
+		if len(descriptors) == s.cfg.FOld+1 {
+			break
+		}
+	}
+	if len(descriptors) != s.cfg.FOld+1 {
+		return fmt.Errorf("ReadyCert pool has insufficient valid CV-sAPVSS components")
+	}
+	for i, descriptor := range descriptors {
+		if descriptor.dealer != offer.header.Dealers[i] {
+			return fmt.Errorf("aggregate offer is not ReadyCert FirstKValid")
+		}
+	}
 	root, err := cvComponentManifestRoot(descriptors)
 	if err != nil || !bytes.Equal(root, offer.root) {
 		return fmt.Errorf("CV-sAPVSS aggregate manifest root does not match local cache")
@@ -780,7 +836,7 @@ func (s *cvComponentService) RecoverAggregate(ctx context.Context, rlo *AggRLO) 
 	if _, err := validateAggRLOShape(s.cfg, rlo); err != nil {
 		return nil, err
 	}
-	if err := validateAggRLOLock(s.cfg, rlo, true); err != nil {
+	if err := validateAggRLOLock(s.cfg, rlo); err != nil {
 		return nil, err
 	}
 	if err := validateAggRLODigest(rlo); err != nil {
@@ -788,10 +844,7 @@ func (s *cvComponentService) RecoverAggregate(ctx context.Context, rlo *AggRLO) 
 	}
 	headerDigest := digestAggHeaderForLock(rlo.Header)
 	key := fmt.Sprintf("%x", headerDigest)
-	requestTargets := sortedUnique(rlo.Lock.Holders)
-	if len(requestTargets) == 0 {
-		requestTargets = sortedUnique(s.cfg.OldCommittee)
-	}
+	requestTargets := sortedUnique(s.cfg.OldCommittee)
 	pending := &cvPendingRecovery{rlo: cloneAggRLO(rlo), allowed: nodeSet(requestTargets),
 		values: make(chan cvFreshShardArtifact, len(requestTargets))}
 	s.mu.Lock()

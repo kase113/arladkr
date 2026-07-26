@@ -38,9 +38,8 @@ type apvssFallbackProof struct {
 	proof         *cvLeafProof
 }
 
-// apvssLeafPrototype deliberately wraps a structural CV leaf. Its fallback
-// profile is explicit on new wires; the decoder still accepts legacy exact
-// wires that placed the fallback count directly after the ACK set.
+// apvssLeafPrototype deliberately wraps a structural CV leaf. Every wire
+// explicitly binds the exact-lane or compact-batch fallback profile.
 type apvssLeafPrototype struct {
 	leaf            *cvLeaf
 	acks            []apvssLaneACK
@@ -65,10 +64,6 @@ type apvssDealerWitness struct {
 }
 
 func apvssNormalizeFallbackProfile(profile string) string {
-	// Empty is the legacy v1 wire representation of exact per-lane proofs.
-	if profile == "" {
-		return apvssFallbackExactLaneProfile
-	}
 	return profile
 }
 

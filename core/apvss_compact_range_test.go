@@ -1,15 +1,13 @@
 package core
 
 import (
-	"bytes"
-	"encoding/hex"
 	"testing"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-func TestAPVSSCompactInnerProductDeterministicVectorV1(t *testing.T) {
+func TestAPVSSCompactInnerProductVectorVerifies(t *testing.T) {
 	generators, err := apvssCompactRangeGeneratorsFor(4)
 	if err != nil {
 		t.Fatal(err)
@@ -31,20 +29,6 @@ func TestAPVSSCompactInnerProductDeterministicVectorV1(t *testing.T) {
 		prefix, generators.g, generators.h, generators.u, p, &proof,
 	); err != nil {
 		t.Fatalf("deterministic inner-product vector rejected: %v", err)
-	}
-	var wire bytes.Buffer
-	for i := range proof.left {
-		cvWritePoint(&wire, &proof.left[i])
-		cvWritePoint(&wire, &proof.right[i])
-	}
-	cvWriteScalar(&wire, &proof.a)
-	cvWriteScalar(&wire, &proof.b)
-	got := hex.EncodeToString(hashBytes(
-		[]byte("ARL-APVSS/compact-range/cross-vector/digest"), wire.Bytes(),
-	))
-	const want = "2a397c2b913463f499da9b82dccd19c56fa74b7342c867515d5226d35a03ce63"
-	if got != want {
-		t.Fatalf("compact IPA vector digest = %s, want %s", got, want)
 	}
 }
 

@@ -13,22 +13,17 @@ import (
 
 func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 	base := NormalizeConfig(Config{
-		SID:                      "cv-epoch-config",
-		OldCommittee:             []int{0, 1, 2, 3},
-		NewCommittee:             []int{4, 5, 6, 7},
-		FOld:                     1,
-		FNew:                     1,
-		APVSSProvider:            "cv-sapvss",
-		ARCMode:                  "materialized",
-		DeriveMode:               "scalar",
-		AgreementKernel:          "commonsubset-tcp",
-		AgreementTransport:       "tcp-distributed",
-		LocalNodeIDs:             []int{0},
-		CVPublicKeyDir:           "/keys/public",
-		CVLocalSecretDir:         "/keys/private-0",
-		CVLocalReceiverIDs:       []int{4},
-		ArtifactCacheDir:         "/state/node-0",
-		MaxARCCandidatesPerEpoch: 2,
+		SID:                "cv-epoch-config",
+		OldCommittee:       []int{0, 1, 2, 3},
+		NewCommittee:       []int{4, 5, 6, 7},
+		FOld:               1,
+		FNew:               1,
+		AgreementTransport: "tcp-distributed",
+		LocalNodeIDs:       []int{0},
+		CVPublicKeyDir:     "/keys/public",
+		CVLocalSecretDir:   "/keys/private-0",
+		CVLocalReceiverIDs: []int{4},
+		ArtifactCacheDir:   "/state/node-0",
 	})
 	if err := validateCVEpochConfig(base); err != nil {
 		t.Fatalf("valid CV epoch config rejected: %v", err)
@@ -63,10 +58,6 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 		edit func(*Config)
 		want string
 	}{
-		{"provider", func(c *Config) { c.APVSSProvider = "optrand" }, "cv-sapvss"},
-		{"arc", func(c *Config) { c.ARCMode = "header-only" }, "materialized"},
-		{"derive", func(c *Config) { c.DeriveMode = "aggregate" }, "scalar"},
-		{"kernel", func(c *Config) { c.AgreementKernel = "dumbomvba-direct" }, "common-subset"},
 		{"old node", func(c *Config) { c.LocalNodeIDs = []int{0, 1} }, "one local old node"},
 		{"public keys", func(c *Config) { c.CVPublicKeyDir = "" }, "public key directory"},
 		{"secret keys", func(c *Config) { c.CVLocalSecretDir = "" }, "secret key directory"},
@@ -86,22 +77,11 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 	}
 }
 
-func TestNormalizeConfigDefaultsToCVOnlyProfile(t *testing.T) {
+func TestNormalizeConfigDefaultsToExactLaneFallback(t *testing.T) {
 	cfg := NormalizeConfig(Config{FOld: 1, FNew: 1})
-	if cfg.APVSSProvider != "cv-sapvss" || cfg.ARCMode != "materialized" || cfg.DeriveMode != "scalar" {
-		t.Fatalf("default profile = %s/%s/%s", cfg.APVSSProvider, cfg.ARCMode, cfg.DeriveMode)
-	}
 	if cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfile || cfg.AllowExperimentalAPVSS {
 		t.Fatalf("default APVSS fallback profile = %q experimental=%t",
 			cfg.APVSSFallbackProfile, cfg.AllowExperimentalAPVSS)
-	}
-	for _, provider := range []string{"optrand", "bls-pvss", "scalar-shamir"} {
-		legacy := NormalizeConfig(Config{
-			SID: "legacy", OldCommittee: []int{0}, NewCommittee: []int{1}, APVSSProvider: provider,
-		})
-		if err := ValidateConfig(legacy); err == nil || !strings.Contains(err.Error(), "provider") {
-			t.Fatalf("legacy provider %q error = %v", provider, err)
-		}
 	}
 }
 
@@ -217,8 +197,8 @@ func TestCVMaterializedAggRLOWitnessRoundTrip(t *testing.T) {
 	if _, err := cvDecodeMaterializedAggRLOWitness(tamperedWire, cfg); err == nil {
 		t.Fatal("accepted materialized AggRLO witness with an invalid certificate")
 	}
-	if len(decoded.Lock.ShareSignatures) != 0 || !bytes.Equal(decoded.Lock.Certificate, materialized.rlo.Lock.Certificate) {
-		t.Fatal("compact AggRLO witness retained individual ARC shares")
+	if decoded.Lock.Threshold != materialized.rlo.Lock.Threshold || !bytes.Equal(decoded.Lock.Certificate, materialized.rlo.Lock.Certificate) {
+		t.Fatal("compact AggRLO witness changed the recovered ARC certificate")
 	}
 }
 
@@ -242,7 +222,7 @@ func TestCVBuildEpochContextAndRandomDealerLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaf.dealerID != uint64(cfg.LocalNodeIDs[0]) || !leaf.hasLeafNIZK {
+	if leaf.dealerID != uint64(cfg.LocalNodeIDs[0]) || leaf.context.proofProfile != cvLeafStructuralProofProfile || leaf.hasLeafNIZK {
 		t.Fatal("random CV dealer leaf has the wrong dealer or proof profile")
 	}
 	if err := cvVerifyLeaf(&leafContext, leaf); err != nil {
@@ -282,30 +262,10 @@ func TestCVBuildEpochContextUsesNewCommitteeFaultThreshold(t *testing.T) {
 	}
 }
 
-func TestRunCVEpochRejectsLegacyProfileBeforeNetwork(t *testing.T) {
-	cfg, _, _, _ := cvM4Fixture(t)
-	cfg.APVSSProvider = "optrand"
-	if _, err := RunCVEpoch(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "cv-sapvss") {
-		t.Fatalf("legacy profile error = %v", err)
-	}
-}
-
 func TestCVRunMaterializedAgreementRejectsMissingLocalRLO(t *testing.T) {
 	cfg, _, _, _ := cvM4Fixture(t)
 	cfg.LocalNodeIDs = []int{0}
 	if _, _, err := cvRunMaterializedAgreement(context.Background(), cfg, nil); err == nil {
 		t.Fatal("materialized agreement accepted a missing local RLO")
-	}
-}
-
-func TestPrepareCVRuntimeSkipsLegacyPVSSKeyMaterial(t *testing.T) {
-	cfg, _, _, _ := cvM4Fixture(t)
-	if err := ensureRuntime(&cfg); err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.runtime.receiverStates) != 0 || len(cfg.runtime.vePublicKeys) != 0 ||
-		len(cfg.runtime.vePrivateKeys) != 0 || len(cfg.runtime.blsPVSSSecretKeys) != 0 ||
-		len(cfg.runtime.blsPVSSPublicKeys) != 0 {
-		t.Fatal("CV runtime generated unused legacy PVSS/key-evolution material")
 	}
 }

@@ -14,35 +14,10 @@ import (
 )
 
 type runtimeCrypto struct {
-	oldOrder      []int
-	oldIndex      map[int]int
-	receiverOrder []int
-	receiverIndex map[int]int
-
-	lockSigner     *tblsThresholdSigner
-	fastlaneSigner *tblsThresholdSigner
-	coinSigner     *tblsThresholdSigner
-
-	receiverStates map[int]ReceiverState
-	vePublicKeys   map[int]*PaillierPublicKey
-	vePrivateKeys  map[int]*PaillierPrivateKey
-
-	// BLS12-381 PVSS key material (Bacho-Loss CCS'23)
-	blsPVSSSecretKeys map[int]fr.Element
-	blsPVSSPublicKeys map[int]bls12381.G2Affine
-	commMetrics       bool
-
-	admitAggMu             sync.Mutex
-	admitAggAttempts       int
-	admitAggPasses         int
-	validatedAggRLOs       map[string][]byte
-	validatedDescriptors   map[string][]byte
-	validatedArtifacts     map[string][]byte
-	preparedARCShares      map[string]ARCHeaderShare
-	trustedReadyCandidates []readyCandidate
-	fallbackProposalCache  map[string][]byte
-	cachedAggregates       map[string]*APVSSAggregate
-	cachedAggRLOs          map[string]*AggRLO
+	oldOrder    []int
+	oldIndex    map[int]int
+	lockSigner  *tblsThresholdSigner
+	commMetrics bool
 
 	commMu         sync.Mutex
 	totalSentBytes uint64
@@ -63,36 +38,18 @@ func ensureRuntime(cfg *Config) error {
 	if len(cfg.OldCommittee) == 0 || len(cfg.NewCommittee) == 0 {
 		return nil
 	}
-	if cfg.Epoch > 1 && len(cfg.InputReceiverStates) == 0 && cfg.StateStoreDir != "" {
-		states, err := loadReceiverStatesFromStore(cfg)
-		if err != nil {
-			return err
-		}
-		if len(states) > 0 {
-			cfg.InputReceiverStates = states
-		}
-	}
-
 	oldOrder := sortedCopy(cfg.OldCommittee)
-	receiverOrder := sortedCopy(cfg.NewCommittee)
-	useBlsPWSS := strings.EqualFold(cfg.APVSSProvider, "bls-pvss")
-	useCVSAPVSS := strings.EqualFold(cfg.APVSSProvider, "cv-sapvss")
 	oldIndex := make(map[int]int, len(oldOrder))
 	for i, id := range oldOrder {
 		oldIndex[id] = i
 	}
-	receiverIndex := make(map[int]int, len(receiverOrder))
-	for i, id := range receiverOrder {
-		receiverIndex[id] = i
-	}
-
 	lockThreshold := len(oldOrder) - cfg.FOld
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
 	var lockSigner *tblsThresholdSigner
 	hasCVKeyDir := strings.TrimSpace(cfg.CVPublicKeyDir) != "" || strings.TrimSpace(cfg.CVLocalSecretDir) != ""
-	if useCVSAPVSS && hasCVKeyDir {
+	if hasCVKeyDir {
 		if strings.TrimSpace(cfg.CVPublicKeyDir) == "" || strings.TrimSpace(cfg.CVLocalSecretDir) == "" {
 			return fmt.Errorf("CV old-lock runtime requires both public and local secret key directories")
 		}
@@ -108,7 +65,7 @@ func ensureRuntime(cfg *Config) error {
 			return err
 		}
 	} else {
-		if useCVSAPVSS && cfg.StrictNetwork {
+		if cfg.StrictNetwork {
 			return fmt.Errorf("strict CV runtime requires materialized old-lock key directories")
 		}
 		var err error
@@ -127,170 +84,12 @@ func ensureRuntime(cfg *Config) error {
 		}
 	}
 
-	fastThreshold := 2*cfg.FOld + 1
-	if fastThreshold <= 0 {
-		fastThreshold = 1
-	}
-	if fastThreshold > len(oldOrder) {
-		fastThreshold = len(oldOrder)
-	}
-	fastlaneSigner, err := newTBLSThresholdSigner(
-		oldOrder,
-		fastThreshold,
-		deterministicStream(
-			"rladkr-fastlane-signer",
-			[]byte(cfg.SID),
-			[]byte(fmt.Sprintf("|epoch=%d", cfg.Epoch)),
-			encodeInts(oldOrder),
-		),
-	)
-	if err != nil {
-		return err
-	}
-	coinThreshold := cfg.FOld + 1
-	if coinThreshold <= 0 {
-		coinThreshold = 1
-	}
-	if coinThreshold > len(oldOrder) {
-		coinThreshold = len(oldOrder)
-	}
-	coinSigner, err := newTBLSThresholdSigner(
-		oldOrder,
-		coinThreshold,
-		deterministicStream(
-			"rladkr-coin-signer",
-			[]byte(cfg.SID),
-			[]byte(fmt.Sprintf("|epoch=%d", cfg.Epoch)),
-			encodeInts(oldOrder),
-		),
-	)
-	if err != nil {
-		return err
-	}
-
-	// Step A: BLS PVSS keypairs for ALL members (old committee = dealers for NIZK;
-	// new committee = receivers for share decryption).
-	blsPVSSSecretKeys := make(map[int]fr.Element)
-	blsPVSSPublicKeys := make(map[int]bls12381.G2Affine)
-	if !useCVSAPVSS {
-		allMembers := sortedUnique(append(append([]int(nil), oldOrder...), receiverOrder...))
-		for _, id := range allMembers {
-			blsSkStream := deterministicStream(
-				"rladkr-blspvss-key",
-				[]byte(cfg.SID),
-				[]byte(fmt.Sprintf("|member=%d", id)),
-			)
-			buf := make([]byte, fr.Bytes)
-			blsSkStream.XORKeyStream(buf, buf)
-			var blsSk fr.Element
-			blsSk.SetBytes(buf[:fr.Bytes])
-			var blsPk bls12381.G2Affine
-			blsPk.ScalarMultiplication(&genG2, blsSk.BigInt(new(big.Int)))
-			blsPVSSSecretKeys[id] = blsSk
-			blsPVSSPublicKeys[id] = blsPk
-		}
-	}
-
-	// Step B: Receiver states + Paillier VE keys (only for new committee).
-	receiverStates := make(map[int]ReceiverState, len(receiverOrder))
-	vePublicKeys := make(map[int]*PaillierPublicKey, len(receiverOrder))
-	vePrivateKeys := make(map[int]*PaillierPrivateKey, len(receiverOrder))
-	for _, id := range receiverOrder {
-		if useCVSAPVSS {
-			continue
-		}
-		var state ReceiverState
-		if st, ok := cfg.InputReceiverStates[id]; ok {
-			state = cloneReceiverState(st)
-			if state.NodeID != id {
-				state.NodeID = id
-			}
-			if state.Epoch != cfg.Epoch {
-				return fmt.Errorf(
-					"receiver state epoch mismatch for id=%d: have=%d need=%d",
-					id,
-					state.Epoch,
-					cfg.Epoch,
-				)
-			}
-			if len(state.SecretKey) == 0 || len(state.PublicKey) == 0 {
-				return fmt.Errorf("receiver state missing key material for id=%d", id)
-			}
-			if _, err := publicKeyFromRaw(state.PublicKey); err != nil {
-				return fmt.Errorf("invalid receiver public key for id=%d: %w", id, err)
-			}
-			if _, err := privateKeyFromRaw(state.SecretKey); err != nil {
-				return fmt.Errorf("invalid receiver secret key for id=%d: %w", id, err)
-			}
-			if len(state.ChainKey) == 0 {
-				state.ChainKey = hashBytes(
-					[]byte("rladkr-rfs-chain-fallback"),
-					[]byte(cfg.SID),
-					[]byte(fmt.Sprintf("|epoch=%d|receiver=%d", cfg.Epoch, id)),
-				)
-			}
-		} else {
-			if cfg.Epoch > 1 {
-				return fmt.Errorf("missing receiver state for id=%d at epoch=%d", id, cfg.Epoch)
-			}
-			var initErr error
-			state, initErr = rfsInitState(*cfg, id)
-			if initErr != nil {
-				return initErr
-			}
-		}
-		receiverStates[id] = state
-
-		if !useBlsPWSS {
-			veKey, veErr := loadOrCreateVEKeyCache(cfg, id)
-			if veErr != nil {
-				return fmt.Errorf("generate VE key for receiver=%d failed: %w", id, veErr)
-			}
-			vePublicKeys[id] = veKey.PublicKey
-			vePrivateKeys[id] = veKey
-		}
-	}
-
 	cfg.runtime = &runtimeCrypto{
-		oldOrder:              oldOrder,
-		oldIndex:              oldIndex,
-		receiverOrder:         receiverOrder,
-		receiverIndex:         receiverIndex,
-		lockSigner:            lockSigner,
-		fastlaneSigner:        fastlaneSigner,
-		coinSigner:            coinSigner,
-		receiverStates:        receiverStates,
-		vePublicKeys:          vePublicKeys,
-		vePrivateKeys:         vePrivateKeys,
-		blsPVSSSecretKeys:     blsPVSSSecretKeys,
-		blsPVSSPublicKeys:     blsPVSSPublicKeys,
-		commMetrics:           cfg.CommMetrics,
-		validatedAggRLOs:      make(map[string][]byte),
-		validatedDescriptors:  make(map[string][]byte),
-		validatedArtifacts:    make(map[string][]byte),
-		preparedARCShares:     make(map[string]ARCHeaderShare),
-		fallbackProposalCache: make(map[string][]byte),
-		cachedAggregates:      make(map[string]*APVSSAggregate),
-		cachedAggRLOs:         make(map[string]*AggRLO),
-		phaseSentBytes:        make(map[string]uint64),
-		phaseRecvBytes:        make(map[string]uint64),
+		oldOrder: oldOrder, oldIndex: oldIndex, lockSigner: lockSigner,
+		commMetrics:    cfg.CommMetrics,
+		phaseSentBytes: make(map[string]uint64), phaseRecvBytes: make(map[string]uint64),
 	}
 	return nil
-}
-
-func loadReceiverStatesFromStore(cfg *Config) (map[int]ReceiverState, error) {
-	if cfg == nil || cfg.StateStoreDir == "" {
-		return nil, nil
-	}
-	store := newReceiverStateStore(cfg.StateStoreDir)
-	states, err := store.Load(cfg.SID, cfg.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("load receiver states from store failed: %w", err)
-	}
-	if len(states) == 0 {
-		return nil, nil
-	}
-	return states, nil
 }
 
 func deterministicStream(label string, parts ...[]byte) cipher.Stream {
@@ -344,15 +143,6 @@ func (r *runtimeCrypto) setCommPhase(name string) {
 	r.commMu.Lock()
 	r.commPhase = name
 	r.commMu.Unlock()
-}
-
-func (r *runtimeCrypto) commPhaseName() string {
-	if r == nil {
-		return ""
-	}
-	r.commMu.Lock()
-	defer r.commMu.Unlock()
-	return r.commPhase
 }
 
 func (r *runtimeCrypto) phaseCommStats() (map[string]uint64, map[string]uint64) {
@@ -605,230 +395,4 @@ func domainDigest(domain string, digest []byte) []byte {
 		[]byte(strings.ToUpper(domain)),
 		digest,
 	)
-}
-
-func (r *runtimeCrypto) receiverState(id int) (ReceiverState, bool) {
-	if r == nil || r.receiverStates == nil {
-		return ReceiverState{}, false
-	}
-	st, ok := r.receiverStates[id]
-	if !ok {
-		return ReceiverState{}, false
-	}
-	return cloneReceiverState(st), true
-}
-
-func (r *runtimeCrypto) vePublicKey(id int) (*PaillierPublicKey, bool) {
-	if r == nil || r.vePublicKeys == nil {
-		return nil, false
-	}
-	pk, ok := r.vePublicKeys[id]
-	return pk, ok
-}
-
-func (r *runtimeCrypto) vePrivateKey(id int) (*PaillierPrivateKey, bool) {
-	if r == nil || r.vePrivateKeys == nil {
-		return nil, false
-	}
-	sk, ok := r.vePrivateKeys[id]
-	return sk, ok
-}
-
-func (r *runtimeCrypto) blsPVSSSecretKey(id int) (fr.Element, bool) {
-	if r == nil || r.blsPVSSSecretKeys == nil {
-		return fr.Element{}, false
-	}
-	sk, ok := r.blsPVSSSecretKeys[id]
-	return sk, ok
-}
-
-func (r *runtimeCrypto) blsPVSSPublicKey(id int) (bls12381.G2Affine, bool) {
-	if r == nil || r.blsPVSSPublicKeys == nil {
-		var zero bls12381.G2Affine
-		return zero, false
-	}
-	pk, ok := r.blsPVSSPublicKeys[id]
-	return pk, ok
-}
-
-func (r *runtimeCrypto) recordAdmitAgg(pass bool) {
-	if r == nil {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.admitAggAttempts++
-	if pass {
-		r.admitAggPasses++
-	}
-}
-
-func (r *runtimeCrypto) cachePreparedARCShare(share ARCHeaderShare) {
-	if r == nil {
-		return
-	}
-	key := preparedARCShareKey(share.Holder, share.Epoch, share.AggHeaderDigest)
-	r.admitAggMu.Lock()
-	r.preparedARCShares[key] = cloneARCHeaderShare(share)
-	r.admitAggMu.Unlock()
-}
-
-func (r *runtimeCrypto) preparedARCShare(holder int, epoch int, digest []byte) (ARCHeaderShare, bool) {
-	if r == nil {
-		return ARCHeaderShare{}, false
-	}
-	key := preparedARCShareKey(holder, epoch, digest)
-	r.admitAggMu.Lock()
-	share, ok := r.preparedARCShares[key]
-	r.admitAggMu.Unlock()
-	if !ok {
-		return ARCHeaderShare{}, false
-	}
-	return cloneARCHeaderShare(share), true
-}
-
-func preparedARCShareKey(holder int, epoch int, digest []byte) string {
-	return fmt.Sprintf("%d|%d|%x", holder, epoch, digest)
-}
-
-func cloneARCHeaderShare(in ARCHeaderShare) ARCHeaderShare {
-	return ARCHeaderShare{
-		Holder:          in.Holder,
-		Epoch:           in.Epoch,
-		AggHeaderDigest: append([]byte(nil), in.AggHeaderDigest...),
-		ObligationKind:  in.ObligationKind,
-		Signature:       append([]byte(nil), in.Signature...),
-	}
-}
-
-func (r *runtimeCrypto) admitAggStats() (int, int) {
-	if r == nil {
-		return 0, 0
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	return r.admitAggAttempts, r.admitAggPasses
-}
-
-func (r *runtimeCrypto) rememberValidatedAggRLO(digest []byte, fingerprint []byte) {
-	if r == nil || len(digest) == 0 || len(fingerprint) == 0 {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.validatedAggRLOs[string(digest)] = append([]byte(nil), fingerprint...)
-}
-
-func (r *runtimeCrypto) hasValidatedAggRLO(digest []byte, fingerprint []byte) bool {
-	if r == nil || len(digest) == 0 || len(fingerprint) == 0 {
-		return false
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	cached, ok := r.validatedAggRLOs[string(digest)]
-	return ok && bytesEq(cached, fingerprint)
-}
-
-func (r *runtimeCrypto) rememberValidatedDescriptor(digest []byte, fingerprint []byte) {
-	if r == nil || len(digest) == 0 || len(fingerprint) == 0 {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.validatedDescriptors[string(digest)] = append([]byte(nil), fingerprint...)
-}
-
-func (r *runtimeCrypto) hasValidatedDescriptor(digest []byte, fingerprint []byte) bool {
-	if r == nil || len(digest) == 0 || len(fingerprint) == 0 {
-		return false
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	cached, ok := r.validatedDescriptors[string(digest)]
-	return ok && bytesEq(cached, fingerprint)
-}
-
-func (r *runtimeCrypto) rememberValidatedArtifact(digest []byte, fingerprint []byte) {
-	if r == nil || len(digest) == 0 || len(fingerprint) == 0 {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.validatedArtifacts[string(digest)] = append([]byte(nil), fingerprint...)
-}
-
-func (r *runtimeCrypto) hasValidatedArtifact(digest []byte, fingerprint []byte) bool {
-	if r == nil || len(digest) == 0 || len(fingerprint) == 0 {
-		return false
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	cached, ok := r.validatedArtifacts[string(digest)]
-	return ok && bytesEq(cached, fingerprint)
-}
-
-func (r *runtimeCrypto) cachedFallbackProposal(key string) ([]byte, bool) {
-	if r == nil || strings.TrimSpace(key) == "" {
-		return nil, false
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	cached, ok := r.fallbackProposalCache[key]
-	if !ok {
-		return nil, false
-	}
-	return append([]byte(nil), cached...), true
-}
-
-func (r *runtimeCrypto) rememberFallbackProposal(key string, blob []byte) {
-	if r == nil || strings.TrimSpace(key) == "" || len(blob) == 0 {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.fallbackProposalCache[key] = append([]byte(nil), blob...)
-}
-
-func (r *runtimeCrypto) cachedAggregateBuild(key string) (*APVSSAggregate, bool) {
-	if r == nil || strings.TrimSpace(key) == "" {
-		return nil, false
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	agg, ok := r.cachedAggregates[key]
-	if !ok || agg == nil {
-		return nil, false
-	}
-	return cloneAPVSSAggregate(agg), true
-}
-
-func (r *runtimeCrypto) rememberAggregateBuild(key string, agg *APVSSAggregate) {
-	if r == nil || strings.TrimSpace(key) == "" || agg == nil {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.cachedAggregates[key] = cloneAPVSSAggregate(agg)
-}
-
-func (r *runtimeCrypto) cachedAggRLOBuild(key string) (*AggRLO, bool) {
-	if r == nil || strings.TrimSpace(key) == "" {
-		return nil, false
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	rlo, ok := r.cachedAggRLOs[key]
-	if !ok || rlo == nil {
-		return nil, false
-	}
-	return cloneAggRLO(rlo), true
-}
-
-func (r *runtimeCrypto) rememberAggRLOBuild(key string, rlo *AggRLO) {
-	if r == nil || strings.TrimSpace(key) == "" || rlo == nil {
-		return
-	}
-	r.admitAggMu.Lock()
-	defer r.admitAggMu.Unlock()
-	r.cachedAggRLOs[key] = cloneAggRLO(rlo)
 }
