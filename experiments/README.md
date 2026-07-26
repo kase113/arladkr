@@ -6,16 +6,32 @@ separate Go module so its dependencies and protocol assumptions do not alter
 the ARL-ADKR build.
 
 The local `dumbomvba-go/` module is included because the Practical benchmark's
-`go.mod` uses a relative replacement. The seven-process loopback benchmark is:
+`go.mod` uses a relative replacement. The launcher defaults to the
+seven-process loopback benchmark:
 
 ```bash
 cd experiments/practical-adkr
 ./scripts/run_practical_multiprocess_n7.sh
 ```
 
+The historical filename is retained for compatibility. A matched n=16 run is:
+
+```bash
+PRACTICAL_MP_N=16 \
+PRACTICAL_MP_F=5 \
+PRACTICAL_MP_KAPPA=6 \
+PRACTICAL_MP_TIMEOUT=900s \
+./scripts/run_practical_multiprocess_n7.sh
+```
+
 The launcher uses strict TCP, one process per old-committee node, a shared
 artifact cache, and a common deterministic setup seed. It excludes generated
 executables and runtime artifact directories from the repository.
+
+On the 2026-07-26 local 32-CPU host, the n=16 command completed on all 16
+processes in one run. Per-process total latency was 4.05--4.40 seconds (mean
+4.19 seconds), including a 0.35-second mean setup and 3.84-second mean online
+protocol phase. This is a reproducibility snapshot, not a statistical claim.
 
 The ARL-ADKR comparison run is launched from the repository root with:
 

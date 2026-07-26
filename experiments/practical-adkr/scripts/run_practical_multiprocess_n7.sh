@@ -5,8 +5,19 @@ set -euo pipefail
 # The benchmark itself uses deterministic setup keys, while the artifact
 # directory is shared so DXT/APDB/Paillier barriers can exchange outputs.
 
+# The historical filename is retained for compatibility.  Override these
+# values for a matched committee experiment, e.g. n=16/f=5/kappa=6.
+N="${PRACTICAL_MP_N:-7}"
+F="${PRACTICAL_MP_F:-2}"
+KAPPA="${PRACTICAL_MP_KAPPA:-3}"
+if (( N <= 0 || F < 0 || KAPPA <= 0 || N < 3 * F + 1 )); then
+  printf 'invalid committee parameters: n=%s f=%s kappa=%s\n' "${N}" "${F}" "${KAPPA}" >&2
+  exit 2
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${PRACTICAL_MP_RUN_DIR:-$(mktemp -d /tmp/practical-adkr-mp-n7.XXXXXX)}"
+run_dir_template="/tmp/practical-adkr-mp-n${N}.XXXXXX"
+RUN_DIR="${PRACTICAL_MP_RUN_DIR:-$(mktemp -d "${run_dir_template}")}"
 CACHE_DIR="${RUN_DIR}/artifacts"
 LOG_DIR="${RUN_DIR}/logs"
 BIN="${ROOT_DIR}/bin/bench_latency"
@@ -14,7 +25,7 @@ mkdir -p "${CACHE_DIR}" "${LOG_DIR}"
 
 cleanup() {
   status=$?
-  if [[ "${KEEP_PRACTICAL_MP_RUN:-0}" != "1" && "${RUN_DIR}" == /tmp/practical-adkr-mp-n7.* ]]; then
+  if [[ "${KEEP_PRACTICAL_MP_RUN:-0}" != "1" && "${RUN_DIR}" == "/tmp/practical-adkr-mp-n${N}."* ]]; then
     rm -rf -- "${RUN_DIR}"
   else
     printf 'PRACTICAL_MP_RUN_DIR=%s\n' "${RUN_DIR}" >&2
@@ -29,38 +40,38 @@ fi
 
 mvba_addrs=""
 proto_addrs=""
-for id in $(seq 0 6); do
+for id in $(seq 0 $((N - 1))); do
   [[ -z "${mvba_addrs}" ]] || mvba_addrs+=","
   mvba_addrs+="${id}=127.0.0.1:$((23000 + id))"
   [[ -z "${proto_addrs}" ]] || proto_addrs+=","
   proto_addrs+="${id}=127.0.0.1:$((24000 + id))"
 done
-for id in $(seq 0 6); do
-  new_id=$((7 + id))
+for id in $(seq 0 $((N - 1))); do
+  new_id=$((N + id))
   proto_addrs+=",${new_id}=127.0.0.1:$((24000 + new_id))"
 done
 
 pids=()
-for id in $(seq 0 6); do
+for id in $(seq 0 $((N - 1))); do
   log="${LOG_DIR}/node-${id}.log"
   PRACTICAL_ARTIFACT_CACHE_DIR="${CACHE_DIR}" \
-  RLADKR_RANDOM_SEED="${RLADKR_RANDOM_SEED:-practical-adkr-multiprocess-n7}" \
+  RLADKR_RANDOM_SEED="${RLADKR_RANDOM_SEED:-practical-adkr-multiprocess-n${N}}" \
   PRACTICAL_STRICT_NETWORK=1 \
   PRACTICAL_DELAY_ENABLE="${PRACTICAL_DELAY_ENABLE:-0}" \
   "${BIN}" \
-    -n 7 -f 2 -kappa 3 -runs "${PRACTICAL_MP_RUNS:-1}" \
+    -n "${N}" -f "${F}" -kappa "${KAPPA}" -runs "${PRACTICAL_MP_RUNS:-1}" \
     -timeout "${PRACTICAL_MP_TIMEOUT:-120s}" \
     -paillier-bits "${PRACTICAL_MP_PAILLIER_BITS:-2048}" \
     -mvba-network tcp \
     -mvba-addrs "${mvba_addrs}" -mvba-local-ids "${id}" \
-    -proto-addrs "${proto_addrs}" -proto-local-ids "${id},$((7 + id))" \
+    -proto-addrs "${proto_addrs}" -proto-local-ids "${id},$((N + id))" \
     -strict-network=true -comm-metrics=true \
     >"${log}" 2>&1 &
   pids+=("$!")
 done
 
 status=0
-for i in $(seq 0 6); do
+for i in $(seq 0 $((N - 1))); do
   if ! wait "${pids[$i]}"; then
     status=1
   fi
@@ -68,7 +79,7 @@ done
 
 printf 'PRACTICAL_MP_RUN_DIR=%s\n' "${RUN_DIR}"
 printf 'PRACTICAL_MP_LOG_DIR=%s\n' "${LOG_DIR}"
-for id in $(seq 0 6); do
+for id in $(seq 0 $((N - 1))); do
   log="${LOG_DIR}/node-${id}.log"
   result=$(rg '^E2E_BENCH_RESULT ' "${log}" | tail -n 1 || true)
   if [[ -n "${result}" ]]; then
