@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -361,6 +362,80 @@ func cvVerifyFreshShardArtifact(cfg Config, header AggHeader, artifact *cvFreshS
 	return cvVerifyAggregateShard(dispersal, &artifact.shard)
 }
 
+type cvMaterializeAttempt struct {
+	value *cvMaterializedAggregate
+	err   error
+}
+
+// MaterializeFirstCertified tracks canonical-prefix reselections and returns
+// the first aggregate that obtains a recovered ARC certificate. A slow first
+// candidate must not prevent a later converged ReadyCert root from driving the
+// epoch into MVBA.
+func (s *cvComponentService) MaterializeFirstCertified(
+	ctx context.Context,
+	initial []*cvComponentDescriptor,
+) (*cvMaterializedAggregate, error) {
+	if ctx == nil || len(initial) != len(s.cfg.OldCommittee)-s.cfg.FOld {
+		return nil, fmt.Errorf("invalid CV-sAPVSS initial materialization candidate")
+	}
+	candidateCtx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
+	results := make(chan cvMaterializeAttempt, len(s.cfg.OldCommittee)+2)
+	seen := make(map[string]struct{}, len(s.cfg.OldCommittee)+1)
+	launch := func(descriptors []*cvComponentDescriptor) {
+		certificate, err := cvBuildComponentReadyCertificate(s.localNode, descriptors)
+		if err != nil {
+			return
+		}
+		key := fmt.Sprintf("%x", certificate.root)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		candidate := append([]*cvComponentDescriptor(nil), descriptors...)
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			value, materializeErr := s.MaterializeAndCollectARC(candidateCtx, candidate)
+			select {
+			case results <- cvMaterializeAttempt{value: value, err: materializeErr}:
+			case <-candidateCtx.Done():
+			}
+		}()
+	}
+	launch(initial)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		case result := <-results:
+			if result.err == nil && result.value != nil {
+				return result.value, nil
+			}
+		case descriptors := <-s.readyCandidates:
+			// Coalesce roots already queued before spending another aggregate
+			// verification on an intermediate canonical prefix.
+		drain:
+			for {
+				select {
+				case newer := <-s.readyCandidates:
+					descriptors = newer
+				default:
+					break drain
+				}
+			}
+			launch(descriptors)
+		}
+	}
+}
+
 func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descriptors []*cvComponentDescriptor) (*cvMaterializedAggregate, error) {
 	metrics := cvAggregateMaterializeMetrics{}
 	want := s.cfg.FOld + 1
@@ -388,6 +463,12 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			s.aggregateBuildMu.Unlock()
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !s.isCanonicalReadyPool(descriptors) {
+		return nil, fmt.Errorf("stale CV-sAPVSS canonical ReadyCert pool")
+	}
 	selectedDescriptors := make([]*cvComponentDescriptor, 0, want)
 	leaves := make([]*cvVerifiedLeaf, 0, want)
 	phaseStart = time.Now()
@@ -398,11 +479,26 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 		}
 		lastDealer = descriptor.dealer
 	}
+	// A remote offer can finish verification for this exact FirstKValid
+	// manifest while the local materializer is waiting for the aggregate build
+	// gate. Reuse that verified aggregate instead of serializing and combining
+	// the same large leaves again.
+	firstDescriptors := descriptors[:want]
+	firstRoot, firstRootErr := cvComponentManifestRoot(firstDescriptors)
+	var cachedAggregate *cvAggregateTranscript
+	if firstRootErr == nil {
+		s.mu.Lock()
+		cachedAggregate = s.verifiedAggregatesByRoot[fmt.Sprintf("%x", firstRoot)]
+		s.mu.Unlock()
+		if !cvAggregateMatchesDescriptors(cachedAggregate, firstDescriptors) {
+			cachedAggregate = nil
+		}
+	}
 	type loadResult struct {
 		index int
 		leaf  *cvVerifiedLeaf
 	}
-	for cursor := 0; len(leaves) < want && cursor < len(descriptors); {
+	for cursor := 0; cachedAggregate == nil && len(leaves) < want && cursor < len(descriptors); {
 		batchSize := want - len(leaves)
 		end := cursor + batchSize
 		if end > len(descriptors) {
@@ -442,22 +538,54 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			leaves = append(leaves, leaf)
 		}
 		cursor = end
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !s.isCanonicalReadyPool(descriptors) {
+			return nil, fmt.Errorf("stale CV-sAPVSS canonical ReadyCert pool")
+		}
 	}
-	if len(leaves) != want {
+	if cachedAggregate != nil {
+		selectedDescriptors = append(selectedDescriptors, firstDescriptors...)
+	} else if len(leaves) != want {
 		return nil, fmt.Errorf("CV-sAPVSS materializer found %d valid leaves, need %d", len(leaves), want)
 	}
 	metrics.leafLoad = time.Since(phaseStart)
 	phaseStart = time.Now()
-	agg, err := cvAggVerified(s.leafCtx, leaves)
+	agg := cachedAggregate
+	if agg == nil {
+		agg, err = cvAggVerified(s.leafCtx, leaves)
+		if err != nil {
+			return nil, err
+		}
+	}
+	metrics.aggregate = time.Since(phaseStart)
+	manifestRoot, err := cvComponentManifestRoot(selectedDescriptors)
 	if err != nil {
 		return nil, err
 	}
-	metrics.aggregate = time.Since(phaseStart)
+	manifestKey := fmt.Sprintf("%x", manifestRoot)
+	s.mu.Lock()
+	if existing := s.verifiedAggregatesByRoot[manifestKey]; existing != nil && !bytes.Equal(existing.digest, agg.digest) {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("conflicting verified CV-sAPVSS manifest aggregate cache entry")
+	}
+	s.verifiedAggregatesByRoot[manifestKey] = agg
+	s.mu.Unlock()
 	n := len(s.cfg.OldCommittee)
 	phaseStart = time.Now()
-	dispersal, err := cvDisperseAggregate(agg, n, n-2*s.cfg.FOld)
-	if err != nil {
-		return nil, err
+	dispersalKey := fmt.Sprintf("%x", agg.digest)
+	s.mu.Lock()
+	dispersal := s.verifiedDispersals[dispersalKey]
+	s.mu.Unlock()
+	if dispersal == nil {
+		dispersal, err = cvDisperseAggregate(agg, n, n-2*s.cfg.FOld)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.verifiedDispersals[dispersalKey] = dispersal
+		s.mu.Unlock()
 	}
 	metrics.rsDisperse = time.Since(phaseStart)
 	phaseStart = time.Now()
@@ -480,24 +608,29 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	metrics.headerToken = time.Since(phaseStart)
 	s.aggregateBuildMu.Unlock()
 	aggregateBuildLocked = false
-	pending := &cvPendingARCShare{values: make(chan cvARCShare, n)}
+	pending := &cvPendingARCShare{values: make(chan cvARCShare, n), certificates: make(chan []byte, 1)}
 	s.mu.Lock()
 	if _, exists := s.pendingARCs[key]; exists {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("CV-sAPVSS ARC collection already active")
 	}
 	s.pendingARCs[key] = pending
+	// Read the certificate cache while publishing the pending collector. This
+	// closes the race where a valid certificate arrived between a cache lookup
+	// and pending registration and would otherwise leave the collector asleep.
+	existingCertificate := append([]byte(nil), s.aggregateCertificates[key]...)
 	s.mu.Unlock()
+	if len(existingCertificate) > 0 {
+		pending.certificates <- existingCertificate
+	}
 	defer func() {
 		s.mu.Lock()
-		delete(s.pendingARCs, key)
+		if s.pendingARCs[key] == pending {
+			delete(s.pendingARCs, key)
+		}
 		s.mu.Unlock()
 	}()
 	oldOrder := sortedUnique(s.cfg.OldCommittee)
-	manifestRoot, err := cvComponentManifestRoot(selectedDescriptors)
-	if err != nil {
-		return nil, err
-	}
 	offerWire, err := cvAggregateManifestOfferCanonicalBytes(&cvAggregateManifestOffer{
 		header: header, descriptors: selectedDescriptors, readyRoot: readyCertificate.root, root: manifestRoot,
 	})
@@ -540,7 +673,8 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	s.cfg.runtime.setCommPhase("arc_share")
 	phaseStart = time.Now()
 	shares := make(map[int][]byte, threshold)
-	for len(shares) < threshold {
+	var certificate []byte
+	for len(shares) < threshold && len(certificate) == 0 {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -550,17 +684,26 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			if _, duplicate := shares[share.holder]; !duplicate {
 				shares[share.holder] = append([]byte(nil), share.signature...)
 			}
+		case recovered := <-pending.certificates:
+			certificate = append([]byte(nil), recovered...)
 		}
 	}
 	metrics.arcWait = time.Since(phaseStart)
 	phaseStart = time.Now()
-	certificate, err := s.cfg.runtime.lockSigner.Recover("RL_AGG_LOCK", headerDigest, shares)
-	if err != nil {
-		return nil, err
-	}
-	if certificateWire, certErr := cvARCCertificateCanonicalBytes(headerDigest, certificate); certErr == nil {
-		for _, node := range oldOrder {
-			_ = s.send(node, cvTagARCCertificate, certificateWire)
+	if len(certificate) == 0 {
+		certificate, err = s.cfg.runtime.lockSigner.Recover("RL_AGG_LOCK", headerDigest, shares)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.aggregateCertificates[key] == nil {
+			s.aggregateCertificates[key] = append([]byte(nil), certificate...)
+		}
+		s.mu.Unlock()
+		if certificateWire, certErr := cvARCCertificateCanonicalBytes(headerDigest, certificate); certErr == nil {
+			for _, node := range oldOrder {
+				_ = s.send(node, cvTagARCCertificate, certificateWire)
+			}
 		}
 	}
 	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold, Certificate: certificate}, Aggregate: APVSSAggregate{
@@ -642,10 +785,7 @@ func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cv
 	if index >= len(oldOrder) || oldOrder[index] != s.localNode {
 		return
 	}
-	if err := s.resolveAggregateManifestDescriptors(offer); err != nil {
-		return
-	}
-	agg, dispersal, err := s.verifyAggregateManifestForARC(offer)
+	agg, dispersal, err := s.verifyNetworkAggregateManifestForARC(offer)
 	if err != nil {
 		return
 	}
@@ -677,9 +817,18 @@ func (s *cvComponentService) resolveAggregateManifestDescriptors(offer *cvAggreg
 		return fmt.Errorf("invalid CV-sAPVSS aggregate manifest reference")
 	}
 	readyKey := fmt.Sprintf("%x", offer.readyRoot)
+	resolvedKey := fmt.Sprintf("%s/%x", readyKey, offer.root)
 	s.mu.Lock()
+	resolved := append([]*cvComponentDescriptor(nil), s.resolvedAggregateManifests[resolvedKey]...)
 	readyPool := append([]*cvComponentDescriptor(nil), s.readyDescriptorsByRoot[readyKey]...)
 	s.mu.Unlock()
+	if len(resolved) == s.cfg.FOld+1 {
+		if !cvDescriptorsMatchDealers(resolved, offer.header.Dealers) {
+			return fmt.Errorf("cached aggregate manifest dealers do not match header")
+		}
+		offer.descriptors = resolved
+		return nil
+	}
 	if len(readyPool) != len(s.cfg.OldCommittee)-s.cfg.FOld {
 		return fmt.Errorf("missing accepted CV-sAPVSS ReadyCert pool")
 	}
@@ -696,32 +845,77 @@ func (s *cvComponentService) resolveAggregateManifestDescriptors(offer *cvAggreg
 	if len(descriptors) != s.cfg.FOld+1 {
 		return fmt.Errorf("ReadyCert pool has insufficient valid CV-sAPVSS components")
 	}
-	for i, descriptor := range descriptors {
-		if descriptor.dealer != offer.header.Dealers[i] {
-			return fmt.Errorf("aggregate offer is not ReadyCert FirstKValid")
-		}
+	if !cvDescriptorsMatchDealers(descriptors, offer.header.Dealers) {
+		return fmt.Errorf("aggregate offer is not ReadyCert FirstKValid")
 	}
 	root, err := cvComponentManifestRoot(descriptors)
 	if err != nil || !bytes.Equal(root, offer.root) {
 		return fmt.Errorf("CV-sAPVSS aggregate manifest root does not match local cache")
 	}
+	s.mu.Lock()
+	s.resolvedAggregateManifests[resolvedKey] = append([]*cvComponentDescriptor(nil), descriptors...)
+	s.mu.Unlock()
 	offer.descriptors = descriptors
 	return nil
 }
 
+func cvDescriptorsMatchDealers(descriptors []*cvComponentDescriptor, dealers []int) bool {
+	if len(descriptors) != len(dealers) {
+		return false
+	}
+	for i, descriptor := range descriptors {
+		if descriptor == nil || descriptor.dealer != dealers[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cvAggregateMatchesDescriptors(agg *cvAggregateTranscript, descriptors []*cvComponentDescriptor) bool {
+	if agg == nil || len(agg.dealerIDs) != len(descriptors) || len(agg.leafDigests) != len(descriptors) {
+		return false
+	}
+	for i, descriptor := range descriptors {
+		if descriptor == nil || agg.dealerIDs[i] != uint64(descriptor.dealer) ||
+			!bytes.Equal(agg.leafDigests[i], descriptor.leafDigest) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *cvComponentService) verifyNetworkAggregateManifestForARC(
+	offer *cvAggregateManifestOffer,
+) (*cvAggregateTranscript, *cvAggregateDispersal, error) {
+	s.aggregateBuildMu.Lock()
+	defer s.aggregateBuildMu.Unlock()
+	if err := s.resolveAggregateManifestDescriptors(offer); err != nil {
+		return nil, nil, err
+	}
+	return s.verifyAggregateManifestForARCLocked(offer)
+}
+
 func (s *cvComponentService) verifyAggregateManifestForARC(offer *cvAggregateManifestOffer) (*cvAggregateTranscript, *cvAggregateDispersal, error) {
+	s.aggregateBuildMu.Lock()
+	defer s.aggregateBuildMu.Unlock()
+	return s.verifyAggregateManifestForARCLocked(offer)
+}
+
+func (s *cvComponentService) verifyAggregateManifestForARCLocked(offer *cvAggregateManifestOffer) (*cvAggregateTranscript, *cvAggregateDispersal, error) {
 	if offer == nil {
 		return nil, nil, fmt.Errorf("nil CV-sAPVSS aggregate manifest offer")
 	}
-	s.aggregateBuildMu.Lock()
-	defer s.aggregateBuildMu.Unlock()
 	wantRoot, err := cvComponentManifestRoot(offer.descriptors)
 	if err != nil || !bytes.Equal(offer.root, wantRoot) {
 		return nil, nil, fmt.Errorf("invalid CV-sAPVSS aggregate manifest references")
 	}
 	key := fmt.Sprintf("%x", digestAggHeaderForLock(offer.header))
+	manifestKey := fmt.Sprintf("%x", wantRoot)
 	s.mu.Lock()
 	agg := s.verifiedAggregates[key]
+	if agg == nil {
+		agg = s.verifiedAggregatesByRoot[manifestKey]
+	}
 	s.mu.Unlock()
 	if agg == nil {
 		leaves := make([]*cvVerifiedLeaf, len(offer.descriptors))
@@ -737,22 +931,36 @@ func (s *cvComponentService) verifyAggregateManifestForARC(offer *cvAggregateMan
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
-		s.mu.Lock()
-		s.verifiedAggregates[key] = agg
-		s.mu.Unlock()
 	}
-	if !bytes.Equal(agg.digest, offer.header.AggregateDigest) {
+	if !cvAggregateMatchesDescriptors(agg, offer.descriptors) || !bytes.Equal(agg.digest, offer.header.AggregateDigest) {
 		return nil, nil, fmt.Errorf("aggregate manifest digest mismatch")
 	}
+	dispersalKey := fmt.Sprintf("%x", agg.digest)
+	s.mu.Lock()
+	dispersal := s.verifiedDispersals[dispersalKey]
+	s.mu.Unlock()
 	// The manifest contains no remote aggregate object. Rebuilding the
 	// canonical aggregate once is therefore both AVer and local materialization.
-	dispersal, err := cvDisperseAggregate(agg, len(s.cfg.OldCommittee), len(s.cfg.OldCommittee)-2*s.cfg.FOld)
-	if err != nil {
-		return nil, nil, err
+	if dispersal == nil {
+		dispersal, err = cvDisperseAggregate(agg, len(s.cfg.OldCommittee), len(s.cfg.OldCommittee)-2*s.cfg.FOld)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.mu.Lock()
+		s.verifiedDispersals[dispersalKey] = dispersal
+		s.mu.Unlock()
 	}
 	if !bytes.Equal(dispersal.root, offer.header.FreshShardRoot) || !bytes.Equal(dispersal.payloadDigest, offer.header.PayloadDigest) {
 		return nil, nil, fmt.Errorf("aggregate manifest RS binding mismatch")
 	}
+	s.mu.Lock()
+	if existing := s.verifiedAggregates[key]; existing != nil && !bytes.Equal(existing.digest, agg.digest) {
+		s.mu.Unlock()
+		return nil, nil, fmt.Errorf("conflicting verified CV-sAPVSS aggregate cache entry")
+	}
+	s.verifiedAggregates[key] = agg
+	s.verifiedAggregatesByRoot[manifestKey] = agg
+	s.mu.Unlock()
 	return agg, dispersal, nil
 }
 
@@ -785,7 +993,14 @@ func (s *cvComponentService) handleARCCertificate(msg Message) {
 	if existing := s.aggregateCertificates[key]; existing == nil {
 		s.aggregateCertificates[key] = append([]byte(nil), certificate...)
 	}
+	pending := s.pendingARCs[key]
 	s.mu.Unlock()
+	if pending != nil {
+		select {
+		case pending.certificates <- append([]byte(nil), certificate...):
+		default:
+		}
+	}
 }
 
 func (s *cvComponentService) loadOrRetrieveComponent(ctx context.Context, descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {

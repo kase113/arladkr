@@ -314,7 +314,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 
 	cfg.runtime.setCommPhase("aggregate_disperse")
 	phaseStart = time.Now()
-	materialized, err := service.MaterializeAndCollectARC(ctx, descriptors)
+	materialized, err := service.MaterializeFirstCertified(ctx, descriptors)
 	if err != nil {
 		return nil, err
 	}

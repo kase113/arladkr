@@ -98,6 +98,8 @@ type benchResultInput struct {
 	deriveMode               string
 	arcMode                  string
 	successRuns              int
+	attemptedEpochs          int
+	totalAttemptLatencyMs    float64
 	localNodes               []int
 	requiredCompleted        int
 	ablationMode             string
@@ -256,6 +258,8 @@ func main() {
 
 	successRuns := 0
 	stats := make([]runStat, 0, *runs*(*epochs))
+	attemptedEpochs := 0
+	totalAttemptLatencyMs := 0.0
 
 	for i := 0; i < *runs; i++ {
 		if i > 0 {
@@ -290,6 +294,7 @@ func main() {
 			})
 
 			totalStart := time.Now()
+			attemptedEpochs++
 			ctx, cancel := context.WithTimeout(context.Background(), runTimeoutValue)
 			setupMs := 0.0
 			if *precomputeRuntime {
@@ -297,6 +302,7 @@ func main() {
 				preparedCfg, prepErr := core.PrepareConfigRuntime(cfg)
 				setupMs = float64(time.Since(setupStart).Microseconds()) / 1000.0
 				if prepErr != nil {
+					totalAttemptLatencyMs += float64(time.Since(totalStart).Microseconds()) / 1000.0
 					cancel()
 					fmt.Fprintf(os.Stderr, "EPOCH_SETUP_ERROR run=%d epoch=%d err=%v\n", i+1, epoch, prepErr)
 					runSuccess = false
@@ -306,6 +312,7 @@ func main() {
 			}
 			traceBenchMain(localNodeIDs, "before_runepoch", fmt.Sprintf("run=%d epoch=%d", i+1, epoch))
 			res, err := core.RunEpoch(ctx, cfg)
+			totalAttemptLatencyMs += float64(time.Since(totalStart).Microseconds()) / 1000.0
 			cancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "EPOCH_RUN_ERROR run=%d epoch=%d err=%v\n", i+1, epoch, err)
@@ -420,6 +427,8 @@ func main() {
 		deriveMode:               "scalar",
 		arcMode:                  "materialized",
 		successRuns:              successRuns,
+		attemptedEpochs:          attemptedEpochs,
+		totalAttemptLatencyMs:    totalAttemptLatencyMs,
 		localNodes:               append([]int(nil), localNodeIDs...),
 		requiredCompleted:        requiredCompleted,
 		ablationMode:             strings.ToLower(strings.TrimSpace(*ablationMode)),
@@ -644,6 +653,10 @@ func formatBenchResult(in benchResultInput) string {
 	}
 	successRate := float64(in.successRuns) / float64(in.runs)
 	meanLatency := meanOf(in.stats, func(s runStat) float64 { return s.latencyMs })
+	meanAllLatency := meanLatency
+	if in.attemptedEpochs > 0 {
+		meanAllLatency = in.totalAttemptLatencyMs / float64(in.attemptedEpochs)
+	}
 	p50Latency := quantileOf(in.stats, 0.50, func(s runStat) float64 { return s.latencyMs })
 	p95Latency := quantileOf(in.stats, 0.95, func(s runStat) float64 { return s.latencyMs })
 	meanSetup := meanOf(in.stats, func(s runStat) float64 { return s.setupMs })
@@ -708,7 +721,7 @@ func formatBenchResult(in benchResultInput) string {
 		in.successRuns,
 		successRate,
 		meanLatency,
-		meanLatency,
+		meanAllLatency,
 		meanSetup,
 		meanRecoverBarrierWait,
 		meanRecoverServiceGrace,

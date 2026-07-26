@@ -133,3 +133,19 @@ func TestArladkrTCPNetBroadcastPropagatesSendError(t *testing.T) {
 		t.Fatalf("expected broadcast to propagate send error")
 	}
 }
+
+func TestArladkrMVBAPoolLanesScaleBeforeLargeCommittees(t *testing.T) {
+	t.Setenv("RLADKR_MVBA_CONN_LANES", "")
+	for _, test := range []struct {
+		n, want int
+	}{
+		{7, 1},
+		{16, 2},
+		{64, 4},
+		{128, 8},
+	} {
+		if got := arlMVBAPoolLanes(test.n); got != test.want {
+			t.Fatalf("n=%d lanes=%d, want %d", test.n, got, test.want)
+		}
+	}
+}

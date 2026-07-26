@@ -37,13 +37,14 @@ func (m *DumboMVBA) runEquivalent(ctx context.Context, input ProposalValue) (Pro
 
 	store := make([]*rcStoreMsg, n)
 	lock := make([]*pdLockMsg, n)
-	done := make([]*pdDoneMsg, n)
 
 	type pdRes struct {
 		leader int
 		out    *pdOutcome
 		err    error
 	}
+	pdCtx, cancelPD := context.WithCancel(routerCtx)
+	defer cancelPD()
 	pdOutCh := make(chan pdRes, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
@@ -55,41 +56,41 @@ func (m *DumboMVBA) runEquivalent(ctx context.Context, input ProposalValue) (Pro
 			if leader == m.cfg.ID {
 				pdInput = append([]byte(nil), input.Payload...)
 			}
-			out, err := m.runPDInstance(routerCtx, sid+"PD"+itoa(leader), leader, pdInput, pdRecvs[leader])
+			out, err := m.runPDInstance(pdCtx, sid+"PD"+itoa(leader), leader, pdInput, pdRecvs[leader])
 			pdOutCh <- pdRes{leader: leader, out: out, err: err}
 		}()
 	}
-	wg.Wait()
-	close(pdOutCh)
-	for res := range pdOutCh {
-		if res.err != nil {
-			return ProposalValue{}, fmt.Errorf("pd[%d] failed: %w", res.leader, res.err)
+	pdCollected := make(chan struct{})
+	go func() {
+		defer close(pdCollected)
+		for res := range pdOutCh {
+			if res.err != nil || res.out == nil {
+				continue
+			}
+			store[res.leader] = res.out.store
+			lock[res.leader] = res.out.lock
 		}
-		if res.out == nil {
-			continue
-		}
-		store[res.leader] = res.out.store
-		lock[res.leader] = res.out.lock
-		done[res.leader] = res.out.done
-	}
+	}()
+	pdWorkersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(pdOutCh)
+		close(pdWorkersDone)
+	}()
 
-	for leader := 0; leader < n; leader++ {
-		if done[leader] == nil {
-			continue
-		}
-		for i := 0; i < n; i++ {
-			_ = m.net.Send(i, ProtocolMessage{
-				Tag:    TagMVBAPDFinish,
-				Round:  0,
-				Leader: leader,
-				Body:   *done[leader],
-			})
-		}
-	}
-
+	// QuitPD validates n-f distinct PD DONE proofs. Waiting for all n local PD
+	// instances here makes one silent/slow leader block an otherwise live MVBA.
+	// DONE messages are mirrored to pdFinishRecv by the router as soon as they
+	// arrive, while local PD workers continue retaining shards and locks for RC.
 	if _, err := m.runQuitPD(routerCtx, sid, pdFinishRecv); err != nil {
+		cancelPD()
+		<-pdWorkersDone
+		<-pdCollected
 		return ProposalValue{}, fmt.Errorf("quitpd failed: %w", err)
 	}
+	cancelPD()
+	<-pdWorkersDone
+	<-pdCollected
 
 	permutationCoin := m.makeSharedCoin(routerCtx, sid+"COIN", TagMVBACoin, 0, coinRecv)
 	seed, err := permutationCoin("permutation")
@@ -163,6 +164,9 @@ func (m *DumboMVBA) routeEquivalentMessages(
 			case TagMVBAPD:
 				if in.Msg.Leader >= 0 && in.Msg.Leader < len(pdRecvs) {
 					trySend(ctx, pdRecvs[in.Msg.Leader], in)
+				}
+				if _, ok := in.Msg.Body.(pdDoneMsg); ok {
+					trySend(ctx, pdFinishRecv, in)
 				}
 			case TagMVBACoin:
 				trySend(ctx, coinRecv, in)

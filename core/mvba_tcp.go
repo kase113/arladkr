@@ -560,11 +560,11 @@ func arlMVBAPoolLanes(n int) int {
 		return lanes
 	}
 	switch {
-	case n >= 192:
+	case n >= 128:
 		return 8
-	case n >= 96:
-		return 4
 	case n >= 64:
+		return 4
+	case n >= 16:
 		return 2
 	default:
 		return 1

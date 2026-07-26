@@ -127,7 +127,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	for _, service := range services {
 		service := service
 		go func() {
-			value, materializeErr := service.MaterializeAndCollectARC(
+			value, materializeErr := service.MaterializeFirstCertified(
 				ctx, candidateSets[service.localNode],
 			)
 			materializedResults <- materializeResult{value: value, err: materializeErr}
@@ -156,9 +156,13 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	for _, service := range services {
 		service.mu.Lock()
 		cachedOffers := len(service.verifiedAggregates)
+		cachedDispersals := len(service.verifiedDispersals)
 		service.mu.Unlock()
 		if cachedOffers != 1 {
 			t.Fatalf("node %d cached %d verified aggregate offers, want one", service.localNode, cachedOffers)
+		}
+		if cachedDispersals != 1 {
+			t.Fatalf("node %d cached %d aggregate dispersals, want one", service.localNode, cachedDispersals)
 		}
 	}
 	stoppedHolder := services[0].localNode
@@ -175,6 +179,122 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		transport.sentCount(cvTagRecoverGet) <= recoverGetBefore ||
 		transport.sentCount(cvTagRecoverShard)-recoverShardBefore < len(nodes)-2*cfg.FOld {
 		t.Fatal("aggregate recovery did not collect n-2f ARC-holder shards over the network")
+	}
+}
+
+func TestCVAggregateDispersalCacheReusesIdenticalAggregate(t *testing.T) {
+	cfg, leafContext, _, leaves := cvM4Fixture(t)
+	accepted := make([]*cvVerifiedLeaf, cfg.FOld+1)
+	descriptors := make([]*cvComponentDescriptor, cfg.FOld+1)
+	for i := range accepted {
+		wire, err := cvLeafCanonicalBytes(leaves[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted[i], err = cvAcceptedLeaf(&leafContext, leaves[i], wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		descriptors[i] = &cvComponentDescriptor{
+			dealer: int(leaves[i].dealerID), leafDigest: accepted[i].leafDigest, certificate: []byte{1},
+		}
+	}
+	aggregate, err := cvAggVerified(&leafContext, accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispersal, err := cvDisperseAggregate(aggregate, len(cfg.OldCommittee), len(cfg.OldCommittee)-2*cfg.FOld)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := cvBuildNetworkAggHeader(cfg, aggregate, dispersal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestRoot, err := cvComponentManifestRoot(descriptors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerKey := fmt.Sprintf("%x", digestAggHeaderForLock(header))
+	service := &cvComponentService{
+		cfg: cfg, leafCtx: &leafContext,
+		verifiedAggregates:       make(map[string]*cvAggregateTranscript),
+		verifiedAggregatesByRoot: make(map[string]*cvAggregateTranscript),
+		verifiedDispersals:       make(map[string]*cvAggregateDispersal),
+	}
+	service.verifiedAggregates[headerKey] = aggregate
+	offer := &cvAggregateManifestOffer{header: header, descriptors: descriptors, root: manifestRoot}
+
+	_, first, err := service.verifyAggregateManifestForARC(offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := service.verifyAggregateManifestForARC(offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(service.verifiedDispersals) != 1 {
+		t.Fatal("identical aggregate offer did not reuse its verified RS dispersal")
+	}
+}
+
+func TestCVARCCertificateWakesPendingCollectorAndRejectsMutation(t *testing.T) {
+	cfg, _, _, _ := cvM4Fixture(t)
+	if err := ensureRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	digest := bytes.Repeat([]byte{0x41}, 32)
+	threshold := len(cfg.OldCommittee) - cfg.FOld
+	shares := make(map[int][]byte, threshold)
+	for _, holder := range sortedUnique(cfg.OldCommittee)[:threshold] {
+		share, err := cfg.runtime.lockSigner.SignShare(holder, "RL_AGG_LOCK", digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shares[holder] = share
+	}
+	certificate, err := cfg.runtime.lockSigner.Recover("RL_AGG_LOCK", digest, shares)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := cvARCCertificateCanonicalBytes(digest, certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := &cvPendingARCShare{values: make(chan cvARCShare, 1), certificates: make(chan []byte, 1)}
+	key := fmt.Sprintf("%x", digest)
+	service := &cvComponentService{
+		cfg: cfg, pendingARCs: map[string]*cvPendingARCShare{key: pending},
+		aggregateCertificates: make(map[string][]byte),
+	}
+	service.handleARCCertificate(Message{From: cfg.OldCommittee[0], Body: wire})
+	select {
+	case got := <-pending.certificates:
+		if !bytes.Equal(got, certificate) || !bytes.Equal(service.aggregateCertificates[key], certificate) {
+			t.Fatal("valid recovered ARC certificate was not cached and delivered")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid recovered ARC certificate did not wake the pending collector")
+	}
+
+	badDigest := bytes.Repeat([]byte{0x42}, 32)
+	badKey := fmt.Sprintf("%x", badDigest)
+	badPending := &cvPendingARCShare{values: make(chan cvARCShare, 1), certificates: make(chan []byte, 1)}
+	service.pendingARCs[badKey] = badPending
+	badCertificate := append([]byte(nil), certificate...)
+	badCertificate[len(badCertificate)-1] ^= 1
+	badWire, err := cvARCCertificateCanonicalBytes(badDigest, badCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.handleARCCertificate(Message{From: cfg.OldCommittee[0], Body: badWire})
+	select {
+	case <-badPending.certificates:
+		t.Fatal("mutated ARC certificate woke a pending collector")
+	case <-time.After(25 * time.Millisecond):
+	}
+	if service.aggregateCertificates[badKey] != nil {
+		t.Fatal("mutated ARC certificate entered the verified cache")
 	}
 }
 
@@ -386,6 +506,14 @@ func TestCVComponentReadyCertificateReselectsAfterLowerDealerArrives(t *testing.
 	}
 	if len(second) != 3 || second[0].dealer != 0 || second[1].dealer != 1 || second[2].dealer != 2 {
 		t.Fatalf("ReadyCert did not reselect canonical lower pool: %+v", second)
+	}
+	services[0].readyCandidates <- second
+	materialized, err := services[0].MaterializeFirstCertified(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := materialized.rlo.Header.Dealers; len(got) != cfg.FOld+1 || got[0] != 0 || got[1] != 1 {
+		t.Fatalf("materializer did not adopt the later certified prefix: %v", got)
 	}
 }
 

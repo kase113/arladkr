@@ -42,7 +42,8 @@ type cvPendingComponentLeaf struct {
 }
 
 type cvPendingARCShare struct {
-	values chan cvARCShare
+	values       chan cvARCShare
+	certificates chan []byte
 }
 
 type cvPendingRecovery struct {
@@ -84,7 +85,6 @@ type cvComponentService struct {
 
 	mu                         sync.Mutex
 	aggregateBuildMu           sync.Mutex
-	reselectionOnce            sync.Once
 	pendingACKs                map[string]chan cvComponentAck
 	pendingComponentStatements map[string][]byte
 	pendingLeaves              map[string]*cvPendingComponentLeaf
@@ -104,6 +104,11 @@ type cvComponentService struct {
 	verifiedLeaves             map[string]*cvVerifiedLeaf
 	aggregateCertificates      map[string][]byte
 	verifiedAggregates         map[string]*cvAggregateTranscript
+	verifiedAggregatesByRoot   map[string]*cvAggregateTranscript
+	// verifiedDispersals is keyed by aggregate digest so candidates with
+	// different ReadyCert roots but identical FirstKValid outputs share RS work.
+	verifiedDispersals         map[string]*cvAggregateDispersal
+	resolvedAggregateManifests map[string][]*cvComponentDescriptor
 	componentDescriptors       map[int]*cvComponentDescriptor
 	done                       chan struct{}
 }
@@ -215,6 +220,9 @@ func newCVComponentServiceWithReceivers(
 		verifiedLeaves:             make(map[string]*cvVerifiedLeaf),
 		aggregateCertificates:      make(map[string][]byte),
 		verifiedAggregates:         make(map[string]*cvAggregateTranscript),
+		verifiedAggregatesByRoot:   make(map[string]*cvAggregateTranscript),
+		verifiedDispersals:         make(map[string]*cvAggregateDispersal),
+		resolvedAggregateManifests: make(map[string][]*cvComponentDescriptor),
 		componentDescriptors:       make(map[int]*cvComponentDescriptor),
 		done:                       make(chan struct{}),
 	}
@@ -520,7 +528,6 @@ func (s *cvComponentService) CollectComponentCandidates(
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	case selected := <-s.readyCandidates:
-		s.reselectionOnce.Do(func() { go s.runReadyReselection() })
 		return selected, nil
 	}
 }
@@ -708,17 +715,6 @@ func (s *cvComponentService) retryPendingReadyOffers(key string) {
 	for _, msg := range pending {
 		msg := msg
 		go s.handleAggregateOffer(msg)
-	}
-}
-
-func (s *cvComponentService) runReadyReselection() {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case descriptors := <-s.readyCandidates:
-			_, _ = s.MaterializeAndCollectARC(s.ctx, descriptors)
-		}
 	}
 }
 

@@ -171,6 +171,66 @@ func TestRunMVBACCommonSubset_Smoke(t *testing.T) {
 	}
 }
 
+func TestRunMVBACCommonSubset_CompletesWithOneSilentNode(t *testing.T) {
+	const (
+		n      = 4
+		f      = 1
+		active = n - f
+	)
+	bundle, err := GenerateTBLSKeyBundle(n, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signers := make([]Signer, n)
+	recv := make([]chan ReceivedMessage, n)
+	for i := 0; i < n; i++ {
+		signers[i], err = NewTBLSSigner(i, bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recv[i] = make(chan ReceivedMessage, 8192)
+	}
+
+	type result struct {
+		vec []*ProposalValue
+		err error
+	}
+	results := make([]result, active)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < active; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			results[id].vec, results[id].err = RunMVBACCommonSubset(
+				ctx,
+				Config{SID: "acs-vacs-one-silent", ID: id, N: n, F: f, MaxRounds: 4,
+					WaitSPBCTimeout: 5 * time.Second, RouteSendTimeout: 100 * time.Millisecond,
+					UseEquivalentPath: true, EquivalentCoinMode: "signature"},
+				&memNet{id: id, peers: recv}, signers[id], recv[id],
+				ProposalValue{Payload: []byte(fmt.Sprintf("in-%d", id)), Round: 1, Hint: "cv"},
+				func(_ int, value ProposalValue) bool {
+					return value.Round == 1 && value.Hint == "cv" && len(value.Payload) > 0
+				},
+			)
+		}(i)
+	}
+	wg.Wait()
+
+	fingerprint := ""
+	for i, got := range results {
+		if got.err != nil {
+			t.Fatalf("active node %d failed with one silent peer: %v", i, got.err)
+		}
+		if current := vectorFingerprint(got.vec); i == 0 {
+			fingerprint = current
+		} else if current != fingerprint {
+			t.Fatalf("active node %d decided a different common subset", i)
+		}
+	}
+}
+
 func vectorFingerprint(v []*ProposalValue) string {
 	out := ""
 	for i := range v {

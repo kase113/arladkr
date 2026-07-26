@@ -10,7 +10,7 @@ set -euo pipefail
 N="${PRACTICAL_MP_N:-7}"
 F="${PRACTICAL_MP_F:-2}"
 KAPPA="${PRACTICAL_MP_KAPPA:-3}"
-if (( N <= 0 || F < 0 || KAPPA <= 0 || N < 3 * F + 1 )); then
+if (( N <= 0 || F < 0 || KAPPA <= 0 || KAPPA > 2 * F + 1 || N < 3 * F + 1 )); then
   printf 'invalid committee parameters: n=%s f=%s kappa=%s\n' "${N}" "${F}" "${KAPPA}" >&2
   exit 2
 fi
@@ -21,7 +21,14 @@ RUN_DIR="${PRACTICAL_MP_RUN_DIR:-$(mktemp -d "${run_dir_template}")}"
 CACHE_DIR="${RUN_DIR}/artifacts"
 LOG_DIR="${RUN_DIR}/logs"
 BIN="${ROOT_DIR}/bin/bench_latency"
+SUMMARY_AWK="${ROOT_DIR}/../../scripts/summarize_cluster_bench.awk"
+RESULTS_FILE="${RUN_DIR}/cluster-results.log"
+if [[ -d "${RUN_DIR}" && -n "$(find "${RUN_DIR}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+  printf 'run directory must be empty to avoid stale benchmark artifacts: %s\n' "${RUN_DIR}" >&2
+  exit 2
+fi
 mkdir -p "${CACHE_DIR}" "${LOG_DIR}"
+touch "${RESULTS_FILE}"
 
 cleanup() {
   status=$?
@@ -83,10 +90,13 @@ for id in $(seq 0 $((N - 1))); do
   log="${LOG_DIR}/node-${id}.log"
   result=$(rg '^E2E_BENCH_RESULT ' "${log}" | tail -n 1 || true)
   if [[ -n "${result}" ]]; then
+    printf '%s\n' "${result}" >>"${RESULTS_FILE}"
     printf 'NODE_%s %s\n' "${id}" "${result}"
   else
     printf 'NODE_%s NO_RESULT\n' "${id}"
     tail -n 8 "${log}" >&2 || true
   fi
 done
+awk -v protocol=PRACTICAL-ADKR -v expected_nodes="${N}" -v faults="${F}" \
+  -f "${SUMMARY_AWK}" "${RESULTS_FILE}"
 exit "${status}"
