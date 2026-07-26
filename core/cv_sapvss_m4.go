@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -32,6 +33,43 @@ type cvAggregateDispersal struct {
 	payloadDigest []byte
 	root          []byte
 	shards        []cvAggregateShard
+}
+
+type cvRSEncoderKey struct {
+	dataShards   int
+	parityShards int
+	workers      int
+}
+
+type cvRSEncoderEntry struct {
+	mu      sync.Mutex
+	encoder reedsolomon.Encoder
+}
+
+var cvRSEncoderCache sync.Map
+
+func cvCachedRSEncoder(dataShards, totalShards int) (*cvRSEncoderEntry, error) {
+	if dataShards <= 0 || totalShards < dataShards {
+		return nil, fmt.Errorf("invalid CV-sAPVSS erasure-code dimensions")
+	}
+	key := cvRSEncoderKey{
+		dataShards: dataShards, parityShards: totalShards - dataShards,
+		workers: cvRSWorkers(totalShards),
+	}
+	if cached, ok := cvRSEncoderCache.Load(key); ok {
+		return cached.(*cvRSEncoderEntry), nil
+	}
+	encoder, err := reedsolomon.New(
+		key.dataShards,
+		key.parityShards,
+		reedsolomon.WithMaxGoroutines(key.workers),
+	)
+	if err != nil {
+		return nil, err
+	}
+	entry := &cvRSEncoderEntry{encoder: encoder}
+	actual, _ := cvRSEncoderCache.LoadOrStore(key, entry)
+	return actual.(*cvRSEncoderEntry), nil
 }
 
 type cvMaterializedAggregate struct {
@@ -310,11 +348,13 @@ func cvVerifyAggregateDispersal(agg *cvAggregateTranscript, dispersal *cvAggrega
 		for i := range dispersal.shards {
 			payloads[i] = dispersal.shards[i].payload
 		}
-		encoder, err := reedsolomon.New(dispersal.dataShards, len(dispersal.shards)-dispersal.dataShards)
+		entry, err := cvCachedRSEncoder(dispersal.dataShards, len(dispersal.shards))
 		if err != nil {
 			return err
 		}
-		valid, err := encoder.Verify(payloads)
+		entry.mu.Lock()
+		valid, err := entry.encoder.Verify(payloads)
+		entry.mu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -419,15 +459,17 @@ func cvErasureEncode(payload []byte, dataShards, totalShards int) ([][]byte, err
 		}
 		return shards, nil
 	}
-	encoder, err := reedsolomon.New(dataShards, totalShards-dataShards)
+	entry, err := cvCachedRSEncoder(dataShards, totalShards)
 	if err != nil {
 		return nil, err
 	}
-	shards, err := encoder.Split(payload)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	shards, err := entry.encoder.Split(payload)
 	if err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(shards); err != nil {
+	if err := entry.encoder.Encode(shards); err != nil {
 		return nil, err
 	}
 	return shards, nil
@@ -444,15 +486,17 @@ func cvErasureDecode(shards [][]byte, dataShards int) ([]byte, error) {
 		}
 		return out.Bytes(), nil
 	}
-	encoder, err := reedsolomon.New(dataShards, len(shards)-dataShards)
+	entry, err := cvCachedRSEncoder(dataShards, len(shards))
 	if err != nil {
 		return nil, err
 	}
-	if err := encoder.Reconstruct(shards); err != nil {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if err := entry.encoder.Reconstruct(shards); err != nil {
 		return nil, err
 	}
 	var out bytes.Buffer
-	if err := encoder.Join(&out, shards, len(shards[0])*dataShards); err != nil {
+	if err := entry.encoder.Join(&out, shards, len(shards[0])*dataShards); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil

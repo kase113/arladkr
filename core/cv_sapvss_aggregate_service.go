@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -506,13 +505,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 		}
 		results := make(chan loadResult, end-cursor)
 		jobs := make(chan int)
-		workers := runtime.GOMAXPROCS(0)
-		if workers > 8 {
-			workers = 8
-		}
-		if workers > end-cursor {
-			workers = end - cursor
-		}
+		workers := cvComponentLoadWorkers(end - cursor)
 		for worker := 0; worker < workers; worker++ {
 			go func() {
 				for index := range jobs {

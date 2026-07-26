@@ -55,6 +55,29 @@ func TestCVSAPVSSM4MaterializeRecoverReceipt(t *testing.T) {
 	}
 }
 
+func TestCVSAPVSSRSEncoderCacheRespectsWorkerBudget(t *testing.T) {
+	t.Setenv("RLADKR_RS_WORKERS", "1")
+	one, err := cvCachedRSEncoder(3, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := cvCachedRSEncoder(3, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one != again {
+		t.Fatal("identical RS dimensions did not reuse the cached encoder")
+	}
+	t.Setenv("RLADKR_RS_WORKERS", "2")
+	differentBudget, err := cvCachedRSEncoder(3, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one == differentBudget {
+		t.Fatal("RS encoder cache ignored the worker budget")
+	}
+}
+
 func TestCVSAPVSSM4DeterministicFreshDispersalRoot(t *testing.T) {
 	_, leafContext, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&leafContext, leaves)

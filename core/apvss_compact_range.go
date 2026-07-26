@@ -121,7 +121,9 @@ func apvssCompactIdentity() bls12381.G1Affine {
 func apvssCompactPointSum(points []bls12381.G1Affine, scalars []fr.Element) bls12381.G1Affine {
 	if len(points) == len(scalars) && len(points) >= 32 {
 		var out bls12381.G1Affine
-		if _, err := out.MultiExp(points, scalars, ecc.MultiExpConfig{NbTasks: 8}); err == nil {
+		if _, err := out.MultiExp(points, scalars, ecc.MultiExpConfig{
+			NbTasks: cvCryptoWorkers(len(points)),
+		}); err == nil {
 			return out
 		}
 	}

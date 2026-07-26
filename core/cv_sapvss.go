@@ -147,10 +147,11 @@ func cvEncryptPoint(receiverPK, message *bls12381.G1Affine, coin fr.Element) (cv
 	if !cvValidG1(receiverPK, false) || !cvValidG1(message, true) {
 		return cvElGamalCiphertext{}, fmt.Errorf("invalid CV-sAPVSS ElGamal point")
 	}
-	coinInt := coin.BigInt(new(big.Int))
+	var coinInt big.Int
+	coin.BigInt(&coinInt)
 	var r, shared, c bls12381.G1Affine
-	r.ScalarMultiplication(&genG1, coinInt)
-	shared.ScalarMultiplication(receiverPK, coinInt)
+	r.ScalarMultiplication(&genG1, &coinInt)
+	shared.ScalarMultiplication(receiverPK, &coinInt)
 	c.Add(&shared, message)
 	return cvElGamalCiphertext{r: r, c: c}, nil
 }
@@ -160,12 +161,13 @@ func cvScalarDigits(scalar fr.Element, profile cvChunkProfile) ([]uint64, error)
 	if err != nil {
 		return nil, err
 	}
-	remaining := scalar.BigInt(new(big.Int))
-	mask := new(big.Int).SetUint64(base - 1)
+	var remaining, mask, digit big.Int
+	scalar.BigInt(&remaining)
+	mask.SetUint64(base - 1)
 	digits := make([]uint64, chunks)
 	for i := range digits {
-		digits[i] = new(big.Int).And(remaining, mask).Uint64()
-		remaining.Rsh(remaining, profile.chunkBits)
+		digits[i] = digit.And(&remaining, &mask).Uint64()
+		remaining.Rsh(&remaining, profile.chunkBits)
 	}
 	if remaining.Sign() != 0 {
 		return nil, fmt.Errorf("CV-sAPVSS chunk count did not cover scalar")
@@ -192,9 +194,11 @@ func cvReferenceEncryptShare(
 	}
 
 	chunks := make([]cvElGamalCiphertext, len(digits))
+	var digitInt big.Int
 	for i, digit := range digits {
 		var digitPoint bls12381.G1Affine
-		digitPoint.ScalarMultiplication(&genG1, new(big.Int).SetUint64(digit))
+		digitInt.SetUint64(digit)
+		digitPoint.ScalarMultiplication(&genG1, &digitInt)
 		chunks[i], err = cvEncryptPoint(&receiverPK, &digitPoint, scalarCoins[i])
 		if err != nil {
 			return nil, err
@@ -206,13 +210,17 @@ func cvReferenceEncryptShare(
 		return nil, err
 	}
 	var blindingPoint bls12381.G1Affine
-	blindingPoint.ScalarMultiplication(&h, blinding.BigInt(new(big.Int)))
+	var blindingInt big.Int
+	blinding.BigInt(&blindingInt)
+	blindingPoint.ScalarMultiplication(&h, &blindingInt)
 	blindingCiphertext, err := cvEncryptPoint(&receiverPK, &blindingPoint, blindingCoin)
 	if err != nil {
 		return nil, err
 	}
 	var scalarPoint, commitment bls12381.G1Affine
-	scalarPoint.ScalarMultiplication(&genG1, scalar.BigInt(new(big.Int)))
+	var scalarInt big.Int
+	scalar.BigInt(&scalarInt)
+	scalarPoint.ScalarMultiplication(&genG1, &scalarInt)
 	commitment.Add(&scalarPoint, &blindingPoint)
 
 	return &cvEncryptedShare{
@@ -596,8 +604,11 @@ func cvReferenceDeal(
 	commitments := make([]bls12381.G1Affine, coefficientCount)
 	for i := range commitments {
 		var scalarTerm, blindingTerm bls12381.G1Affine
-		scalarTerm.ScalarMultiplication(&genG1, scalarCoefficients[i].BigInt(new(big.Int)))
-		blindingTerm.ScalarMultiplication(&h, blindingCoefficients[i].BigInt(new(big.Int)))
+		var scalarInt, blindingInt big.Int
+		scalarCoefficients[i].BigInt(&scalarInt)
+		blindingCoefficients[i].BigInt(&blindingInt)
+		scalarTerm.ScalarMultiplication(&genG1, &scalarInt)
+		blindingTerm.ScalarMultiplication(&h, &blindingInt)
 		commitments[i].Add(&scalarTerm, &blindingTerm)
 	}
 
@@ -786,7 +797,9 @@ func cvEvaluateCommitmentsWithPowers(commitments []bls12381.G1Affine, powers []f
 	}
 	if len(commitments) >= 32 {
 		var result bls12381.G1Affine
-		if _, err := result.MultiExp(commitments, powers, ecc.MultiExpConfig{NbTasks: 4}); err == nil {
+		if _, err := result.MultiExp(commitments, powers, ecc.MultiExpConfig{
+			NbTasks: cvNestedMSMWorkers(len(commitments)),
+		}); err == nil {
 			return result
 		}
 	}

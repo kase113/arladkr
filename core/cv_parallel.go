@@ -13,6 +13,12 @@ func cvCryptoWorkers(jobs int) int {
 		return jobs
 	}
 	workers := runtime.GOMAXPROCS(0)
+	// Keep one scheduler slot available for the authenticated transport, MVBA,
+	// and timers on a multi-core node. A deployment can override this budget
+	// explicitly after profiling its own CPU topology.
+	if workers > 1 {
+		workers--
+	}
 	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_CRYPTO_WORKERS"))); err == nil && configured > 0 {
 		workers = configured
 	}
@@ -26,6 +32,59 @@ func cvCryptoWorkers(jobs int) int {
 		workers = 1
 	}
 	return workers
+}
+
+func cvComponentLoadWorkers(jobs int) int {
+	if jobs <= 1 {
+		return jobs
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_COMPONENT_LOAD_WORKERS"))); err == nil && configured > 0 {
+		workers = configured
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
+
+func cvRSWorkers(jobs int) int {
+	if jobs <= 1 {
+		return jobs
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 1 {
+		workers--
+	}
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_RS_WORKERS"))); err == nil && configured > 0 {
+		workers = configured
+	}
+	if workers > 4 {
+		workers = 4
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
+
+// cvNestedMSMWorkers is used inside work that is already parallelized across
+// leaves or lanes. Keeping the inner MSM serial prevents multiplicative
+// goroutine fan-out while preserving the exact group equation.
+func cvNestedMSMWorkers(points int) int {
+	if points <= 0 {
+		return 0
+	}
+	return 1
 }
 
 // cvRunParallelChecks preserves deterministic error selection while bounding
