@@ -41,6 +41,12 @@ type cvPendingComponentLeaf struct {
 	values     chan cvComponentShard
 }
 
+type cvComponentRetrievalCall struct {
+	done     chan struct{}
+	accepted *cvVerifiedLeaf
+	err      error
+}
+
 type cvPendingARCShare struct {
 	values       chan cvARCShare
 	certificates chan []byte
@@ -53,14 +59,19 @@ type cvPendingRecovery struct {
 }
 
 type cvReceivedReceipt struct {
-	receiverID int
-	wire       []byte
+	verified *cvVerifiedReceipt
 }
 
 type cvPendingReceiptExchange struct {
 	agg           *cvAggregateTranscript
 	receiverOrder []int
 	values        chan cvReceivedReceipt
+}
+
+type cvReceiptPreparationCall struct {
+	done    chan struct{}
+	outputs *cvPreparedReceiptOutputs
+	err     error
 }
 
 type apvssPendingLaneACKs struct {
@@ -85,12 +96,15 @@ type cvComponentService struct {
 
 	mu                         sync.Mutex
 	aggregateBuildMu           sync.Mutex
+	freshPersistMu             sync.Mutex
 	pendingACKs                map[string]chan cvComponentAck
 	pendingComponentStatements map[string][]byte
 	pendingLeaves              map[string]*cvPendingComponentLeaf
+	componentRetrievals        map[string]*cvComponentRetrievalCall
 	pendingARCs                map[string]*cvPendingARCShare
 	pendingRecoveries          map[string]*cvPendingRecovery
 	pendingReceipts            *cvPendingReceiptExchange
+	receiptPreparations        map[string]*cvReceiptPreparationCall
 	pendingLaneACKs            map[string]*apvssPendingLaneACKs
 	processingOffers           map[string]struct{}
 	componentStatementByDealer map[int][]byte
@@ -109,6 +123,7 @@ type cvComponentService struct {
 	// different ReadyCert roots but identical FirstKValid outputs share RS work.
 	verifiedDispersals         map[string]*cvAggregateDispersal
 	resolvedAggregateManifests map[string][]*cvComponentDescriptor
+	persistedFreshArtifacts    map[string]struct{}
 	componentDescriptors       map[int]*cvComponentDescriptor
 	done                       chan struct{}
 }
@@ -205,8 +220,10 @@ func newCVComponentServiceWithReceivers(
 		pendingACKs:                make(map[string]chan cvComponentAck),
 		pendingComponentStatements: make(map[string][]byte),
 		pendingLeaves:              make(map[string]*cvPendingComponentLeaf),
+		componentRetrievals:        make(map[string]*cvComponentRetrievalCall),
 		pendingARCs:                make(map[string]*cvPendingARCShare),
 		pendingRecoveries:          make(map[string]*cvPendingRecovery),
+		receiptPreparations:        make(map[string]*cvReceiptPreparationCall),
 		pendingLaneACKs:            make(map[string]*apvssPendingLaneACKs),
 		processingOffers:           make(map[string]struct{}),
 		componentStatementByDealer: make(map[int][]byte),
@@ -223,6 +240,7 @@ func newCVComponentServiceWithReceivers(
 		verifiedAggregatesByRoot:   make(map[string]*cvAggregateTranscript),
 		verifiedDispersals:         make(map[string]*cvAggregateDispersal),
 		resolvedAggregateManifests: make(map[string][]*cvComponentDescriptor),
+		persistedFreshArtifacts:    make(map[string]struct{}),
 		componentDescriptors:       make(map[int]*cvComponentDescriptor),
 		done:                       make(chan struct{}),
 	}
@@ -296,12 +314,7 @@ func (s *cvComponentService) CollectAPVSSLaneACKs(
 		s.mu.Unlock()
 	}()
 
-	sent := 0
-	for _, receiverID := range s.receiverOrder {
-		if s.sendFrom(s.localNode, receiverID, apvssTagLaneOffer, leafWire) == nil {
-			sent++
-		}
-	}
+	sent := s.sendManyFrom(s.localNode, s.receiverOrder, apvssTagLaneOffer, leafWire)
 	threshold := len(s.receiverOrder) - s.leafCtx.sharingDegree
 	if sent < threshold {
 		return nil, fmt.Errorf("APVSS lane offer reached %d receivers, need %d", sent, threshold)
@@ -504,9 +517,7 @@ func (s *cvComponentService) disperseComponentWire(
 	if err := s.acceptComponentDescriptorWire(descriptorWire); err != nil {
 		return nil, err
 	}
-	for _, node := range sortedUnique(s.cfg.OldCommittee) {
-		_ = s.send(node, cvTagComponentCert, descriptorWire)
-	}
+	s.sendMany(sortedUnique(s.cfg.OldCommittee), cvTagComponentCert, descriptorWire)
 	return descriptor, nil
 }
 
@@ -593,11 +604,13 @@ func (s *cvComponentService) maybePublishCanonicalReadyCertificate() {
 	if err != nil {
 		return
 	}
+	targets := make([]int, 0, len(s.cfg.OldCommittee)-1)
 	for _, node := range sortedUnique(s.cfg.OldCommittee) {
 		if node != s.localNode {
-			_ = s.send(node, cvTagComponentReady, wire)
+			targets = append(targets, node)
 		}
 	}
+	s.sendMany(targets, cvTagComponentReady, wire)
 	select {
 	case s.readyCandidates <- descriptors:
 	case <-s.ctx.Done():
@@ -735,6 +748,17 @@ func (s *cvComponentService) Retrieve(
 	ctx context.Context,
 	descriptor *cvComponentDescriptor,
 ) (*cvLeaf, error) {
+	accepted, err := s.getVerifiedComponent(ctx, descriptor)
+	if err != nil {
+		return nil, err
+	}
+	return accepted.leaf, nil
+}
+
+func (s *cvComponentService) retrieveComponentNetwork(
+	ctx context.Context,
+	descriptor *cvComponentDescriptor,
+) (*cvVerifiedLeaf, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("nil CV-sAPVSS component retrieval context")
 	}
@@ -760,7 +784,9 @@ func (s *cvComponentService) Retrieve(
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.pendingLeaves, key)
+		if s.pendingLeaves[key] == pending {
+			delete(s.pendingLeaves, key)
+		}
 		s.mu.Unlock()
 	}()
 	requestWire, err := cvComponentGetCanonicalBytes(&cvComponentGet{
@@ -769,12 +795,7 @@ func (s *cvComponentService) Retrieve(
 	if err != nil {
 		return nil, err
 	}
-	sent := 0
-	for _, holder := range oldOrder {
-		if s.send(holder, cvTagComponentGet, requestWire) == nil {
-			sent++
-		}
-	}
+	sent := s.sendMany(oldOrder, cvTagComponentGet, requestWire)
 	if sent == 0 {
 		return nil, fmt.Errorf("CV-sAPVSS component retrieval reached no certificate holder")
 	}
@@ -805,7 +826,7 @@ func (s *cvComponentService) Retrieve(
 	if err != nil {
 		return nil, err
 	}
-	return accepted.leaf, nil
+	return accepted, nil
 }
 
 func (s *cvComponentService) run() {
@@ -909,10 +930,6 @@ func (s *cvComponentService) ExchangeReceipts(
 	if ctx == nil || len(localSecrets) == 0 {
 		return nil, nil, nil, fmt.Errorf("invalid CV-sAPVSS receipt exchange input")
 	}
-	shares, localReceipts, err := cvCreateLocalDecryptionOutputs(s.leafCtx, agg, receiverOrder, localSecrets)
-	if err != nil {
-		return nil, nil, nil, err
-	}
 	pending := &cvPendingReceiptExchange{
 		agg: agg, receiverOrder: append([]int(nil), receiverOrder...),
 		values: make(chan cvReceivedReceipt, len(receiverOrder)*2),
@@ -931,23 +948,29 @@ func (s *cvComponentService) ExchangeReceipts(
 		}
 		s.mu.Unlock()
 	}()
+	prepared, err := s.waitReceiptPreparation(ctx, agg, receiverOrder, localSecrets)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	shares := prepared.shares
+	localReceipts := prepared.receipts
 
-	verified := make(map[int][]byte, len(receiverOrder))
-	for receiverID, wire := range localReceipts {
-		verified[receiverID] = append([]byte(nil), wire...)
+	verified := make(map[int]*cvVerifiedReceipt, len(receiverOrder))
+	receiptWires := make(map[int][]byte, len(receiverOrder))
+	for receiverID, token := range prepared.verified {
+		verified[receiverID] = token
+		receiptWires[receiverID] = append([]byte(nil), token.wire...)
 	}
 	broadcast := func() {
 		for _, wire := range localReceipts {
-			for _, node := range sortedUnique(s.cfg.OldCommittee) {
-				_ = s.send(node, cvTagReceipt, wire)
-			}
+			s.sendMany(sortedUnique(s.cfg.OldCommittee), cvTagReceipt, wire)
 		}
 	}
 	broadcast()
 	threshold := s.leafCtx.sharingDegree + 1
 	if len(verified) >= threshold {
-		key, keyErr := cvThresholdPublicKeyFromReceipts(s.leafCtx, agg, receiverOrder, verified)
-		return shares, verified, key, keyErr
+		key, keyErr := cvThresholdPublicKeyFromVerifiedReceipts(s.leafCtx, agg, receiverOrder, verified)
+		return shares, receiptWires, key, keyErr
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -960,13 +983,82 @@ func (s *cvComponentService) ExchangeReceipts(
 		case <-ticker.C:
 			broadcast()
 		case receipt := <-pending.values:
-			if _, duplicate := verified[receipt.receiverID]; !duplicate {
-				verified[receipt.receiverID] = append([]byte(nil), receipt.wire...)
+			token := receipt.verified
+			if token != nil {
+				if _, duplicate := verified[token.receiverID]; !duplicate {
+					verified[token.receiverID] = token
+					receiptWires[token.receiverID] = append([]byte(nil), token.wire...)
+				}
 			}
 		}
 	}
-	key, err := cvThresholdPublicKeyFromReceipts(s.leafCtx, agg, receiverOrder, verified)
-	return shares, verified, key, err
+	key, err := cvThresholdPublicKeyFromVerifiedReceipts(s.leafCtx, agg, receiverOrder, verified)
+	return shares, receiptWires, key, err
+}
+
+func (s *cvComponentService) StartReceiptPreparation(
+	agg *cvAggregateTranscript,
+	receiverOrder []int,
+	localSecrets map[int]fr.Element,
+) {
+	_, _ = s.receiptPreparationCall(agg, receiverOrder, localSecrets)
+}
+
+func (s *cvComponentService) receiptPreparationCall(
+	agg *cvAggregateTranscript,
+	receiverOrder []int,
+	localSecrets map[int]fr.Element,
+) (*cvReceiptPreparationCall, error) {
+	if agg == nil || len(agg.digest) != 32 || len(localSecrets) == 0 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS receipt preparation input")
+	}
+	key := fmt.Sprintf("%x", agg.digest)
+	s.mu.Lock()
+	call := s.receiptPreparations[key]
+	if call == nil {
+		if cvPerfCountersEnabled {
+			cvPerfCounters.receiptPrewarmStarts.Add(1)
+		}
+		call = &cvReceiptPreparationCall{done: make(chan struct{})}
+		s.receiptPreparations[key] = call
+		receiverOrderCopy := append([]int(nil), receiverOrder...)
+		secretsCopy := make(map[int]fr.Element, len(localSecrets))
+		for receiverID, secret := range localSecrets {
+			secretsCopy[receiverID] = secret
+		}
+		go func() {
+			outputs, prepareErr := cvPrepareLocalDecryptionOutputs(s.leafCtx, agg, receiverOrderCopy, secretsCopy)
+			s.mu.Lock()
+			call.outputs = outputs
+			call.err = prepareErr
+			close(call.done)
+			s.mu.Unlock()
+		}()
+	} else if cvPerfCountersEnabled {
+		cvPerfCounters.receiptPrewarmHits.Add(1)
+	}
+	s.mu.Unlock()
+	return call, nil
+}
+
+func (s *cvComponentService) waitReceiptPreparation(
+	ctx context.Context,
+	agg *cvAggregateTranscript,
+	receiverOrder []int,
+	localSecrets map[int]fr.Element,
+) (*cvPreparedReceiptOutputs, error) {
+	call, err := s.receiptPreparationCall(agg, receiverOrder, localSecrets)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
+	case <-call.done:
+		return call.outputs, call.err
+	}
 }
 
 func (s *cvComponentService) handleReceipt(msg Message) {
@@ -989,13 +1081,15 @@ func (s *cvComponentService) handleReceipt(msg Message) {
 	if err != nil || receiverIndex <= 0 || receiverIndex > len(pending.receiverOrder) {
 		return
 	}
-	if _, err := cvDecodeReceipt(msg.Body, s.leafCtx, pending.agg, receiverIndex); err != nil {
+	receiverID := pending.receiverOrder[receiverIndex-1]
+	receipt, err := cvDecodeReceiptVerifiedAggregate(msg.Body, s.leafCtx, pending.agg, receiverIndex)
+	if err != nil {
 		return
 	}
-	received := cvReceivedReceipt{
-		receiverID: pending.receiverOrder[receiverIndex-1],
-		wire:       append([]byte(nil), msg.Body...),
-	}
+	received := cvReceivedReceipt{verified: &cvVerifiedReceipt{
+		receiverID: receiverID, index: receiverIndex,
+		wire: append([]byte(nil), msg.Body...), receipt: receipt,
+	}}
 	select {
 	case pending.values <- received:
 	default:
@@ -1116,6 +1210,27 @@ func (s *cvComponentService) send(to int, tag string, payload []byte) error {
 	return s.sendFrom(s.localNode, to, tag, payload)
 }
 
+func (s *cvComponentService) sendMany(to []int, tag string, payload []byte) int {
+	return s.sendManyFrom(s.localNode, to, tag, payload)
+}
+
+func (s *cvComponentService) sendManyFrom(from int, to []int, tag string, payload []byte) int {
+	envelope, err := cvEncodeNetworkEnvelope(s.cfg.SID, s.cfg.Epoch, payload)
+	if err != nil {
+		return 0
+	}
+	if cvPerfCountersEnabled && len(to) > 1 {
+		cvPerfCounters.envelopeReuseSends.Add(uint64(len(to) - 1))
+	}
+	sent := 0
+	for _, recipient := range to {
+		if s.transport.Send(Message{From: from, To: recipient, Tag: tag, Body: envelope}) == nil {
+			sent++
+		}
+	}
+	return sent
+}
+
 func (s *cvComponentService) localARCShare(headerDigest []byte) ([]byte, error) {
 	if len(headerDigest) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC header digest")
@@ -1150,6 +1265,29 @@ func (s *cvComponentService) sendFrom(from, to int, tag string, payload []byte) 
 	return s.transport.Send(Message{From: from, To: to, Tag: tag, Body: envelope})
 }
 
+func (s *cvComponentService) persistFreshArtifact(headerDigest []byte, wire []byte) error {
+	if len(headerDigest) != 32 || len(wire) == 0 {
+		return fmt.Errorf("invalid CV-sAPVSS fresh artifact persistence input")
+	}
+	key := fmt.Sprintf("%x/%d", headerDigest, s.localNode)
+	s.freshPersistMu.Lock()
+	defer s.freshPersistMu.Unlock()
+	if _, exists := s.persistedFreshArtifacts[key]; exists {
+		if cvPerfCountersEnabled {
+			cvPerfCounters.freshArtifactSkips.Add(1)
+		}
+		return nil
+	}
+	if err := s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, headerDigest, s.localNode, wire); err != nil {
+		return err
+	}
+	s.persistedFreshArtifacts[key] = struct{}{}
+	if cvPerfCountersEnabled {
+		cvPerfCounters.freshArtifactWrites.Add(1)
+	}
+	return nil
+}
+
 func (s *cvComponentService) cacheVerifiedWire(
 	dealer int,
 	digest, canonicalWire []byte,
@@ -1177,6 +1315,10 @@ func (s *cvComponentService) cacheVerifiedWire(
 	if err != nil {
 		return nil, err
 	}
+	// cacheVerifiedWire is the only production path that grants the service
+	// seal. Both decoders above have already checked canonical encoding, digest,
+	// context, and the complete APVSS validity predicate.
+	accepted.serviceSealed = true
 	if err := s.cacheAcceptedLeaf(dealer, digest, accepted); err != nil {
 		return nil, err
 	}

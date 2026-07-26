@@ -68,14 +68,36 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 
 	getBefore := transport.sentCount(cvTagComponentGet)
 	leafBefore := transport.sentCount(cvTagComponentLeaf)
-	retrieved, err := services[len(services)-1].Retrieve(ctx, descriptor)
-	if err != nil {
-		t.Fatal(err)
+	type retrieveResult struct {
+		leaf *cvLeaf
+		err  error
+	}
+	startRetrieval := make(chan struct{})
+	retrievals := make(chan retrieveResult, 2)
+	for range 2 {
+		go func() {
+			<-startRetrieval
+			leaf, retrieveErr := services[len(services)-1].Retrieve(ctx, descriptor)
+			retrievals <- retrieveResult{leaf: leaf, err: retrieveErr}
+		}()
+	}
+	close(startRetrieval)
+	var retrieved *cvLeaf
+	for range 2 {
+		result := <-retrievals
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if retrieved == nil {
+			retrieved = result.leaf
+		} else if retrieved != result.leaf {
+			t.Fatal("component retrieval singleflight returned different verified objects")
+		}
 	}
 	if !bytes.Equal(retrieved.digest, leaves[0].digest) ||
-		transport.sentCount(cvTagComponentGet) <= getBefore ||
+		transport.sentCount(cvTagComponentGet)-getBefore != len(nodes) ||
 		transport.sentCount(cvTagComponentLeaf) <= leafBefore {
-		t.Fatal("component retrieval did not use authenticated GET/LEAF network messages")
+		t.Fatal("component retrieval did not singleflight one authenticated GET/LEAF round")
 	}
 
 	_, err = services[1].Disperse(ctx, leaves[1])
@@ -157,12 +179,16 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		service.mu.Lock()
 		cachedOffers := len(service.verifiedAggregates)
 		cachedDispersals := len(service.verifiedDispersals)
+		persistedFresh := len(service.persistedFreshArtifacts)
 		service.mu.Unlock()
 		if cachedOffers != 1 {
 			t.Fatalf("node %d cached %d verified aggregate offers, want one", service.localNode, cachedOffers)
 		}
 		if cachedDispersals != 1 {
 			t.Fatalf("node %d cached %d aggregate dispersals, want one", service.localNode, cachedDispersals)
+		}
+		if persistedFresh != 1 {
+			t.Fatalf("node %d persisted %d fresh artifacts, want one per header", service.localNode, persistedFresh)
 		}
 	}
 	stoppedHolder := services[0].localNode

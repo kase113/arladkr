@@ -320,6 +320,12 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	}
 	traceCVEpochPhase(cfg, localNode, "aggregate_arc_ready")
 	aggregateLatency := time.Since(phaseStart)
+	// Receipt material remains local until agreement. Precomputing it here
+	// overlaps bounded-DLog/DLEQ work with MVBA without releasing shares for an
+	// aggregate that has not been decided.
+	service.StartReceiptPreparation(
+		materialized.aggregate, material.receiverOrder, material.localReceiverSecrets,
+	)
 
 	cfg.runtime.setCommPhase("aggregate_agreement")
 	phaseStart = time.Now()

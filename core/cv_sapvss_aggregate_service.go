@@ -554,7 +554,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	phaseStart = time.Now()
 	agg := cachedAggregate
 	if agg == nil {
-		agg, err = cvAggVerified(s.leafCtx, leaves)
+		agg, err = cvAggServiceVerified(s.leafCtx, leaves)
 		if err != nil {
 			return nil, err
 		}
@@ -640,16 +640,16 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 	s.cfg.runtime.setCommPhase("aggregate_disperse")
 	phaseStart = time.Now()
 	sent := 0
+	offerTargets := make([]int, 0, len(oldOrder)-1)
 	for _, holder := range oldOrder {
 		if holder == s.localNode {
 			// The collector materializes its own shard below.
 			sent++
 			continue
 		}
-		if s.send(holder, cvTagAggregateManifest, offerWire) == nil {
-			sent++
-		}
+		offerTargets = append(offerTargets, holder)
 	}
+	sent += s.sendMany(offerTargets, cvTagAggregateManifest, offerWire)
 	// The collector is itself an old-committee holder. Some transports do not
 	// loop a self-directed offer through the router, so record its verified
 	// shard/share locally instead of waiting for a self-message.
@@ -659,7 +659,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			totalShards: len(dispersal.shards), payloadDigest: append([]byte(nil), dispersal.payloadDigest...),
 			root: append([]byte(nil), dispersal.root...), shard: dispersal.shards[selfIndex]}
 		if selfWire, selfErr := cvFreshShardArtifactCanonicalBytes(&selfArtifact); selfErr == nil {
-			_ = s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, headerDigest, s.localNode, selfWire)
+			_ = s.persistFreshArtifact(headerDigest, selfWire)
 		}
 		if selfSig, selfErr := s.localARCShare(headerDigest); selfErr == nil {
 			pending.values <- cvARCShare{holder: s.localNode, headerDigest: append([]byte(nil), headerDigest...), signature: selfSig}
@@ -701,9 +701,7 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 		}
 		s.mu.Unlock()
 		if certificateWire, certErr := cvARCCertificateCanonicalBytes(headerDigest, certificate); certErr == nil {
-			for _, node := range oldOrder {
-				_ = s.send(node, cvTagARCCertificate, certificateWire)
-			}
+			s.sendMany(oldOrder, cvTagARCCertificate, certificateWire)
 		}
 	}
 	rlo := &AggRLO{Header: header, Lock: AggLock{Threshold: threshold, Certificate: certificate}, Aggregate: APVSSAggregate{
@@ -794,11 +792,8 @@ func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cv
 		nonce: append([]byte(nil), dispersal.nonce...), dataShards: dispersal.dataShards,
 		totalShards: len(dispersal.shards), payloadDigest: append([]byte(nil), dispersal.payloadDigest...),
 		root: append([]byte(nil), dispersal.root...), shard: dispersal.shards[index]}
-	if _, err := cvFreshShardArtifactCanonicalBytes(&artifact); err != nil {
-		return
-	}
 	shardWire, err := cvFreshShardArtifactCanonicalBytes(&artifact)
-	if err != nil || s.freshStore.Put(s.cfg.SID, s.cfg.Epoch, artifact.headerDigest, s.localNode, shardWire) != nil {
+	if err != nil || s.persistFreshArtifact(artifact.headerDigest, shardWire) != nil {
 		return
 	}
 	_ = agg // aggregate verification is included in verifyAggregateManifestForARC.
@@ -927,7 +922,7 @@ func (s *cvComponentService) verifyAggregateManifestForARCLocked(offer *cvAggreg
 			leaves[i] = leaf
 		}
 		var buildErr error
-		agg, buildErr = cvAggVerified(s.leafCtx, leaves)
+		agg, buildErr = cvAggServiceVerified(s.leafCtx, leaves)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
@@ -1004,22 +999,60 @@ func (s *cvComponentService) handleARCCertificate(msg Message) {
 }
 
 func (s *cvComponentService) loadOrRetrieveComponent(ctx context.Context, descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {
+	return s.getVerifiedComponent(ctx, descriptor)
+}
+
+func (s *cvComponentService) getVerifiedComponent(ctx context.Context, descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil CV-sAPVSS verified component context")
+	}
+	if err := cvValidateNetworkComponentDescriptor(s.cfg, descriptor); err != nil {
+		return nil, err
+	}
 	key := cvComponentKey(descriptor.dealer, descriptor.leafDigest)
 	s.mu.Lock()
 	cached := s.verifiedLeaves[key]
-	s.mu.Unlock()
 	if cached != nil {
-		if err := cvValidateAcceptedLeaf(s.leafCtx, cached); err != nil {
-			return nil, err
-		}
+		s.mu.Unlock()
 		if cvPerfCountersEnabled {
 			cvPerfCounters.verifiedLeafCacheHits.Add(1)
 		}
 		return cached, nil
 	}
+	call := s.componentRetrievals[key]
+	if call == nil {
+		if cvPerfCountersEnabled {
+			cvPerfCounters.componentRetrievalStarts.Add(1)
+		}
+		call = &cvComponentRetrievalCall{done: make(chan struct{})}
+		s.componentRetrievals[key] = call
+		go func() {
+			accepted, retrieveErr := s.loadOrRetrieveComponentOnce(descriptor)
+			s.mu.Lock()
+			call.accepted = accepted
+			call.err = retrieveErr
+			delete(s.componentRetrievals, key)
+			close(call.done)
+			s.mu.Unlock()
+		}()
+	} else if cvPerfCountersEnabled {
+		cvPerfCounters.componentRetrievalJoins.Add(1)
+	}
+	s.mu.Unlock()
 	if cvPerfCountersEnabled {
 		cvPerfCounters.verifiedLeafCacheMiss.Add(1)
 	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
+	case <-call.done:
+		return call.accepted, call.err
+	}
+}
+
+func (s *cvComponentService) loadOrRetrieveComponentOnce(descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {
 	wire, err := s.store.Read(s.cfg.SID, s.cfg.Epoch, descriptor.dealer, s.localNode, descriptor.leafDigest)
 	if err == nil {
 		accepted, decodeErr := s.cacheVerifiedWire(descriptor.dealer, descriptor.leafDigest, wire)
@@ -1031,14 +1064,11 @@ func (s *cvComponentService) loadOrRetrieveComponent(ctx context.Context, descri
 	if !os.IsNotExist(err) {
 		return nil, err
 	}
-	leaf, err := s.Retrieve(ctx, descriptor)
+	accepted, err := s.retrieveComponentNetwork(s.ctx, descriptor)
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	accepted := s.verifiedLeaves[key]
-	s.mu.Unlock()
-	if accepted == nil || accepted.leaf != leaf {
+	if accepted == nil {
 		return nil, fmt.Errorf("retrieved CV-sAPVSS component was not verified")
 	}
 	return accepted, nil
@@ -1075,9 +1105,7 @@ func (s *cvComponentService) RecoverAggregate(ctx context.Context, rlo *AggRLO) 
 		s.mu.Unlock()
 	}()
 	requestWire, _ := cvRecoverGetCanonicalBytes(headerDigest)
-	for _, holder := range requestTargets {
-		_ = s.send(holder, cvTagRecoverGet, requestWire)
-	}
+	s.sendMany(requestTargets, cvTagRecoverGet, requestWire)
 	need := len(s.cfg.OldCommittee) - 2*s.cfg.FOld
 	artifacts := make(map[int]cvFreshShardArtifact, need)
 	for len(artifacts) < need {

@@ -128,6 +128,46 @@ func TestCVSAPVSSThresholdOutputUsesLocalSharesAndPublicReceipts(t *testing.T) {
 	}
 }
 
+func TestCVSAPVSSPreparedReceiptsReuseVerifiedTokens(t *testing.T) {
+	_, leafContext, receiverSecrets, leaves := cvM4Fixture(t)
+	agg, err := cvAgg(&leafContext, leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiverOrder := []int{10, 11, 12, 13}
+	prepared, err := cvPrepareLocalDecryptionOutputs(
+		&leafContext, agg, receiverOrder, map[int]fr.Element{
+			10: receiverSecrets[0], 11: receiverSecrets[1],
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromTokens, err := cvThresholdPublicKeyFromVerifiedReceipts(
+		&leafContext, agg, receiverOrder, prepared.verified,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromWire, err := cvThresholdPublicKeyFromReceipts(
+		&leafContext, agg, receiverOrder, prepared.receipts,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fromTokens, fromWire) {
+		t.Fatal("verified receipt token interpolation differs from full wire verification")
+	}
+
+	prepared.verified[10].wire = append([]byte(nil), prepared.verified[10].wire...)
+	prepared.verified[10].wire[len(prepared.verified[10].wire)-1] ^= 1
+	if _, err := cvThresholdPublicKeyFromVerifiedReceipts(
+		&leafContext, agg, receiverOrder, prepared.verified,
+	); err == nil {
+		t.Fatal("mutated cached receipt token was accepted")
+	}
+}
+
 func TestCVSAPVSSM4FreshBuilderMatchesCheckedBuilder(t *testing.T) {
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&leafContext, leaves)

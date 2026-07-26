@@ -14,6 +14,10 @@ apvss_fallback_profile="${RLADKR_APVSS_FALLBACK_PROFILE:-exact-lane}"
 allow_experimental_apvss="${RLADKR_ALLOW_EXPERIMENTAL_APVSS:-false}"
 apvss_forced_fallback_count="${RLADKR_APVSS_FORCED_FALLBACK_COUNT:-0}"
 apvss_wait_all_acks="${RLADKR_APVSS_WAIT_ALL_ACKS:-false}"
+# All n node processes share one host in this harness. Keep the default at one
+# crypto worker per process so the benchmark does not oversubscribe the host;
+# callers can still set RLADKR_CRYPTO_WORKERS explicitly.
+crypto_workers="${RLADKR_CRYPTO_WORKERS:-1}"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$repo_dir/bin/rladkrbench"
 summary_awk="$repo_dir/scripts/summarize_cluster_bench.awk"
@@ -71,6 +75,7 @@ for ((i=0; i<n; i++)); do
     export RLADKR_LISTENER_READY_NODE_COUNT="$n"
     export RLADKR_CV_DEBUG="${RLADKR_CV_DEBUG:-1}"
     export RLADKR_CV_PERF_COUNTERS="${RLADKR_CV_PERF_COUNTERS:-1}"
+    export RLADKR_CRYPTO_WORKERS="$crypto_workers"
     "$binary" -n "$n" -f "$f" -runs 1 -epochs 1 \
       -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \

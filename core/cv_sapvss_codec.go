@@ -613,7 +613,7 @@ func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) 
 	if !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV-sAPVSS Leaf encoding")
 	}
-	if err := cvVerifyLeaf(expectedContext, leaf); err != nil {
+	if err := cvVerifyLeafCanonical(expectedContext, expectedContextWire, contextWire, leaf, wire); err != nil {
 		return nil, err
 	}
 	return leaf, nil
@@ -624,6 +624,25 @@ func cvDecodeReceipt(
 	expectedContext *cvLeafContext,
 	agg *cvAggregateTranscript,
 	expectedReceiverIndex int,
+) (*cvReceipt, error) {
+	return cvDecodeReceiptMode(wire, expectedContext, agg, expectedReceiverIndex, true)
+}
+
+func cvDecodeReceiptVerifiedAggregate(
+	wire []byte,
+	expectedContext *cvLeafContext,
+	agg *cvAggregateTranscript,
+	expectedReceiverIndex int,
+) (*cvReceipt, error) {
+	return cvDecodeReceiptMode(wire, expectedContext, agg, expectedReceiverIndex, false)
+}
+
+func cvDecodeReceiptMode(
+	wire []byte,
+	expectedContext *cvLeafContext,
+	agg *cvAggregateTranscript,
+	expectedReceiverIndex int,
+	checkAggregateDigest bool,
 ) (*cvReceipt, error) {
 	if len(wire) == 0 || len(wire) > cvMaxCanonicalFieldBytes {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receipt length")
@@ -671,7 +690,7 @@ func cvDecodeReceipt(
 	}
 	receipt.digestWire = append([]byte(nil), wire...)
 	receipt.digest = hashBytes([]byte(cvReceiptDomain), wire)
-	if err := cvVerifyShare(expectedContext, agg, expectedReceiverIndex, receipt); err != nil {
+	if err := cvVerifyShareMode(expectedContext, agg, expectedReceiverIndex, receipt, checkAggregateDigest); err != nil {
 		return nil, err
 	}
 	return receipt, nil

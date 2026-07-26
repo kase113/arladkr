@@ -754,9 +754,8 @@ func cvProveExactRange(
 			)
 			var rhoSum fr.Element
 			for bit := 0; bit < bits; bit++ {
-				weight := new(big.Int).Lsh(big.NewInt(1), uint(bit))
 				var weightScalar fr.Element
-				weightScalar.SetBigInt(weight)
+				weightScalar.SetUint64(uint64(1) << uint(bit))
 				bitIndex := index + bit
 				var term fr.Element
 				term.Mul(&weightScalar, &witnesses[bitIndex].rho)

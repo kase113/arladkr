@@ -554,6 +554,28 @@ func apvssProveFallbackLane(
 	return apvssFallbackProof{receiverIndex: receiverIndex, proof: proof}, nil
 }
 
+func apvssProveFallbackLanes(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
+	receiverIndices []int,
+) ([]apvssFallbackProof, error) {
+	proofs := make([]apvssFallbackProof, len(receiverIndices))
+	err := cvRunParallelChecks(len(receiverIndices), func(index int) error {
+		receiverIndex := receiverIndices[index]
+		proof, proveErr := apvssProveFallbackLane(
+			leaf,
+			receiverIndex,
+			witness.scalars[receiverIndex-1],
+			witness.blindings[receiverIndex-1],
+			witness.scalarCoins[receiverIndex-1],
+			witness.blindingCoins[receiverIndex-1],
+		)
+		proofs[index] = proof
+		return proveErr
+	})
+	return proofs, err
+}
+
 func apvssVerifyFallbackLane(leaf *cvLeaf, fallback *apvssFallbackProof) error {
 	if fallback == nil || fallback.proof == nil {
 		return fmt.Errorf("missing APVSS fallback proof")
@@ -630,22 +652,16 @@ func apvssBuildPrototypeWithFallbackProfile(
 		leaf:            leaf,
 		fallbackProfile: apvssNormalizeFallbackProfile(fallbackProfile),
 	}
+	if prototype.fallbackProfile == apvssFallbackExactLaneProfile {
+		proofs, proveErr := apvssProveFallbackLanes(leaf, witness, fallbackIndices)
+		if proveErr != nil {
+			return nil, proveErr
+		}
+		prototype.fallbackProofs = proofs
+	}
 	for receiverIndex := 1; receiverIndex <= len(leaf.receivers); receiverIndex++ {
 		if _, fallback := fallbackSet[receiverIndex]; fallback {
-			if prototype.fallbackProfile == apvssFallbackExactLaneProfile {
-				proof, err := apvssProveFallbackLane(
-					leaf,
-					receiverIndex,
-					witness.scalars[receiverIndex-1],
-					witness.blindings[receiverIndex-1],
-					witness.scalarCoins[receiverIndex-1],
-					witness.blindingCoins[receiverIndex-1],
-				)
-				if err != nil {
-					return nil, err
-				}
-				prototype.fallbackProofs = append(prototype.fallbackProofs, proof)
-			} else {
+			if prototype.fallbackProfile != apvssFallbackExactLaneProfile {
 				prototype.fallbackIndices = append(prototype.fallbackIndices, receiverIndex)
 			}
 			continue
@@ -718,10 +734,12 @@ func apvssAssembleVerifiedPrototypeWithFallbackProfile(
 		if _, duplicate := ackSet[ack.receiverIndex]; duplicate {
 			return nil, fmt.Errorf("duplicate APVSS ACK receiver index")
 		}
-		if err := apvssVerifyLaneACK(leaf, &ack); err != nil {
-			return nil, err
-		}
 		ackSet[ack.receiverIndex] = ack
+	}
+	if err := cvRunParallelChecks(len(acks), func(index int) error {
+		return apvssVerifyLaneACK(leaf, &acks[index])
+	}); err != nil {
+		return nil, err
 	}
 	if len(ackSet) < n-context.sharingDegree {
 		return nil, fmt.Errorf("APVSS ACK set is below n_n-f_n")
@@ -730,24 +748,26 @@ func apvssAssembleVerifiedPrototypeWithFallbackProfile(
 		leaf:            leaf,
 		fallbackProfile: apvssNormalizeFallbackProfile(fallbackProfile),
 	}
+	missing := make([]int, 0, n-len(ackSet))
+	for receiverIndex := 1; receiverIndex <= n; receiverIndex++ {
+		if _, ok := ackSet[receiverIndex]; !ok {
+			missing = append(missing, receiverIndex)
+		}
+	}
+	if prototype.fallbackProfile == apvssFallbackExactLaneProfile {
+		proofs, proveErr := apvssProveFallbackLanes(leaf, witness, missing)
+		if proveErr != nil {
+			return nil, proveErr
+		}
+		prototype.fallbackProofs = proofs
+	}
 	for receiverIndex := 1; receiverIndex <= n; receiverIndex++ {
 		if ack, ok := ackSet[receiverIndex]; ok {
 			prototype.acks = append(prototype.acks, ack)
 			continue
 		}
 		if prototype.fallbackProfile == apvssFallbackExactLaneProfile {
-			fallback, err := apvssProveFallbackLane(
-				leaf,
-				receiverIndex,
-				witness.scalars[receiverIndex-1],
-				witness.blindings[receiverIndex-1],
-				witness.scalarCoins[receiverIndex-1],
-				witness.blindingCoins[receiverIndex-1],
-			)
-			if err != nil {
-				return nil, err
-			}
-			prototype.fallbackProofs = append(prototype.fallbackProofs, fallback)
+			continue
 		} else {
 			prototype.fallbackIndices = append(prototype.fallbackIndices, receiverIndex)
 		}
@@ -801,25 +821,33 @@ func apvssVerifyPrototypePartition(prototype *apvssLeafPrototype) error {
 			covered[ack.receiverIndex-1] {
 			return fmt.Errorf("APVSS ACK indices are not a strict set")
 		}
-		if err := apvssVerifyLaneACK(prototype.leaf, ack); err != nil {
-			return err
-		}
 		covered[ack.receiverIndex-1] = true
 		previous = ack.receiverIndex
 	}
 	previous = 0
+	verificationJobs := make([]func() error, 0, len(prototype.acks)+len(fallbackIndices))
+	for i := range prototype.acks {
+		ack := &prototype.acks[i]
+		verificationJobs = append(verificationJobs, func() error { return apvssVerifyLaneACK(prototype.leaf, ack) })
+	}
 	for i, receiverIndex := range fallbackIndices {
 		if receiverIndex <= previous || receiverIndex <= 0 || receiverIndex > n ||
 			covered[receiverIndex-1] {
 			return fmt.Errorf("APVSS fallback indices are not the ACK complement")
 		}
 		if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackExactLaneProfile {
-			if err := apvssVerifyFallbackLane(prototype.leaf, &prototype.fallbackProofs[i]); err != nil {
-				return err
-			}
+			fallback := &prototype.fallbackProofs[i]
+			verificationJobs = append(verificationJobs, func() error {
+				return apvssVerifyFallbackLane(prototype.leaf, fallback)
+			})
 		}
 		covered[receiverIndex-1] = true
 		previous = receiverIndex
+	}
+	if err := cvRunParallelChecks(len(verificationJobs), func(index int) error {
+		return verificationJobs[index]()
+	}); err != nil {
+		return err
 	}
 	if _, err := apvssFallbackSetStatementDigest(
 		prototype.leaf,

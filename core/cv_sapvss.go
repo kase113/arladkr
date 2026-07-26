@@ -20,6 +20,12 @@ type cvEvaluationPowerKey struct {
 
 var cvEvaluationPowerCache sync.Map
 
+var (
+	cvPedersenBaseOnce  sync.Once
+	cvPedersenBaseValue bls12381.G1Affine
+	cvPedersenBaseErr   error
+)
+
 const (
 	cvMaxChunkBits               = 20
 	cvMaxDLogBound               = uint64(1) << 32
@@ -121,17 +127,20 @@ func cvReceiverPublicKey(secret fr.Element) (bls12381.G1Affine, error) {
 }
 
 func cvPedersenBase() (bls12381.G1Affine, error) {
-	h, err := bls12381.HashToG1(
-		[]byte("ARL-CV-sAPVSS-Pedersen-H"),
-		[]byte("ARL-CV-sAPVSS-H2C"),
-	)
-	if err != nil {
-		return bls12381.G1Affine{}, fmt.Errorf("derive CV-sAPVSS Pedersen base: %w", err)
-	}
-	if !cvValidG1(&h, false) || h.Equal(&genG1) {
-		return bls12381.G1Affine{}, fmt.Errorf("invalid CV-sAPVSS Pedersen base")
-	}
-	return h, nil
+	cvPedersenBaseOnce.Do(func() {
+		cvPedersenBaseValue, cvPedersenBaseErr = bls12381.HashToG1(
+			[]byte("ARL-CV-sAPVSS-Pedersen-H"),
+			[]byte("ARL-CV-sAPVSS-H2C"),
+		)
+		if cvPedersenBaseErr != nil {
+			cvPedersenBaseErr = fmt.Errorf("derive CV-sAPVSS Pedersen base: %w", cvPedersenBaseErr)
+			return
+		}
+		if !cvValidG1(&cvPedersenBaseValue, false) || cvPedersenBaseValue.Equal(&genG1) {
+			cvPedersenBaseErr = fmt.Errorf("invalid CV-sAPVSS Pedersen base")
+		}
+	})
+	return cvPedersenBaseValue, cvPedersenBaseErr
 }
 
 func cvEncryptPoint(receiverPK, message *bls12381.G1Affine, coin fr.Element) (cvElGamalCiphertext, error) {
@@ -792,6 +801,30 @@ func cvEvaluateCommitmentsWithPowers(commitments []bls12381.G1Affine, powers []f
 }
 
 func cvVerifyLeaf(expectedContext *cvLeafContext, leaf *cvLeaf) error {
+	expectedContextWire, err := cvLeafContextCanonicalBytes(expectedContext)
+	if err != nil {
+		return err
+	}
+	if leaf == nil {
+		return fmt.Errorf("invalid CV-sAPVSS Leaf")
+	}
+	leafContextWire, err := cvLeafContextCanonicalBytes(&leaf.context)
+	if err != nil {
+		return err
+	}
+	wire, err := cvLeafCanonicalBytes(leaf)
+	if err != nil {
+		return err
+	}
+	return cvVerifyLeafCanonical(expectedContext, expectedContextWire, leafContextWire, leaf, wire)
+}
+
+func cvVerifyLeafCanonical(
+	expectedContext *cvLeafContext,
+	expectedContextWire, leafContextWire []byte,
+	leaf *cvLeaf,
+	canonicalWire []byte,
+) error {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.leafVerifyCalls.Add(1)
 	}
@@ -813,12 +846,7 @@ func cvVerifyLeaf(expectedContext *cvLeafContext, leaf *cvLeaf) error {
 	default:
 		return fmt.Errorf("unsupported CV-sAPVSS Leaf proof profile")
 	}
-	expectedContextWire, err := cvLeafContextCanonicalBytes(expectedContext)
-	if err != nil {
-		return err
-	}
-	leafContextWire, err := cvLeafContextCanonicalBytes(&leaf.context)
-	if err != nil || !bytes.Equal(expectedContextWire, leafContextWire) {
+	if !bytes.Equal(expectedContextWire, leafContextWire) {
 		return fmt.Errorf("CV-sAPVSS Leaf context mismatch")
 	}
 	if len(leaf.coefficientCommitments) != expectedContext.sharingDegree+1 ||
@@ -847,11 +875,7 @@ func cvVerifyLeaf(expectedContext *cvLeafContext, leaf *cvLeaf) error {
 			return fmt.Errorf("CV-sAPVSS Leaf evaluation commitment mismatch at index %d", i+1)
 		}
 	}
-	wire, err := cvLeafCanonicalBytes(leaf)
-	if err != nil {
-		return err
-	}
-	expectedDigest := hashBytes([]byte(cvLeafDigestDomain), wire)
+	expectedDigest := hashBytes([]byte(cvLeafDigestDomain), canonicalWire)
 	if len(leaf.digest) != sha256.Size || !bytes.Equal(leaf.digest, expectedDigest) {
 		return fmt.Errorf("CV-sAPVSS Leaf digest mismatch")
 	}
