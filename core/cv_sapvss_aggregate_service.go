@@ -651,12 +651,18 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			nonce: append([]byte(nil), dispersal.nonce...), dataShards: dispersal.dataShards,
 			totalShards: len(dispersal.shards), payloadDigest: append([]byte(nil), dispersal.payloadDigest...),
 			root: append([]byte(nil), dispersal.root...), shard: dispersal.shards[selfIndex]}
-		if selfWire, selfErr := cvFreshShardArtifactCanonicalBytes(&selfArtifact); selfErr == nil {
-			_ = s.persistFreshArtifact(headerDigest, selfWire)
+		selfWire, selfErr := cvFreshShardArtifactCanonicalBytes(&selfArtifact)
+		if selfErr != nil {
+			return nil, selfErr
 		}
-		if selfSig, selfErr := s.localARCShare(headerDigest); selfErr == nil {
-			pending.values <- cvARCShare{holder: s.localNode, headerDigest: append([]byte(nil), headerDigest...), signature: selfSig}
+		if selfErr = s.persistFreshArtifact(headerDigest, selfWire); selfErr != nil {
+			return nil, fmt.Errorf("persist local CV-sAPVSS fresh artifact before ARC: %w", selfErr)
 		}
+		selfSig, selfErr := s.localARCShare(headerDigest)
+		if selfErr != nil {
+			return nil, selfErr
+		}
+		pending.values <- cvARCShare{holder: s.localNode, headerDigest: append([]byte(nil), headerDigest...), signature: selfSig}
 	}
 	threshold := n - s.cfg.FOld
 	if sent < threshold {
@@ -718,7 +724,9 @@ func (s *cvComponentService) handleAggregateOffer(msg Message) {
 	if cvPerfCountersEnabled {
 		cvPerfCounters.aggregateOffers.Add(1)
 	}
+	s.backgroundWG.Add(1)
 	go func() {
+		defer s.backgroundWG.Done()
 		manifest, err := cvDecodeAggregateManifestOffer(msg.Body, s.cfg)
 		if err != nil {
 			return
@@ -1019,7 +1027,9 @@ func (s *cvComponentService) getVerifiedComponent(ctx context.Context, descripto
 		}
 		call = &cvComponentRetrievalCall{done: make(chan struct{})}
 		s.componentRetrievals[key] = call
+		s.backgroundWG.Add(1)
 		go func() {
+			defer s.backgroundWG.Done()
 			accepted, retrieveErr := s.loadOrRetrieveComponentOnce(descriptor)
 			s.mu.Lock()
 			call.accepted = accepted

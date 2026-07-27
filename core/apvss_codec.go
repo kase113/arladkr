@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"fmt"
+
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
 const apvssMaxLeafWireBytes = cvMaxLeafWireBytes
@@ -11,6 +13,157 @@ func apvssHasLeafWireDomain(wire []byte) bool {
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(apvssLeafWireDomain))
 	return err == nil && bytes.Equal(domain, []byte(apvssLeafWireDomain))
+}
+
+func apvssLaneOfferCanonicalBytes(offer *apvssLaneOffer, context *cvLeafContext) ([]byte, error) {
+	leaf, err := apvssLaneOfferLeafView(context, offer)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := apvssLaneStatementBytes(leaf, offer.receiverIndex); err != nil {
+		return nil, err
+	}
+	contextDigest := cvLeafContextDigest(context)
+	if len(contextDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS lane offer context")
+	}
+	return apvssLaneOfferCanonicalBytesTrusted(offer, contextDigest)
+}
+
+// The caller must already have validated the structural leaf and context.
+func apvssLaneOfferCanonicalBytesTrusted(offer *apvssLaneOffer, contextDigest []byte) ([]byte, error) {
+	if offer == nil || len(contextDigest) != 32 || len(offer.leafDigest) != 32 ||
+		offer.receiverIndex <= 0 || offer.receiver.receiverIndex != offer.receiverIndex ||
+		offer.receiver.encryptedShare == nil {
+		return nil, fmt.Errorf("invalid trusted APVSS lane offer")
+	}
+	lane := &offer.receiver
+	share := lane.encryptedShare
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, []byte(apvssLaneOfferDomain)); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, contextDigest); err != nil {
+		return nil, err
+	}
+	cvWriteUint64(&wire, offer.dealerID)
+	if err := cvWriteBytes(&wire, offer.leafDigest); err != nil {
+		return nil, err
+	}
+	if err := cvWriteUint32(&wire, offer.receiverIndex); err != nil {
+		return nil, err
+	}
+	if err := cvWriteUint32(&wire, len(offer.coefficientCommitments)); err != nil {
+		return nil, err
+	}
+	for i := range offer.coefficientCommitments {
+		cvWritePoint(&wire, &offer.coefficientCommitments[i])
+	}
+	cvWritePoint(&wire, &lane.receiverPublicKey)
+	cvWritePoint(&wire, &share.commitment)
+	if err := cvWriteUint32(&wire, len(share.scalarChunks)); err != nil {
+		return nil, err
+	}
+	for i := range share.scalarChunks {
+		cvWriteCiphertext(&wire, &share.scalarChunks[i])
+	}
+	cvWriteCiphertext(&wire, &share.blinding)
+	if wire.Len() > cvMaxNetworkPayloadBytes {
+		return nil, fmt.Errorf("APVSS lane offer exceeds the wire safety limit")
+	}
+	return wire.Bytes(), nil
+}
+
+func apvssDecodeLaneOffer(
+	wire []byte,
+	expectedContext *cvLeafContext,
+	expectedReceiverIndex int,
+) (*apvssLaneOffer, error) {
+	if expectedContext == nil || expectedReceiverIndex <= 0 ||
+		expectedReceiverIndex > len(expectedContext.receiverPublicKeys) || len(wire) == 0 ||
+		len(wire) > cvMaxNetworkPayloadBytes {
+		return nil, fmt.Errorf("invalid expected APVSS lane offer context or wire")
+	}
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(apvssLaneOfferDomain))
+	if err != nil || !bytes.Equal(domain, []byte(apvssLaneOfferDomain)) {
+		return nil, fmt.Errorf("invalid APVSS lane offer domain")
+	}
+	expectedContextDigest := cvLeafContextDigest(expectedContext)
+	contextDigest, err := r.bytes(32)
+	if err != nil || !bytes.Equal(contextDigest, expectedContextDigest) {
+		return nil, fmt.Errorf("APVSS lane offer context mismatch")
+	}
+	offer := &apvssLaneOffer{}
+	offer.dealerID, err = r.uint64()
+	if err != nil {
+		return nil, fmt.Errorf("decode APVSS lane offer dealer: %w", err)
+	}
+	offer.leafDigest, err = r.bytes(32)
+	if err != nil || len(offer.leafDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS lane offer leaf digest")
+	}
+	offer.receiverIndex, err = r.uint32()
+	if err != nil || offer.receiverIndex != expectedReceiverIndex {
+		return nil, fmt.Errorf("APVSS lane offer receiver mismatch")
+	}
+	coefficientCount := expectedContext.sharingDegree + 1
+	if err := cvReadExactCount(r, coefficientCount, "APVSS lane offer commitments"); err != nil {
+		return nil, err
+	}
+	offer.coefficientCommitments = make([]bls12381.G1Affine, coefficientCount)
+	for i := range offer.coefficientCommitments {
+		offer.coefficientCommitments[i], err = r.point()
+		if err != nil {
+			return nil, fmt.Errorf("decode APVSS lane offer commitment %d: %w", i, err)
+		}
+	}
+	offer.receiver.receiverIndex = offer.receiverIndex
+	offer.receiver.receiverPublicKey, err = r.point()
+	if err != nil || !offer.receiver.receiverPublicKey.Equal(
+		&expectedContext.receiverPublicKeys[offer.receiverIndex-1],
+	) {
+		return nil, fmt.Errorf("APVSS lane offer receiver key mismatch")
+	}
+	share := &cvEncryptedShare{receiverPublicKey: offer.receiver.receiverPublicKey}
+	share.commitment, err = r.point()
+	if err != nil {
+		return nil, fmt.Errorf("decode APVSS lane offer commitment: %w", err)
+	}
+	chunks, err := cvChunkCount(expectedContext.profile)
+	if err != nil {
+		return nil, err
+	}
+	if err := cvReadExactCount(r, chunks, "APVSS lane offer scalar chunks"); err != nil {
+		return nil, err
+	}
+	if err := cvRequireRemaining(r, chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "APVSS lane offer ciphertexts"); err != nil {
+		return nil, err
+	}
+	share.scalarChunks = make([]cvElGamalCiphertext, chunks)
+	for i := range share.scalarChunks {
+		share.scalarChunks[i], err = r.ciphertext()
+		if err != nil {
+			return nil, fmt.Errorf("decode APVSS lane offer ciphertext %d: %w", i, err)
+		}
+	}
+	share.blinding, err = r.ciphertext()
+	if err != nil || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid APVSS lane offer blinding or framing")
+	}
+	offer.receiver.encryptedShare = share
+	leaf, err := apvssLaneOfferLeafView(expectedContext, offer)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := apvssLaneStatementBytes(leaf, offer.receiverIndex); err != nil {
+		return nil, err
+	}
+	canonical, err := apvssLaneOfferCanonicalBytesTrusted(offer, expectedContextDigest)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical APVSS lane offer")
+	}
+	return offer, nil
 }
 
 func apvssValidatePartitionShape(prototype *apvssLeafPrototype) error {

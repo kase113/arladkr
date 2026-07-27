@@ -1,5 +1,6 @@
 # Go build and test artifacts
 /bin/
+/experiments/practical-adkr/bin/
 /*.test
 *.out
 *.prof

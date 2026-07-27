@@ -1,12 +1,87 @@
 package core
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func TestTCPMessageFrameRoundTrip(t *testing.T) {
+	want := Message{From: 7, To: 11, Tag: apvssTagLaneOffer, Body: []byte{0, 1, 2, 255}}
+	frame, err := tcpMessageFrame(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, wireBytes, err := readTCPMessageFrame(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wireBytes != len(frame) || got.From != want.From || got.To != want.To ||
+		got.Tag != want.Tag || !bytes.Equal(got.Body, want.Body) {
+		t.Fatalf("TCP frame round trip changed message: got=%+v", got)
+	}
+	bad := append([]byte(nil), frame...)
+	bad[0]++
+	if _, _, err := readTCPMessageFrame(bytes.NewReader(bad)); err == nil {
+		t.Fatal("accepted unknown TCP frame version")
+	}
+}
+
+func TestTCPPooledSendReconnectsAfterBrokenConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer conn.Close()
+		if _, _, readErr := readTCPMessageFrame(conn); readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		_, writeErr := conn.Write([]byte{1})
+		serverDone <- writeErr
+	}()
+	transport := &tcpLoopbackTransport{
+		conns:  make(map[string]*tcpLoopbackPoolConn),
+		dialTO: time.Second, writeTO: time.Second, readTO: time.Second,
+	}
+	msg := Message{From: 1, To: 2, Tag: "reconnect", Body: []byte("payload")}
+	frame, err := tcpMessageFrame(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := tcpLoopbackPoolKey(msg.From, msg.To, listener.Addr().String())
+	brokenClient, brokenServer := net.Pipe()
+	_ = brokenClient.Close()
+	_ = brokenServer.Close()
+	transport.conns[key] = &tcpLoopbackPoolConn{conn: brokenClient}
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.sendRemotePooled(listener.Addr().String(), msg, frame, len(frame))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("pooled reconnect failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pooled reconnect deadlocked")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	transport.closePooledConns()
+}
 
 func TestNormalizeConfig_FiltersAndSortsLocalNodeIDs(t *testing.T) {
 	cfg := NormalizeConfig(Config{

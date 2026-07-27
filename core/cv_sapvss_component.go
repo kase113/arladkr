@@ -17,17 +17,18 @@ const (
 	cvMaxComponentSignatureBytes   = 1 << 20
 )
 
-// cvComponentDispersal is the public, constant-size commitment to a
-// component's RS encoding. A component lock binds this structure, rather than
-// merely binding the leaf digest. Merkle membership proves that each holder
-// stored its designated committed shard; reconstruction and the payload/leaf
-// digests remain mandatory because membership alone is not a proof that a
-// Byzantine dealer supplied a valid RS codeword.
+// cvComponentDispersal is the compact public commitment to a component's RS
+// encoding. The Merkle root commits every shard before the Fiat-Shamir
+// codeword challenge is derived. dataFingerprints then define one RS codeword
+// for 128 bits of independent GF(256) linear checks. Their encoded size grows
+// linearly with dataShards.
 type cvComponentDispersal struct {
-	nonce         []byte
-	dataShards    int
-	payloadDigest []byte
-	root          []byte
+	nonce            []byte
+	dataShards       int
+	shardBytes       int
+	payloadDigest    []byte
+	root             []byte
+	dataFingerprints [][]byte
 }
 
 type cvComponentShard struct {
@@ -162,8 +163,18 @@ func cvComponentStatementDigest(dealer int, leafDigest []byte, dispersal *cvComp
 }
 
 func cvValidComponentDispersal(dispersal *cvComponentDispersal) bool {
-	return dispersal != nil && len(dispersal.nonce) == 32 && dispersal.dataShards > 0 &&
-		len(dispersal.payloadDigest) == 32 && len(dispersal.root) == 32
+	if dispersal == nil || len(dispersal.nonce) != 32 || dispersal.dataShards <= 0 ||
+		dispersal.shardBytes <= 0 || dispersal.shardBytes > cvMaxLeafWireBytes+8 ||
+		len(dispersal.payloadDigest) != 32 || len(dispersal.root) != 32 ||
+		len(dispersal.dataFingerprints) != dispersal.dataShards {
+		return false
+	}
+	for _, fingerprint := range dispersal.dataFingerprints {
+		if len(fingerprint) != cvComponentCodewordChecks {
+			return false
+		}
+	}
+	return true
 }
 
 func cvValidComponentDispersalForRoster(dispersal *cvComponentDispersal, totalShards int) bool {
@@ -180,10 +191,21 @@ func cvWriteComponentDispersal(wire *bytes.Buffer, dispersal *cvComponentDispers
 	if err := cvWriteUint32(wire, dispersal.dataShards); err != nil {
 		return err
 	}
+	if err := cvWriteUint32(wire, dispersal.shardBytes); err != nil {
+		return err
+	}
 	if err := cvWriteBytes(wire, dispersal.payloadDigest); err != nil {
 		return err
 	}
-	return cvWriteBytes(wire, dispersal.root)
+	if err := cvWriteBytes(wire, dispersal.root); err != nil {
+		return err
+	}
+	for _, fingerprint := range dispersal.dataFingerprints {
+		if err := cvWriteBytes(wire, fingerprint); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cvReadComponentDispersal(r *cvWireReader) (*cvComponentDispersal, error) {
@@ -192,8 +214,12 @@ func cvReadComponentDispersal(r *cvWireReader) (*cvComponentDispersal, error) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component dispersal nonce")
 	}
 	dataShards, err := r.uint32()
-	if err != nil {
-		return nil, err
+	if err != nil || dataShards <= 0 || dataShards > 1<<16 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component data shard count")
+	}
+	shardBytes, err := r.uint32()
+	if err != nil || shardBytes <= 0 || shardBytes > cvMaxLeafWireBytes+8 {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component shard length")
 	}
 	payloadDigest, err := r.bytes(32)
 	if err != nil || len(payloadDigest) != 32 {
@@ -203,7 +229,17 @@ func cvReadComponentDispersal(r *cvWireReader) (*cvComponentDispersal, error) {
 	if err != nil || len(root) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component shard root")
 	}
-	return &cvComponentDispersal{nonce: nonce, dataShards: dataShards, payloadDigest: payloadDigest, root: root}, nil
+	dataFingerprints := make([][]byte, dataShards)
+	for i := range dataFingerprints {
+		dataFingerprints[i], err = r.bytes(cvComponentCodewordChecks)
+		if err != nil || len(dataFingerprints[i]) != cvComponentCodewordChecks {
+			return nil, fmt.Errorf("invalid CV-sAPVSS component codeword fingerprint")
+		}
+	}
+	return &cvComponentDispersal{
+		nonce: nonce, dataShards: dataShards, shardBytes: shardBytes,
+		payloadDigest: payloadDigest, root: root, dataFingerprints: dataFingerprints,
+	}, nil
 }
 
 func cvDisperseComponent(leafWire []byte, totalShards, dataShards int) (*cvComponentDispersal, []cvComponentShard, error) {
@@ -219,11 +255,14 @@ func cvDisperseComponent(leafWire []byte, totalShards, dataShards int) (*cvCompo
 	}
 	nonce := hashBytes([]byte(cvComponentShardDomain), cvComponentLeafPayloadDigest(leafWire))
 	root, branches := cvBuildComponentMerkle(nonce, shards)
+	dataFingerprints, err := cvBuildComponentCodewordProof(root, shards, dataShards)
+	if err != nil {
+		return nil, nil, err
+	}
 	dispersal := &cvComponentDispersal{
-		nonce:         nonce,
-		dataShards:    dataShards,
-		payloadDigest: hashBytes([]byte(cvComponentPayloadDomain), leafWire),
-		root:          root,
+		nonce: nonce, dataShards: dataShards, shardBytes: len(shards[0]),
+		payloadDigest: hashBytes([]byte(cvComponentPayloadDomain), leafWire), root: root,
+		dataFingerprints: dataFingerprints,
 	}
 	encoded := make([]cvComponentShard, len(shards))
 	for i := range shards {
@@ -252,7 +291,7 @@ func cvVerifyComponentShard(dispersal *cvComponentDispersal, totalShards int, sh
 	if !bytes.Equal(digest, dispersal.root) {
 		return fmt.Errorf("CV-sAPVSS component shard root mismatch")
 	}
-	return nil
+	return cvVerifyComponentCodewordShard(dispersal, totalShards, shard)
 }
 
 func cvRecoverComponentWire(dispersal *cvComponentDispersal, totalShards int, available map[int]cvComponentShard) ([]byte, error) {
@@ -374,7 +413,7 @@ func cvDecodeComponentShardArtifact(wire []byte, expectedDealer, totalShards int
 	if err != nil || index < 0 || index >= totalShards {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component shard index")
 	}
-	payload, err := r.bytes(cvMaxLeafWireBytes)
+	payload, err := r.bytes(cvMaxLeafWireBytes + 8)
 	if err != nil || len(payload) == 0 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component shard payload")
 	}

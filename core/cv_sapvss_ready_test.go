@@ -2,8 +2,20 @@ package core
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"testing"
 )
+
+type cvFailingFreshArtifactStore struct{}
+
+func (cvFailingFreshArtifactStore) Put(string, int, []byte, int, []byte) error {
+	return errors.New("injected fresh-store failure")
+}
+
+func (cvFailingFreshArtifactStore) Read(string, int, []byte, int) ([]byte, error) {
+	return nil, errors.New("injected fresh-store failure")
+}
 
 func TestCVComponentReadyCertificateCodecAndThreshold(t *testing.T) {
 	cfg, _, _, _ := cvM4Fixture(t)
@@ -163,11 +175,13 @@ func TestCVLocalARCShareIsReusedPerHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &cvComponentService{
-		cfg:                   cfg,
-		localNode:             cfg.OldCommittee[0],
-		localARCShareByHeader: make(map[string][]byte),
+		cfg:                     cfg,
+		localNode:               cfg.OldCommittee[0],
+		localARCShareByHeader:   make(map[string][]byte),
+		persistedFreshArtifacts: make(map[string]struct{}),
 	}
 	digest := bytes.Repeat([]byte{0x44}, 32)
+	service.persistedFreshArtifacts[fmt.Sprintf("%x/%d", digest, service.localNode)] = struct{}{}
 	first, err := service.localARCShare(digest)
 	if err != nil {
 		t.Fatal(err)
@@ -180,11 +194,36 @@ func TestCVLocalARCShareIsReusedPerHeader(t *testing.T) {
 		t.Fatal("ARC share was not reused for the same header")
 	}
 	otherDigest := bytes.Repeat([]byte{0x55}, 32)
+	service.persistedFreshArtifacts[fmt.Sprintf("%x/%d", otherDigest, service.localNode)] = struct{}{}
 	other, err := service.localARCShare(otherDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Equal(first, other) || len(service.localARCShareByHeader) != 2 {
 		t.Fatal("service did not independently sign two distinct valid headers")
+	}
+}
+
+func TestCVLocalARCShareRequiresSuccessfulPersistence(t *testing.T) {
+	cfg, _, _, _ := cvM4Fixture(t)
+	if err := ensureRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	service := &cvComponentService{
+		cfg: cfg, localNode: cfg.OldCommittee[0], freshStore: cvFailingFreshArtifactStore{},
+		localARCShareByHeader: make(map[string][]byte), persistedFreshArtifacts: make(map[string]struct{}),
+	}
+	digest := bytes.Repeat([]byte{0x66}, 32)
+	if _, err := service.localARCShare(digest); err == nil {
+		t.Fatal("signed an ARC share without a persisted fresh artifact")
+	}
+	if err := service.persistFreshArtifact(digest, []byte("fresh artifact")); err == nil {
+		t.Fatal("injected fresh-store failure was ignored")
+	}
+	if _, err := service.localARCShare(digest); err == nil {
+		t.Fatal("signed an ARC share after failed fresh-artifact persistence")
+	}
+	if len(service.localARCShareByHeader) != 0 || len(service.persistedFreshArtifacts) != 0 {
+		t.Fatal("failed persistence left an ARC share or persisted token")
 	}
 }

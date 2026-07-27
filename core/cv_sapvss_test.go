@@ -138,6 +138,82 @@ func TestCVSAPVSSM0AggregateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCVSharedCoinBatchEncryptionMatchesReference(t *testing.T) {
+	profile := cvChunkProfile{chunkBits: 8, maxComponents: 3}
+	chunks, err := cvChunkCount(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]bls12381.G1Affine, 4)
+	scalars := make([]fr.Element, len(keys))
+	blindings := make([]fr.Element, len(keys))
+	for i := range keys {
+		keys[i], err = cvReceiverPublicKey(cvTestScalar(uint64(101 + i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scalars[i] = cvTestScalar(uint64(1001 + i*17))
+		blindings[i] = cvTestScalar(uint64(2001 + i*19))
+	}
+	coins := cvTestCoins(chunks, 3001)
+	blindingCoin := cvTestScalar(4001)
+	batched, err := cvEncryptSharesSharedCoins(
+		profile, keys, scalars, blindings, coins, blindingCoin,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range keys {
+		want, referenceErr := cvReferenceEncryptShare(
+			profile, keys[i], scalars[i], blindings[i], coins, blindingCoin,
+		)
+		if referenceErr != nil {
+			t.Fatal(referenceErr)
+		}
+		got := batched[i]
+		if got == nil || !got.receiverPublicKey.Equal(&want.receiverPublicKey) ||
+			!got.commitment.Equal(&want.commitment) ||
+			!apvssEqualCiphertext(&got.blinding, &want.blinding) ||
+			len(got.scalarChunks) != len(want.scalarChunks) {
+			t.Fatalf("batched receiver %d differs from reference", i+1)
+		}
+		for chunk := range got.scalarChunks {
+			if !apvssEqualCiphertext(&got.scalarChunks[chunk], &want.scalarChunks[chunk]) {
+				t.Fatalf("batched receiver %d chunk %d differs from reference", i+1, chunk)
+			}
+		}
+	}
+}
+
+func TestCVProductionJacobianAggregateMatchesAffineReference(t *testing.T) {
+	_, context, _, leaves := cvM4Fixture(t)
+	agg, err := cvAgg(&context, leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for receiverIndex := range agg.receivers {
+		shares := make([]*cvEncryptedShare, len(leaves))
+		for dealerIndex := range leaves {
+			shares[dealerIndex] = leaves[dealerIndex].receivers[receiverIndex].encryptedShare
+		}
+		want, referenceErr := cvAggregate(context.profile, shares)
+		if referenceErr != nil {
+			t.Fatal(referenceErr)
+		}
+		got := &agg.receivers[receiverIndex]
+		if !got.receiverPublicKey.Equal(&want.receiverPublicKey) ||
+			!apvssEqualCiphertext(&got.blinding, &want.blinding) ||
+			len(got.scalarChunks) != len(want.scalarChunks) {
+			t.Fatalf("Jacobian receiver %d differs from affine reference", receiverIndex+1)
+		}
+		for chunk := range got.scalarChunks {
+			if !apvssEqualCiphertext(&got.scalarChunks[chunk], &want.scalarChunks[chunk]) {
+				t.Fatalf("Jacobian receiver %d chunk %d differs from affine reference", receiverIndex+1, chunk)
+			}
+		}
+	}
+}
+
 func TestCVSAPVSSM0RejectsInfeasibleDLogProfile(t *testing.T) {
 	profile := cvChunkProfile{chunkBits: 20, maxComponents: 1 << 20}
 	if _, err := cvChunkCount(profile); err == nil {

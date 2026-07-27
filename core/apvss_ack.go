@@ -15,6 +15,7 @@ const (
 	apvssFallbackDomain      = "ARL-APVSS/exact-lane-fallback"
 	apvssLeafDigestDomain    = "ARL-APVSS/leaf"
 	apvssLeafWireDomain      = "ARL-APVSS/leaf-wire"
+	apvssLaneOfferDomain     = "ARL-APVSS/lane-offer"
 	apvssACKMessageDomain    = "ARL-APVSS/ack-message"
 	apvssFallbackSetDomain   = "ARL-APVSS/fallback-set"
 
@@ -31,6 +32,50 @@ type apvssSchnorrSignature struct {
 type apvssLaneACK struct {
 	receiverIndex int
 	signature     apvssSchnorrSignature
+}
+
+// apvssLaneOffer is the receiver-specific projection of a structural leaf.
+// It preserves the exact lane statement while avoiding full-leaf fan-out.
+type apvssLaneOffer struct {
+	dealerID               uint64
+	leafDigest             []byte
+	receiverIndex          int
+	coefficientCommitments []bls12381.G1Affine
+	receiver               cvLeafReceiver
+}
+
+func apvssLaneOfferFromLeaf(leaf *cvLeaf, receiverIndex int) (*apvssLaneOffer, error) {
+	lane, err := apvssLane(leaf, receiverIndex)
+	if err != nil || len(leaf.digest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS lane offer source")
+	}
+	return &apvssLaneOffer{
+		dealerID:               leaf.dealerID,
+		leafDigest:             append([]byte(nil), leaf.digest...),
+		receiverIndex:          receiverIndex,
+		coefficientCommitments: append([]bls12381.G1Affine(nil), leaf.coefficientCommitments...),
+		receiver: cvLeafReceiver{
+			receiverIndex:     lane.receiverIndex,
+			receiverPublicKey: lane.receiverPublicKey,
+			encryptedShare:    lane.encryptedShare,
+		},
+	}, nil
+}
+
+func apvssLaneOfferLeafView(context *cvLeafContext, offer *apvssLaneOffer) (*cvLeaf, error) {
+	if context == nil || offer == nil || offer.receiverIndex <= 0 ||
+		offer.receiverIndex > len(context.receiverPublicKeys) || len(offer.leafDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS lane offer")
+	}
+	receivers := make([]cvLeafReceiver, len(context.receiverPublicKeys))
+	receivers[offer.receiverIndex-1] = offer.receiver
+	return &cvLeaf{
+		context:                cvCloneLeafContext(*context),
+		dealerID:               offer.dealerID,
+		coefficientCommitments: append([]bls12381.G1Affine(nil), offer.coefficientCommitments...),
+		receivers:              receivers,
+		digest:                 append([]byte(nil), offer.leafDigest...),
+	}, nil
 }
 
 type apvssFallbackProof struct {

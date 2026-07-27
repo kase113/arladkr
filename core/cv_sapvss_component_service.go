@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,16 +82,34 @@ type apvssPendingLaneACKs struct {
 	values chan apvssLaneACK
 }
 
+type cvFreshArtifactStore interface {
+	Put(sid string, epoch int, headerDigest []byte, holder int, shard []byte) error
+	Read(sid string, epoch int, headerDigest []byte, holder int) ([]byte, error)
+}
+
+type cvComponentLeafCacheStore interface {
+	Put(sid string, epoch, dealer, holder int, leafDigest, leaf []byte) error
+	Read(sid string, epoch, dealer, holder int, leafDigest []byte) ([]byte, error)
+}
+
+type cvReconstructedLeafCacheJob struct {
+	dealer     int
+	leafDigest []byte
+	leafWire   []byte
+}
+
 type cvComponentService struct {
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	cfg                  Config
 	leafCtx              *cvLeafContext
+	leafContextDigest    []byte
 	localNode            int
 	transport            agreementTransport
-	store                *cvComponentLeafStore
+	networkAuth          *cvNetworkAuthenticator
+	store                cvComponentLeafCacheStore
 	shardStore           *cvComponentShardStore
-	freshStore           *cvFreshShardStore
+	freshStore           cvFreshArtifactStore
 	inbox                <-chan Message
 	receiverOrder        []int
 	receiverIndex        map[int]int
@@ -107,6 +128,7 @@ type cvComponentService struct {
 	receiptPreparations        map[string]*cvReceiptPreparationCall
 	pendingLaneACKs            map[string]*apvssPendingLaneACKs
 	processingOffers           map[string]struct{}
+	processingLaneOffers       map[string]struct{}
 	componentStatementByDealer map[int][]byte
 	localARCShareByHeader      map[string][]byte
 	publishedReadyRoots        map[string]struct{}
@@ -125,6 +147,11 @@ type cvComponentService struct {
 	resolvedAggregateManifests map[string][]*cvComponentDescriptor
 	persistedFreshArtifacts    map[string]struct{}
 	componentDescriptors       map[int]*cvComponentDescriptor
+	laneOfferQueue             chan Message
+	reconstructedCacheMode     string
+	reconstructedCacheQueue    chan cvReconstructedLeafCacheJob
+	laneWorkerWG               sync.WaitGroup
+	backgroundWG               sync.WaitGroup
 	done                       chan struct{}
 }
 
@@ -201,15 +228,33 @@ func newCVComponentServiceWithReceivers(
 		actorIDs = append(actorIDs, receiverID)
 	}
 	actorIDs = sortedUnique(actorIDs)
+	var networkAuth *cvNetworkAuthenticator
+	if c.StrictNetwork {
+		networkAuth, err = newCVNetworkAuthenticator(
+			c.runtime.lockSigner, receiverOrder, leafContext.receiverPublicKeys, localSecrets,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
 	serviceCtx, cancel := context.WithCancel(ctx)
 	mergedInbox := make(chan Message, len(actorIDs)*64)
+	laneQueueSize := len(c.OldCommittee) * len(localSecrets)
+	if laneQueueSize < len(c.OldCommittee) {
+		laneQueueSize = len(c.OldCommittee)
+	}
+	if laneQueueSize < 1 {
+		laneQueueSize = 1
+	}
 	service := &cvComponentService{
 		ctx:                        serviceCtx,
 		cancel:                     cancel,
 		cfg:                        c,
 		leafCtx:                    leafContext,
+		leafContextDigest:          append([]byte(nil), cvLeafContextDigest(leafContext)...),
 		localNode:                  localNode,
 		transport:                  transport,
+		networkAuth:                networkAuth,
 		store:                      store,
 		shardStore:                 shardStore,
 		freshStore:                 freshStore,
@@ -226,6 +271,7 @@ func newCVComponentServiceWithReceivers(
 		receiptPreparations:        make(map[string]*cvReceiptPreparationCall),
 		pendingLaneACKs:            make(map[string]*apvssPendingLaneACKs),
 		processingOffers:           make(map[string]struct{}),
+		processingLaneOffers:       make(map[string]struct{}),
 		componentStatementByDealer: make(map[int][]byte),
 		localARCShareByHeader:      make(map[string][]byte),
 		publishedReadyRoots:        make(map[string]struct{}),
@@ -242,7 +288,16 @@ func newCVComponentServiceWithReceivers(
 		resolvedAggregateManifests: make(map[string][]*cvComponentDescriptor),
 		persistedFreshArtifacts:    make(map[string]struct{}),
 		componentDescriptors:       make(map[int]*cvComponentDescriptor),
+		laneOfferQueue:             make(chan Message, laneQueueSize),
+		reconstructedCacheMode:     cvReconstructedLeafCacheMode(),
 		done:                       make(chan struct{}),
+	}
+	if service.reconstructedCacheMode == "async" {
+		service.reconstructedCacheQueue = make(
+			chan cvReconstructedLeafCacheJob, cvReconstructedLeafCacheQueueCapacity(),
+		)
+		service.backgroundWG.Add(1)
+		go service.runReconstructedLeafCacheWriter()
 	}
 	for _, actorID := range actorIDs {
 		source, receiveErr := router.Receive(actorID)
@@ -268,6 +323,14 @@ func newCVComponentServiceWithReceivers(
 			}
 		}(source)
 	}
+	laneWorkers := cvLaneWorkers(laneQueueSize)
+	if len(localSecrets) == 0 {
+		laneWorkers = 0
+	}
+	service.laneWorkerWG.Add(laneWorkers)
+	for worker := 0; worker < laneWorkers; worker++ {
+		go service.runLaneOfferWorker()
+	}
 	go service.run()
 	return service, nil
 }
@@ -278,6 +341,8 @@ func (s *cvComponentService) Close() error {
 	}
 	s.cancel()
 	<-s.done
+	s.laneWorkerWG.Wait()
+	s.backgroundWG.Wait()
 	return nil
 }
 
@@ -291,10 +356,6 @@ func (s *cvComponentService) CollectAPVSSLaneACKs(
 		return nil, fmt.Errorf("invalid APVSS lane ACK collection input")
 	}
 	if err := apvssValidateStructuralLeaf(s.leafCtx, leaf); err != nil {
-		return nil, err
-	}
-	leafWire, err := cvLeafCanonicalBytes(leaf)
-	if err != nil {
 		return nil, err
 	}
 	key := cvComponentKey(s.localNode, leaf.digest)
@@ -314,7 +375,7 @@ func (s *cvComponentService) CollectAPVSSLaneACKs(
 		s.mu.Unlock()
 	}()
 
-	sent := s.sendManyFrom(s.localNode, s.receiverOrder, apvssTagLaneOffer, leafWire)
+	sent := s.sendAPVSSLaneOffers(leaf)
 	threshold := len(s.receiverOrder) - s.leafCtx.sharingDegree
 	if sent < threshold {
 		return nil, fmt.Errorf("APVSS lane offer reached %d receivers, need %d", sent, threshold)
@@ -350,16 +411,42 @@ func (s *cvComponentService) CollectAPVSSLaneACKs(
 	if s.cfg.APVSSBenchmarkWaitAllACKs || s.cfg.APVSSBenchmarkFallbackCount > 0 {
 		return assemble()
 	}
-	// Include replies already delivered with the threshold response without
-	// adding a synchrony assumption or an extra protocol timeout.
+	grace := cvAPVSSACKGrace()
+	if grace <= 0 {
+		return assemble()
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	// This optimistic timer changes only performance: after it expires, the
+	// existing exact fallback covers every receiver that has not ACKed.
 	for {
 		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
 		case ack := <-pending.values:
 			acks[ack.receiverIndex] = ack
-		default:
+			if len(acks) == len(s.receiverOrder) {
+				return assemble()
+			}
+		case <-timer.C:
 			return assemble()
 		}
 	}
+}
+
+func cvAPVSSACKGrace() time.Duration {
+	const defaultGrace = 500 * time.Millisecond
+	raw := strings.TrimSpace(os.Getenv("RLADKR_APVSS_ACK_GRACE_MS"))
+	if raw == "" {
+		return defaultGrace
+	}
+	milliseconds, err := strconv.Atoi(raw)
+	if err != nil || milliseconds < 0 {
+		return defaultGrace
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func (s *cvComponentService) Disperse(ctx context.Context, leaf *cvLeaf) (*cvComponentDescriptor, error) {
@@ -819,12 +906,23 @@ func (s *cvComponentService) retrieveComponentNetwork(
 	if !bytes.Equal(cvComponentLeafPayloadDigest(leafWire), descriptor.leafDigest) {
 		return nil, fmt.Errorf("recovered CV-sAPVSS component leaf digest mismatch")
 	}
-	if err := s.store.Put(s.cfg.SID, s.cfg.Epoch, descriptor.dealer, s.localNode, descriptor.leafDigest, leafWire); err != nil {
-		return nil, err
-	}
-	accepted, err := s.cacheVerifiedWire(descriptor.dealer, descriptor.leafDigest, leafWire)
+	accepted, err := s.verifyComponentWire(descriptor.dealer, descriptor.leafDigest, leafWire)
 	if err != nil {
 		return nil, err
+	}
+	if s.reconstructedCacheMode == "sync" {
+		if err := s.cacheReconstructedLeaf(descriptor.dealer, descriptor.leafDigest, leafWire); err != nil {
+			return nil, err
+		}
+	}
+	accepted, err = s.publishVerifiedLeaf(descriptor.dealer, descriptor.leafDigest, accepted)
+	if err != nil {
+		return nil, err
+	}
+	if s.reconstructedCacheMode != "sync" {
+		if err := s.cacheReconstructedLeaf(descriptor.dealer, descriptor.leafDigest, leafWire); err != nil {
+			return nil, err
+		}
 	}
 	return accepted, nil
 }
@@ -871,9 +969,43 @@ func (s *cvComponentService) handle(msg Message) {
 	case cvTagReceipt:
 		s.handleReceipt(msg)
 	case apvssTagLaneOffer:
-		s.handleAPVSSLaneOffer(msg)
+		s.enqueueAPVSSLaneOffer(msg)
 	case apvssTagLaneACK:
 		s.handleAPVSSLaneACK(msg)
+	}
+}
+
+func (s *cvComponentService) enqueueAPVSSLaneOffer(msg Message) {
+	key := fmt.Sprintf("%d/%d", msg.From, msg.To)
+	s.mu.Lock()
+	if _, exists := s.processingLaneOffers[key]; exists {
+		s.mu.Unlock()
+		return
+	}
+	s.processingLaneOffers[key] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case s.laneOfferQueue <- msg:
+	case <-s.ctx.Done():
+		s.mu.Lock()
+		delete(s.processingLaneOffers, key)
+		s.mu.Unlock()
+	default:
+		s.mu.Lock()
+		delete(s.processingLaneOffers, key)
+		s.mu.Unlock()
+	}
+}
+
+func (s *cvComponentService) runLaneOfferWorker() {
+	defer s.laneWorkerWG.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case msg := <-s.laneOfferQueue:
+			s.handleAPVSSLaneOffer(msg)
+		}
 	}
 }
 
@@ -883,8 +1015,12 @@ func (s *cvComponentService) handleAPVSSLaneOffer(msg Message) {
 	if !local || !registered {
 		return
 	}
-	leaf, err := cvDecodeLeaf(msg.Body, s.leafCtx)
-	if err != nil || leaf.dealerID != uint64(msg.From) {
+	offer, err := apvssDecodeLaneOffer(msg.Body, s.leafCtx, receiverIndex)
+	if err != nil || offer.dealerID != uint64(msg.From) {
+		return
+	}
+	leaf, err := apvssLaneOfferLeafView(s.leafCtx, offer)
+	if err != nil {
 		return
 	}
 	ack, err := apvssIssueVerifiedLaneACK(s.leafCtx, leaf, receiverIndex, secret)
@@ -892,11 +1028,54 @@ func (s *cvComponentService) handleAPVSSLaneOffer(msg Message) {
 		return
 	}
 	wire, err := apvssLaneACKMessageCanonicalBytes(&apvssLaneACKMessage{
-		dealerID: leaf.dealerID, leafDigest: leaf.digest, ack: ack,
+		dealerID: offer.dealerID, leafDigest: offer.leafDigest, ack: ack,
 	})
 	if err == nil {
 		_ = s.sendFrom(msg.To, msg.From, apvssTagLaneACK, wire)
 	}
+}
+
+func (s *cvComponentService) sendAPVSSLaneOffers(leaf *cvLeaf) int {
+	jobs := len(s.receiverOrder)
+	workers := cvNetworkWorkers(jobs)
+	if jobs == 0 || workers == 0 {
+		return 0
+	}
+	indices := make(chan int)
+	results := make(chan bool, jobs)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer group.Done()
+			for index := range indices {
+				offer, err := apvssLaneOfferFromLeaf(leaf, index+1)
+				if err == nil {
+					var wire []byte
+					wire, err = apvssLaneOfferCanonicalBytesTrusted(offer, s.leafContextDigest)
+					if err == nil {
+						err = s.sendFrom(
+							s.localNode, s.receiverOrder[index], apvssTagLaneOffer, wire,
+						)
+					}
+				}
+				results <- err == nil
+			}
+		}()
+	}
+	for index := 0; index < jobs; index++ {
+		indices <- index
+	}
+	close(indices)
+	group.Wait()
+	close(results)
+	sent := 0
+	for ok := range results {
+		if ok {
+			sent++
+		}
+	}
+	return sent
 }
 
 func (s *cvComponentService) handleAPVSSLaneACK(msg Message) {
@@ -1026,7 +1205,9 @@ func (s *cvComponentService) receiptPreparationCall(
 		for receiverID, secret := range localSecrets {
 			secretsCopy[receiverID] = secret
 		}
+		s.backgroundWG.Add(1)
 		go func() {
+			defer s.backgroundWG.Done()
 			outputs, prepareErr := cvPrepareLocalDecryptionOutputs(s.leafCtx, agg, receiverOrderCopy, secretsCopy)
 			s.mu.Lock()
 			call.outputs = outputs
@@ -1192,10 +1373,7 @@ func (s *cvComponentService) handleLeaf(msg Message) {
 		artifact, err := cvDecodeComponentShardArtifact(msg.Body, pending.descriptor.dealer, len(s.cfg.OldCommittee))
 		if err != nil || !bytes.Equal(artifact.leafDigest, pending.descriptor.leafDigest) ||
 			artifact.shard.index != expectedIndex ||
-			!bytes.Equal(artifact.dispersal.root, pending.descriptor.dispersal.root) ||
-			artifact.dispersal.dataShards != pending.descriptor.dispersal.dataShards ||
-			!bytes.Equal(artifact.dispersal.payloadDigest, pending.descriptor.dispersal.payloadDigest) ||
-			!bytes.Equal(artifact.dispersal.nonce, pending.descriptor.dispersal.nonce) {
+			!cvEqualComponentDispersal(&artifact.dispersal, &pending.descriptor.dispersal) {
 			continue
 		}
 		select {
@@ -1219,12 +1397,13 @@ func (s *cvComponentService) sendManyFrom(from int, to []int, tag string, payloa
 	if err != nil {
 		return 0
 	}
-	if cvPerfCountersEnabled && len(to) > 1 {
+	if s.networkAuth == nil && cvPerfCountersEnabled && len(to) > 1 {
 		cvPerfCounters.envelopeReuseSends.Add(uint64(len(to) - 1))
 	}
 	sent := 0
 	for _, recipient := range to {
-		if s.transport.Send(Message{From: from, To: recipient, Tag: tag, Body: envelope}) == nil {
+		wire, authErr := s.networkAuth.seal(from, recipient, tag, envelope)
+		if authErr == nil && s.transport.Send(Message{From: from, To: recipient, Tag: tag, Body: wire}) == nil {
 			sent++
 		}
 	}
@@ -1236,6 +1415,13 @@ func (s *cvComponentService) localARCShare(headerDigest []byte) ([]byte, error) 
 		return nil, fmt.Errorf("invalid CV-sAPVSS ARC header digest")
 	}
 	key := fmt.Sprintf("%x", headerDigest)
+	persistedKey := fmt.Sprintf("%x/%d", headerDigest, s.localNode)
+	s.freshPersistMu.Lock()
+	_, persisted := s.persistedFreshArtifacts[persistedKey]
+	s.freshPersistMu.Unlock()
+	if !persisted {
+		return nil, fmt.Errorf("CV-sAPVSS ARC share requires a persisted fresh artifact")
+	}
 	s.mu.Lock()
 	if existing := s.localARCShareByHeader[key]; len(existing) > 0 {
 		share := append([]byte(nil), existing...)
@@ -1262,7 +1448,11 @@ func (s *cvComponentService) sendFrom(from, to int, tag string, payload []byte) 
 	if err != nil {
 		return err
 	}
-	return s.transport.Send(Message{From: from, To: to, Tag: tag, Body: envelope})
+	wire, err := s.networkAuth.seal(from, to, tag, envelope)
+	if err != nil {
+		return err
+	}
+	return s.transport.Send(Message{From: from, To: to, Tag: tag, Body: wire})
 }
 
 func (s *cvComponentService) persistFreshArtifact(headerDigest []byte, wire []byte) error {
@@ -1288,7 +1478,107 @@ func (s *cvComponentService) persistFreshArtifact(headerDigest []byte, wire []by
 	return nil
 }
 
+func cvReconstructedLeafCacheMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RLADKR_RECONSTRUCTED_LEAF_CACHE_MODE"))) {
+	case "sync":
+		return "sync"
+	case "off":
+		return "off"
+	default:
+		return "async"
+	}
+}
+
+func cvReconstructedLeafCacheQueueCapacity() int {
+	const defaultCapacity = 2
+	raw := strings.TrimSpace(os.Getenv("RLADKR_RECONSTRUCTED_LEAF_CACHE_QUEUE"))
+	capacity, err := strconv.Atoi(raw)
+	if raw == "" || err != nil || capacity < 1 || capacity > 16 {
+		return defaultCapacity
+	}
+	return capacity
+}
+
+func (s *cvComponentService) cacheReconstructedLeaf(
+	dealer int,
+	leafDigest, leafWire []byte,
+) error {
+	if dealer < 0 || len(leafDigest) != 32 || len(leafWire) == 0 ||
+		!bytes.Equal(leafDigest, cvComponentLeafPayloadDigest(leafWire)) {
+		return fmt.Errorf("invalid reconstructed CV-sAPVSS leaf cache input")
+	}
+	switch s.reconstructedCacheMode {
+	case "sync":
+		err := s.store.Put(s.cfg.SID, s.cfg.Epoch, dealer, s.localNode, leafDigest, leafWire)
+		if cvPerfCountersEnabled {
+			if err == nil {
+				cvPerfCounters.reconstructedCacheWrites.Add(1)
+			} else {
+				cvPerfCounters.reconstructedCacheErrors.Add(1)
+			}
+		}
+		return err
+	case "off":
+		return nil
+	case "async":
+		job := cvReconstructedLeafCacheJob{
+			dealer: dealer, leafDigest: append([]byte(nil), leafDigest...),
+			leafWire: append([]byte(nil), leafWire...),
+		}
+		select {
+		case <-s.ctx.Done():
+			return nil
+		default:
+		}
+		select {
+		case s.reconstructedCacheQueue <- job:
+			if cvPerfCountersEnabled {
+				cvPerfCounters.reconstructedCacheQueued.Add(1)
+			}
+		default:
+			if cvPerfCountersEnabled {
+				cvPerfCounters.reconstructedCacheDrops.Add(1)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid reconstructed CV-sAPVSS leaf cache mode")
+	}
+}
+
+func (s *cvComponentService) runReconstructedLeafCacheWriter() {
+	defer s.backgroundWG.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case job := <-s.reconstructedCacheQueue:
+			err := s.store.Put(
+				s.cfg.SID, s.cfg.Epoch, job.dealer, s.localNode, job.leafDigest, job.leafWire,
+			)
+			if cvPerfCountersEnabled {
+				if err == nil {
+					cvPerfCounters.reconstructedCacheWrites.Add(1)
+				} else {
+					cvPerfCounters.reconstructedCacheErrors.Add(1)
+				}
+			}
+		}
+	}
+}
+
 func (s *cvComponentService) cacheVerifiedWire(
+	dealer int,
+	digest, canonicalWire []byte,
+) (*cvVerifiedLeaf, error) {
+	accepted, err := s.verifyComponentWire(dealer, digest, canonicalWire)
+	if err != nil {
+		return nil, err
+	}
+	return s.publishVerifiedLeaf(dealer, digest, accepted)
+}
+
+func (s *cvComponentService) verifyComponentWire(
 	dealer int,
 	digest, canonicalWire []byte,
 ) (*cvVerifiedLeaf, error) {
@@ -1315,10 +1605,18 @@ func (s *cvComponentService) cacheVerifiedWire(
 	if err != nil {
 		return nil, err
 	}
-	// cacheVerifiedWire is the only production path that grants the service
-	// seal. Both decoders above have already checked canonical encoding, digest,
-	// context, and the complete APVSS validity predicate.
+	// The object remains local until publishVerifiedLeaf. Both decoders above
+	// checked canonical encoding, digest, context, and the complete APVSS
+	// validity predicate before the service seal is granted.
 	accepted.serviceSealed = true
+	return accepted, nil
+}
+
+func (s *cvComponentService) publishVerifiedLeaf(
+	dealer int,
+	digest []byte,
+	accepted *cvVerifiedLeaf,
+) (*cvVerifiedLeaf, error) {
 	if err := s.cacheAcceptedLeaf(dealer, digest, accepted); err != nil {
 		return nil, err
 	}

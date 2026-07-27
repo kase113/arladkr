@@ -20,6 +20,14 @@ type cvEvaluationPowerKey struct {
 
 var cvEvaluationPowerCache sync.Map
 
+type cvDigitPointTableEntry struct {
+	once   sync.Once
+	points []bls12381.G1Affine
+	err    error
+}
+
+var cvDigitPointTables sync.Map
+
 var (
 	cvPedersenBaseOnce  sync.Once
 	cvPedersenBaseValue bls12381.G1Affine
@@ -154,6 +162,118 @@ func cvEncryptPoint(receiverPK, message *bls12381.G1Affine, coin fr.Element) (cv
 	shared.ScalarMultiplication(receiverPK, &coinInt)
 	c.Add(&shared, message)
 	return cvElGamalCiphertext{r: r, c: c}, nil
+}
+
+func cvDigitPointTable(profile cvChunkProfile) ([]bls12381.G1Affine, error) {
+	base, _, _, err := cvProfile(profile)
+	if err != nil {
+		return nil, err
+	}
+	if profile.chunkBits > 12 {
+		return nil, nil
+	}
+	value, _ := cvDigitPointTables.LoadOrStore(profile.chunkBits, &cvDigitPointTableEntry{})
+	entry := value.(*cvDigitPointTableEntry)
+	entry.once.Do(func() {
+		entry.points = make([]bls12381.G1Affine, int(base))
+		if len(entry.points) > 1 {
+			entry.points[1] = genG1
+		}
+		for i := 2; i < len(entry.points); i++ {
+			entry.points[i].Add(&entry.points[i-1], &genG1)
+		}
+	})
+	return entry.points, entry.err
+}
+
+func cvSharedEncryptionCoins(
+	scalarCoins [][]fr.Element,
+	blindingCoins []fr.Element,
+	chunks int,
+) ([]fr.Element, fr.Element, bool) {
+	if len(scalarCoins) == 0 || len(blindingCoins) != len(scalarCoins) ||
+		len(scalarCoins[0]) != chunks {
+		return nil, fr.Element{}, false
+	}
+	for receiver := range scalarCoins {
+		if len(scalarCoins[receiver]) != chunks ||
+			!blindingCoins[receiver].Equal(&blindingCoins[0]) {
+			return nil, fr.Element{}, false
+		}
+		for chunk := range scalarCoins[0] {
+			if !scalarCoins[receiver][chunk].Equal(&scalarCoins[0][chunk]) {
+				return nil, fr.Element{}, false
+			}
+		}
+	}
+	return scalarCoins[0], blindingCoins[0], true
+}
+
+func cvEncryptSharesSharedCoins(
+	profile cvChunkProfile,
+	receiverKeys []bls12381.G1Affine,
+	scalars, blindings []fr.Element,
+	commonCoins []fr.Element,
+	commonBlindingCoin fr.Element,
+) ([]*cvEncryptedShare, error) {
+	_, _, chunks, err := cvProfile(profile)
+	if err != nil || len(receiverKeys) != len(scalars) || len(scalars) != len(blindings) ||
+		len(commonCoins) != chunks {
+		return nil, fmt.Errorf("invalid shared-coin CV-sAPVSS encryption input")
+	}
+	digitTable, err := cvDigitPointTable(profile)
+	if err != nil {
+		return nil, err
+	}
+	coins := make([]fr.Element, chunks+1)
+	copy(coins, commonCoins)
+	coins[chunks] = commonBlindingCoin
+	commonR := bls12381.BatchScalarMultiplicationG1(&genG1, coins)
+	h, err := cvPedersenBase()
+	if err != nil {
+		return nil, err
+	}
+	shares := make([]*cvEncryptedShare, len(receiverKeys))
+	for receiver := range receiverKeys {
+		if !cvValidG1(&receiverKeys[receiver], false) {
+			return nil, fmt.Errorf("invalid CV-sAPVSS receiver public key")
+		}
+		digits, digitErr := cvScalarDigits(scalars[receiver], profile)
+		if digitErr != nil {
+			return nil, digitErr
+		}
+		shared := bls12381.BatchScalarMultiplicationG1(&receiverKeys[receiver], coins)
+		ciphertexts := make([]cvElGamalCiphertext, chunks)
+		var digitInt big.Int
+		for chunk, digit := range digits {
+			var digitPoint bls12381.G1Affine
+			if digitTable != nil {
+				digitPoint = digitTable[digit]
+			} else {
+				digitInt.SetUint64(digit)
+				digitPoint.ScalarMultiplication(&genG1, &digitInt)
+			}
+			ciphertexts[chunk].r = commonR[chunk]
+			ciphertexts[chunk].c.Add(&shared[chunk], &digitPoint)
+		}
+		var blindingPoint, scalarPoint, commitment bls12381.G1Affine
+		var scalarInt, blindingInt big.Int
+		blindings[receiver].BigInt(&blindingInt)
+		blindingPoint.ScalarMultiplication(&h, &blindingInt)
+		scalars[receiver].BigInt(&scalarInt)
+		scalarPoint.ScalarMultiplication(&genG1, &scalarInt)
+		commitment.Add(&scalarPoint, &blindingPoint)
+		var blindingCiphertext cvElGamalCiphertext
+		blindingCiphertext.r = commonR[chunks]
+		blindingCiphertext.c.Add(&shared[chunks], &blindingPoint)
+		shares[receiver] = &cvEncryptedShare{
+			receiverPublicKey: receiverKeys[receiver],
+			scalarChunks:      ciphertexts,
+			blinding:          blindingCiphertext,
+			commitment:        commitment,
+		}
+	}
+	return shares, nil
 }
 
 func cvScalarDigits(scalar fr.Element, profile cvChunkProfile) ([]uint64, error) {
@@ -616,25 +736,48 @@ func cvReferenceDeal(
 	scalarEvaluations := make([]fr.Element, len(receivers))
 	blindingEvaluations := make([]fr.Element, len(receivers))
 	for i := range receivers {
-		scalar := evalPolyInt(scalarCoefficients, int64(i+1))
-		blinding := evalPolyInt(blindingCoefficients, int64(i+1))
-		scalarEvaluations[i] = scalar
-		blindingEvaluations[i] = blinding
-		encrypted, encryptErr := cvReferenceEncryptShare(
+		scalarEvaluations[i] = evalPolyInt(scalarCoefficients, int64(i+1))
+		blindingEvaluations[i] = evalPolyInt(blindingCoefficients, int64(i+1))
+	}
+	encryptedShares := make([]*cvEncryptedShare, len(receivers))
+	chunks, err := cvChunkCount(context.profile)
+	if err != nil {
+		return nil, err
+	}
+	if commonCoins, commonBlindingCoin, shared := cvSharedEncryptionCoins(
+		scalarCoins, blindingCoins, chunks,
+	); shared {
+		encryptedShares, err = cvEncryptSharesSharedCoins(
 			context.profile,
-			context.receiverPublicKeys[i],
-			scalar,
-			blinding,
-			scalarCoins[i],
-			blindingCoins[i],
+			context.receiverPublicKeys,
+			scalarEvaluations,
+			blindingEvaluations,
+			commonCoins,
+			commonBlindingCoin,
 		)
-		if encryptErr != nil {
-			return nil, fmt.Errorf("encrypt CV-sAPVSS receiver %d: %w", i+1, encryptErr)
+		if err != nil {
+			return nil, err
 		}
+	} else {
+		for i := range receivers {
+			encryptedShares[i], err = cvReferenceEncryptShare(
+				context.profile,
+				context.receiverPublicKeys[i],
+				scalarEvaluations[i],
+				blindingEvaluations[i],
+				scalarCoins[i],
+				blindingCoins[i],
+			)
+			if err != nil {
+				return nil, fmt.Errorf("encrypt CV-sAPVSS receiver %d: %w", i+1, err)
+			}
+		}
+	}
+	for i := range receivers {
 		receivers[i] = cvLeafReceiver{
 			receiverIndex:     i + 1,
 			receiverPublicKey: context.receiverPublicKeys[i],
-			encryptedShare:    encrypted,
+			encryptedShare:    encryptedShares[i],
 		}
 	}
 

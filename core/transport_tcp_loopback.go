@@ -1,8 +1,9 @@
 package core
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,9 +14,11 @@ import (
 	"time"
 )
 
-type transportAck struct {
-	OK bool `json:"ok"`
-}
+const (
+	tcpMessageFrameVersion    = byte(1)
+	tcpMessageFrameFixedBytes = 1 + 4 + 4 + 4 + 4
+	tcpMessageMaxTagBytes     = 1 << 12
+)
 
 func listenerReadyMarkerPath(dir string, nodeID int) string {
 	return filepath.Join(dir, fmt.Sprintf("node-%04d.ready", nodeID))
@@ -74,8 +77,6 @@ type tcpLoopbackTransport struct {
 
 type tcpLoopbackPoolConn struct {
 	conn net.Conn
-	enc  *json.Encoder
-	dec  *json.Decoder
 	mu   sync.Mutex
 }
 
@@ -133,7 +134,8 @@ func NewTCPLoopbackTransportWithOptions(
 		acceptTO:  durationEnvMs("RLADKR_TCP_ACCEPT_READ_TIMEOUT_MS", defaultTransportAcceptTimeout(len(nodes))),
 		enqueueTO: durationEnvMs("RLADKR_TCP_ENQUEUE_TIMEOUT_MS", defaultTransportEnqueueTimeout(len(nodes))),
 		runtime:   cfg.runtime,
-		reuseConn: strings.TrimSpace(os.Getenv("RLADKR_TCP_CONN_REUSE")) == "1",
+		reuseConn: !strings.EqualFold(strings.TrimSpace(os.Getenv("RLADKR_TCP_CONN_REUSE")), "0") &&
+			!strings.EqualFold(strings.TrimSpace(os.Getenv("RLADKR_TCP_CONN_REUSE")), "false"),
 	}
 	addrOverrides := parseAddrOverrideMap(os.Getenv("RLADKR_NODE_ADDRS"))
 	ordered := append([]int(nil), nodes...)
@@ -246,7 +248,11 @@ func (t *tcpLoopbackTransport) RecvChan(id int) (<-chan Message, error) {
 }
 
 func (t *tcpLoopbackTransport) Send(msg Message) error {
-	wireBytes := jsonWireMessageBytes(msg)
+	frame, err := tcpMessageFrame(msg)
+	if err != nil {
+		return err
+	}
+	wireBytes := len(frame)
 	t.mu.RLock()
 	addr, ok := t.addrByID[msg.To]
 	ch, local := t.inbox[msg.To]
@@ -264,21 +270,21 @@ func (t *tcpLoopbackTransport) Send(msg Message) error {
 		}
 	}
 	if t.reuseConn {
-		return t.sendRemotePooled(addr, msg, wireBytes)
+		return t.sendRemotePooled(addr, msg, frame, wireBytes)
 	}
-	return t.sendRemoteShortConn(addr, msg, wireBytes)
+	return t.sendRemoteShortConn(addr, msg, frame, wireBytes)
 }
 
-func (t *tcpLoopbackTransport) sendRemoteShortConn(addr string, msg Message, wireBytes int) error {
+func (t *tcpLoopbackTransport) sendRemoteShortConn(addr string, msg Message, frame []byte, wireBytes int) error {
 	conn, err := arlDialWithOptionalDelay(msg.From, msg.To, "tcp", addr, t.dialTO)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	return t.sendRemoteOnConn(conn, json.NewEncoder(conn), json.NewDecoder(conn), msg, wireBytes)
+	return t.sendRemoteOnConn(conn, msg, frame, wireBytes)
 }
 
-func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, wireBytes int) error {
+func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, frame []byte, wireBytes int) error {
 	key := tcpLoopbackPoolKey(msg.From, msg.To, addr)
 	t.poolMu.Lock()
 	if t.conns == nil {
@@ -288,7 +294,7 @@ func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, wireBy
 	if ok {
 		pc.mu.Lock()
 		t.poolMu.Unlock()
-		if err := t.sendRemoteOnConn(pc.conn, pc.enc, pc.dec, msg, wireBytes); err == nil {
+		if err := t.sendRemoteOnConn(pc.conn, msg, frame, wireBytes); err == nil {
 			pc.mu.Unlock()
 			return nil
 		}
@@ -298,6 +304,7 @@ func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, wireBy
 		if t.conns[key] == pc {
 			delete(t.conns, key)
 		}
+		t.poolMu.Unlock()
 	} else {
 		t.poolMu.Unlock()
 	}
@@ -306,13 +313,9 @@ func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, wireBy
 	if err != nil {
 		return err
 	}
-	pc = &tcpLoopbackPoolConn{
-		conn: conn,
-		enc:  json.NewEncoder(conn),
-		dec:  json.NewDecoder(conn),
-	}
+	pc = &tcpLoopbackPoolConn{conn: conn}
 	pc.mu.Lock()
-	if err := t.sendRemoteOnConn(pc.conn, pc.enc, pc.dec, msg, wireBytes); err != nil {
+	if err := t.sendRemoteOnConn(pc.conn, msg, frame, wireBytes); err != nil {
 		pc.mu.Unlock()
 		_ = conn.Close()
 		return err
@@ -330,18 +333,18 @@ func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, wireBy
 	return nil
 }
 
-func (t *tcpLoopbackTransport) sendRemoteOnConn(conn net.Conn, enc *json.Encoder, dec *json.Decoder, msg Message, wireBytes int) error {
+func (t *tcpLoopbackTransport) sendRemoteOnConn(conn net.Conn, msg Message, frame []byte, wireBytes int) error {
 	_ = conn.SetWriteDeadline(time.Now().Add(t.writeTO))
-	if err := enc.Encode(msg); err != nil {
+	if err := writeTCPFrame(conn, frame); err != nil {
 		return err
 	}
 	t.recordSentBytes(wireBytes)
 	_ = conn.SetReadDeadline(time.Now().Add(t.readTO))
-	var ack transportAck
-	if err := dec.Decode(&ack); err != nil {
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil {
 		return err
 	}
-	if !ack.OK {
+	if ack[0] != 1 {
 		return fmt.Errorf("transport ack rejected for msg tag=%s", msg.Tag)
 	}
 	return nil
@@ -416,12 +419,61 @@ func (t *tcpLoopbackTransport) recordSendRecvBytes(n int) {
 	t.recordRecvBytes(n)
 }
 
-func jsonWireMessageBytes(msg Message) int {
-	body, err := json.Marshal(msg)
-	if err != nil {
-		return 0
+func tcpMessageFrame(msg Message) ([]byte, error) {
+	if msg.From < 0 || msg.To < 0 || uint64(msg.From) > uint64(^uint32(0)) ||
+		uint64(msg.To) > uint64(^uint32(0)) || len(msg.Tag) == 0 ||
+		len(msg.Tag) > tcpMessageMaxTagBytes || len(msg.Body) > cvMaxNetworkPayloadBytes+cvNetworkEnvelopeFixedBytes+cvMaxNetworkEnvelopeSIDBytes+cvNetworkAuthBytes {
+		return nil, fmt.Errorf("invalid TCP message frame")
 	}
-	return len(body) + 1
+	frame := make([]byte, tcpMessageFrameFixedBytes+len(msg.Tag)+len(msg.Body))
+	frame[0] = tcpMessageFrameVersion
+	binary.BigEndian.PutUint32(frame[1:5], uint32(msg.From))
+	binary.BigEndian.PutUint32(frame[5:9], uint32(msg.To))
+	binary.BigEndian.PutUint32(frame[9:13], uint32(len(msg.Tag)))
+	binary.BigEndian.PutUint32(frame[13:17], uint32(len(msg.Body)))
+	copy(frame[tcpMessageFrameFixedBytes:], msg.Tag)
+	copy(frame[tcpMessageFrameFixedBytes+len(msg.Tag):], msg.Body)
+	return frame, nil
+}
+
+func readTCPMessageFrame(reader io.Reader) (Message, int, error) {
+	var header [tcpMessageFrameFixedBytes]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
+		return Message{}, 0, err
+	}
+	if header[0] != tcpMessageFrameVersion {
+		return Message{}, 0, fmt.Errorf("invalid TCP message frame version")
+	}
+	tagBytes := int(binary.BigEndian.Uint32(header[9:13]))
+	bodyBytes := int(binary.BigEndian.Uint32(header[13:17]))
+	maximumBody := cvMaxNetworkPayloadBytes + cvNetworkEnvelopeFixedBytes + cvMaxNetworkEnvelopeSIDBytes + cvNetworkAuthBytes
+	if tagBytes <= 0 || tagBytes > tcpMessageMaxTagBytes || bodyBytes < 0 || bodyBytes > maximumBody {
+		return Message{}, 0, fmt.Errorf("invalid TCP message frame lengths")
+	}
+	payload := make([]byte, tagBytes+bodyBytes)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return Message{}, 0, err
+	}
+	return Message{
+		From: int(binary.BigEndian.Uint32(header[1:5])),
+		To:   int(binary.BigEndian.Uint32(header[5:9])),
+		Tag:  string(payload[:tagBytes]),
+		Body: payload[tagBytes:],
+	}, len(header) + len(payload), nil
+}
+
+func writeTCPFrame(writer io.Writer, frame []byte) error {
+	for len(frame) > 0 {
+		written, err := writer.Write(frame)
+		if err != nil {
+			return err
+		}
+		if written <= 0 {
+			return io.ErrShortWrite
+		}
+		frame = frame[written:]
+	}
+	return nil
 }
 
 func (t *tcpLoopbackTransport) acceptLoop(id int, ln net.Listener) {
@@ -444,8 +496,6 @@ func (t *tcpLoopbackTransport) acceptLoop(id int, ln net.Listener) {
 func (t *tcpLoopbackTransport) handleAcceptedConn(id int, conn net.Conn) {
 	defer t.wg.Done()
 	defer conn.Close()
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
 	for {
 		select {
 		case <-t.closed:
@@ -453,9 +503,9 @@ func (t *tcpLoopbackTransport) handleAcceptedConn(id int, conn net.Conn) {
 		default:
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(t.acceptTO))
-		var msg Message
-		if err := dec.Decode(&msg); err == nil {
-			t.recordRecvBytes(jsonWireMessageBytes(msg))
+		msg, wireBytes, err := readTCPMessageFrame(conn)
+		if err == nil {
+			t.recordRecvBytes(wireBytes)
 			t.mu.RLock()
 			ch := t.inbox[id]
 			t.mu.RUnlock()
@@ -467,12 +517,14 @@ func (t *tcpLoopbackTransport) handleAcceptedConn(id int, conn net.Conn) {
 			case <-t.closed:
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(t.writeTO))
-			if err := enc.Encode(transportAck{OK: delivered}); err != nil {
+			ack := byte(0)
+			if delivered {
+				ack = 1
+			}
+			if _, err := conn.Write([]byte{ack}); err != nil {
 				return
 			}
 		} else {
-			_ = conn.SetWriteDeadline(time.Now().Add(t.writeTO))
-			_ = enc.Encode(transportAck{OK: false})
 			return
 		}
 	}

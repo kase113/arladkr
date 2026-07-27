@@ -77,6 +77,40 @@ func cvRSWorkers(jobs int) int {
 	return workers
 }
 
+func cvNetworkWorkers(jobs int) int {
+	if jobs <= 1 {
+		return jobs
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_SEND_WORKERS"))); err == nil && configured > 0 {
+		workers = configured
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
+
+func cvLaneWorkers(jobs int) int {
+	workers := cvCryptoWorkers(jobs)
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_LANE_WORKERS"))); err == nil && configured > 0 {
+		workers = configured
+	}
+	if workers > 4 {
+		workers = 4
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	return workers
+}
+
 // cvNestedMSMWorkers is used inside work that is already parallelized across
 // leaves or lanes. Keeping the inner MSM serial prevents multiplicative
 // goroutine fan-out while preserving the exact group equation.

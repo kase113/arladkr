@@ -47,6 +47,45 @@ func TestCVComponentDescriptorCodecIsCertificateOnly(t *testing.T) {
 	})
 }
 
+func TestCVComponentCodewordFingerprintRejectsCommittedNonCodewordShard(t *testing.T) {
+	const totalShards, dataShards = 7, 3
+	dispersal, shards, err := cvDisperseComponent(
+		bytes.Repeat([]byte("component-codeword-"), 80), totalShards, dataShards,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range shards {
+		if err := cvVerifyComponentShard(dispersal, totalShards, &shards[i]); err != nil {
+			t.Fatalf("valid shard %d rejected: %v", i, err)
+		}
+	}
+
+	payloads := make([][]byte, totalShards)
+	for i := range shards {
+		payloads[i] = append([]byte(nil), shards[i].payload...)
+	}
+	payloads[dataShards][0] ^= 1
+	root, branches := cvBuildComponentMerkle(dispersal.nonce, payloads)
+	proof, err := cvBuildComponentCodewordProof(root, payloads, dataShards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badDispersal := *dispersal
+	badDispersal.root = root
+	badDispersal.dataFingerprints = proof
+	badShard := cvComponentShard{
+		index: dataShards, payload: payloads[dataShards], siblings: branches[dataShards],
+	}
+	if err := cvVerifyComponentShard(&badDispersal, totalShards, &badShard); err == nil {
+		t.Fatal("accepted a Merkle-committed shard outside the declared RS codeword")
+	}
+	dataShard := cvComponentShard{index: 0, payload: payloads[0], siblings: branches[0]}
+	if err := cvVerifyComponentShard(&badDispersal, totalShards, &dataShard); err != nil {
+		t.Fatalf("codeword proof did not preserve an unchanged data shard: %v", err)
+	}
+}
+
 func TestCVComponentDescriptorValidation(t *testing.T) {
 	cfg, _, _, _ := cvM4Fixture(t)
 	if err := ensureRuntime(&cfg); err != nil {

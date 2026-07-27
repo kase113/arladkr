@@ -166,9 +166,10 @@ type tblsThresholdSigner struct {
 	t int
 	n int
 
-	pubKey       bls12381.G2Affine   // group public key = secret * G2
-	pubKeyShares []bls12381.G2Affine // individual pk_i = share_i * G2
-	shares       []fr.Element        // secret key shares
+	pubKey                bls12381.G2Affine   // group public key = secret * G2
+	pubKeyShares          []bls12381.G2Affine // individual pk_i = share_i * G2
+	transportPubKeyShares []bls12381.G1Affine
+	shares                []fr.Element // secret key shares
 
 	memberOrder    []int
 	memberIndex    map[int]int
@@ -211,8 +212,10 @@ func newTBLSThresholdSigner(members []int, threshold int, stream cipher.Stream) 
 
 	// Compute public key shares: pk_i = share_i * G2
 	pubKeyShares := make([]bls12381.G2Affine, n)
+	transportPubKeyShares := make([]bls12381.G1Affine, n)
 	for i := 0; i < n; i++ {
 		pubKeyShares[i].ScalarMultiplication(&genG2, shares[i].BigInt(new(big.Int)))
+		transportPubKeyShares[i].ScalarMultiplication(&genG1, shares[i].BigInt(new(big.Int)))
 	}
 
 	// Group public key = coeffs[0] * G2
@@ -226,13 +229,14 @@ func newTBLSThresholdSigner(members []int, threshold int, stream cipher.Stream) 
 	}
 
 	return &tblsThresholdSigner{
-		t:            threshold,
-		n:            n,
-		pubKey:       pubKey,
-		pubKeyShares: pubKeyShares,
-		shares:       shares,
-		memberOrder:  memberOrder,
-		memberIndex:  memberIndex,
+		t:                     threshold,
+		n:                     n,
+		pubKey:                pubKey,
+		pubKeyShares:          pubKeyShares,
+		transportPubKeyShares: transportPubKeyShares,
+		shares:                shares,
+		memberOrder:           memberOrder,
+		memberIndex:           memberIndex,
 	}, nil
 }
 
@@ -252,7 +256,8 @@ func newTBLSThresholdSignerFromMaterial(material *cvOldLockKeyMaterial) (*tblsTh
 	return &tblsThresholdSigner{
 		t: material.threshold, n: len(material.members), pubKey: material.groupPublic,
 		pubKeyShares: append([]bls12381.G2Affine(nil), material.publicShares...), shares: shares,
-		memberOrder: append([]int(nil), material.members...), memberIndex: memberIndex,
+		transportPubKeyShares: append([]bls12381.G1Affine(nil), material.transportPublicShares...),
+		memberOrder:           append([]int(nil), material.members...), memberIndex: memberIndex,
 		signingMembers: nodeSet(materialMemberIDs(material.localShares)),
 	}, nil
 }

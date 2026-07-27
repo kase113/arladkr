@@ -177,3 +177,61 @@ func TestAPVSSLaneACKMessageCodecV1(t *testing.T) {
 		t.Fatal("ACK message replayed for another dealer leaf")
 	}
 }
+
+func TestAPVSSLaneOfferProjectionPreservesStatementV1(t *testing.T) {
+	fixture := apvssFixture(t, 7, 2)
+	const receiverIndex = 4
+	offer, err := apvssLaneOfferFromLeaf(fixture.leaf, receiverIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := apvssLaneOfferCanonicalBytes(offer, &fixture.context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullWire, err := cvLeafCanonicalBytes(fixture.leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) >= len(fullWire) {
+		t.Fatalf("lane projection bytes = %d, full leaf = %d", len(wire), len(fullWire))
+	}
+	decoded, err := apvssDecodeLaneOffer(wire, &fixture.context, receiverIndex)
+	if err != nil {
+		t.Fatalf("decode lane offer: %v", err)
+	}
+	view, err := apvssLaneOfferLeafView(&fixture.context, decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullStatement, err := apvssLaneStatementBytes(fixture.leaf, receiverIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectedStatement, err := apvssLaneStatementBytes(view, receiverIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fullStatement, projectedStatement) {
+		t.Fatal("lane projection changed the signed statement")
+	}
+	ack, err := apvssIssueVerifiedLaneACK(
+		&fixture.context, view, receiverIndex, fixture.receiverSecrets[receiverIndex-1],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apvssVerifyLaneACK(fixture.leaf, &ack); err != nil {
+		t.Fatalf("full leaf rejected projection-issued ACK: %v", err)
+	}
+	reencoded, err := apvssLaneOfferCanonicalBytes(decoded, &fixture.context)
+	if err != nil || !bytes.Equal(reencoded, wire) {
+		t.Fatal("lane offer codec changed canonical bytes")
+	}
+	if _, err := apvssDecodeLaneOffer(append(append([]byte(nil), wire...), 0), &fixture.context, receiverIndex); err == nil {
+		t.Fatal("accepted trailing lane offer bytes")
+	}
+	if _, err := apvssDecodeLaneOffer(wire, &fixture.context, receiverIndex-1); err == nil {
+		t.Fatal("accepted lane offer for another receiver")
+	}
+}

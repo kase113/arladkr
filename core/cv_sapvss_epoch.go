@@ -251,10 +251,20 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	for receiverID := range material.localReceiverSecrets {
 		localActors = append(localActors, receiverID)
 	}
+	var networkAuth *cvNetworkAuthenticator
+	if cfg.StrictNetwork {
+		networkAuth, err = newCVNetworkAuthenticator(
+			cfg.runtime.lockSigner, material.receiverOrder, material.receiverPublicKeys,
+			material.localReceiverSecrets,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
 	router, err := newCVSAPVSSRouterWithReceivers(
 		ctx, transport, cfg.SID, cfg.Epoch,
 		cfg.runtime.oldOrder, material.receiverOrder, sortedUnique(localActors),
-		(len(cfg.runtime.oldOrder)+len(material.receiverOrder))*64,
+		(len(cfg.runtime.oldOrder)+len(material.receiverOrder))*64, networkAuth,
 	)
 	if err != nil {
 		return nil, err

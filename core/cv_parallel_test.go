@@ -26,3 +26,14 @@ func TestCVCryptoWorkerBudget(t *testing.T) {
 		t.Fatalf("configured RS workers=%d, want 2", got)
 	}
 }
+
+func TestCVLaneWorkerBudgetHasIndependentOverride(t *testing.T) {
+	t.Setenv("RLADKR_CRYPTO_WORKERS", "1")
+	t.Setenv("RLADKR_LANE_WORKERS", "3")
+	if got := cvLaneWorkers(8); got != 3 {
+		t.Fatalf("lane workers=%d, want 3", got)
+	}
+	if got := cvLaneWorkers(2); got != 2 {
+		t.Fatalf("bounded lane workers=%d, want 2", got)
+	}
+}

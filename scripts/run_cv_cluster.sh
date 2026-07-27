@@ -8,7 +8,7 @@ if (( $# >= 3 )); then
 else
   root="$(mktemp -d "/tmp/arladkr-cv-n${n}.XXXXXX")"
 fi
-base_port="${4:-41000}"
+base_port="${4:-20000}"
 epoch_timeout="${RLADKR_CV_EPOCH_TIMEOUT:-90s}"
 apvss_fallback_profile="${RLADKR_APVSS_FALLBACK_PROFILE:-exact-lane}"
 allow_experimental_apvss="${RLADKR_ALLOW_EXPERIMENTAL_APVSS:-false}"
@@ -18,6 +18,9 @@ apvss_wait_all_acks="${RLADKR_APVSS_WAIT_ALL_ACKS:-false}"
 # crypto worker per process so the benchmark does not oversubscribe the host;
 # callers can still set RLADKR_CRYPTO_WORKERS explicitly.
 crypto_workers="${RLADKR_CRYPTO_WORKERS:-1}"
+# ACK decryption has its own bounded queue. Two workers per process use the
+# 32 logical CPUs of the n=16 local harness without widening proof workers.
+lane_workers="${RLADKR_LANE_WORKERS:-2}"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$repo_dir/bin/rladkrbench"
 summary_awk="$repo_dir/scripts/summarize_cluster_bench.awk"
@@ -28,6 +31,22 @@ results_file="$root/cluster-results.log"
 
 if (( n <= 0 || f < 0 || n < 3 * f + 1 )); then
   printf 'invalid committee parameters: n=%s f=%s\n' "$n" "$f" >&2
+  exit 2
+fi
+component_last_port=$((base_port + 2 * n - 1))
+mvba_base_port=$((base_port + 2 * n + 100))
+mvba_last_port=$((mvba_base_port + n - 1))
+if (( base_port <= 0 || mvba_last_port > 65535 )); then
+  printf 'invalid cluster port ranges: component=%s-%s mvba=%s-%s\n' \
+    "$base_port" "$component_last_port" "$mvba_base_port" "$mvba_last_port" >&2
+  exit 2
+fi
+read -r ephemeral_low ephemeral_high < /proc/sys/net/ipv4/ip_local_port_range
+if (( (base_port <= ephemeral_high && component_last_port >= ephemeral_low) ||
+      (mvba_base_port <= ephemeral_high && mvba_last_port >= ephemeral_low) )); then
+  printf 'cluster listener range overlaps ephemeral ports %s-%s: component=%s-%s mvba=%s-%s\n' \
+    "$ephemeral_low" "$ephemeral_high" "$base_port" "$component_last_port" \
+    "$mvba_base_port" "$mvba_last_port" >&2
   exit 2
 fi
 if [[ -d "$root" && -n "$(find "$root" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
@@ -56,8 +75,12 @@ for ((i=0; i<n; i++)); do
   [[ -z "$node_addrs" ]] || node_addrs+=","
   [[ -z "$mvba_addrs" ]] || mvba_addrs+=","
   node_addrs+="$i=127.0.0.1:$((base_port+i))"
-  mvba_addrs+="$i=127.0.0.1:$((base_port+1000+i))"
+  mvba_addrs+="$i=127.0.0.1:$((mvba_base_port+i))"
 done
+
+printf 'ARLADKR_CV_PORTS component=%s-%s mvba=%s-%s ephemeral=%s-%s\n' \
+  "$base_port" "$component_last_port" "$mvba_base_port" "$mvba_last_port" \
+  "$ephemeral_low" "$ephemeral_high"
 
 start_at="$(( $(date +%s) + 3 ))"
 pids=()
@@ -76,6 +99,7 @@ for ((i=0; i<n; i++)); do
     export RLADKR_CV_DEBUG="${RLADKR_CV_DEBUG:-1}"
     export RLADKR_CV_PERF_COUNTERS="${RLADKR_CV_PERF_COUNTERS:-1}"
     export RLADKR_CRYPTO_WORKERS="$crypto_workers"
+    export RLADKR_LANE_WORKERS="$lane_workers"
     "$binary" -n "$n" -f "$f" -runs 1 -epochs 1 \
       -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \

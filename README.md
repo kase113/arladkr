@@ -45,7 +45,7 @@ go build -buildvcs=false -o bin/rladkrbench ./cmd/rladkrbench
 Run a local multi-process TCP cluster:
 
 ```sh
-./scripts/run_cv_cluster.sh 4 1 /tmp/arladkr-cv 41000
+./scripts/run_cv_cluster.sh 4 1 /tmp/arladkr-cv 20000
 ```
 
 Relevant benchmark controls are `-f-old`, `-f-new`, `-kappa`,

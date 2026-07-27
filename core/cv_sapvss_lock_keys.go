@@ -16,13 +16,14 @@ import (
 
 const (
 	cvOldLockRegistryFilename = "old-lock-registry.json"
-	cvOldLockRegistryVersion  = 1
+	cvOldLockRegistryVersion  = 2
 )
 
 type cvOldLockRegistryEntry struct {
-	MemberID   int    `json:"member_id"`
-	ShareIndex int    `json:"share_index"`
-	PublicKey  string `json:"public_key"`
+	MemberID           int    `json:"member_id"`
+	ShareIndex         int    `json:"share_index"`
+	PublicKey          string `json:"public_key"`
+	TransportPublicKey string `json:"transport_public_key"`
 }
 
 type cvOldLockRegistry struct {
@@ -34,11 +35,12 @@ type cvOldLockRegistry struct {
 }
 
 type cvOldLockKeyMaterial struct {
-	members      []int
-	threshold    int
-	groupPublic  bls12381.G2Affine
-	publicShares []bls12381.G2Affine
-	localShares  map[int]fr.Element
+	members               []int
+	threshold             int
+	groupPublic           bls12381.G2Affine
+	publicShares          []bls12381.G2Affine
+	transportPublicShares []bls12381.G1Affine
+	localShares           map[int]fr.Element
 }
 
 func GenerateCVOldLockKeyMaterial(publicDir, secretDir, sid string, members []int, threshold int) error {
@@ -117,8 +119,12 @@ func cvGenerateOldLockKeyMaterial(publicDir, secretDir, sid string, members []in
 		var publicShare bls12381.G2Affine
 		publicShare.ScalarMultiplication(&genG2, shares[i].BigInt(new(big.Int)))
 		encoded := publicShare.Bytes()
+		var transportPublicShare bls12381.G1Affine
+		transportPublicShare.ScalarMultiplication(&genG1, shares[i].BigInt(new(big.Int)))
+		transportEncoded := transportPublicShare.Bytes()
 		registry.Members[i] = cvOldLockRegistryEntry{
 			MemberID: member, ShareIndex: i + 1, PublicKey: hex.EncodeToString(encoded[:]),
+			TransportPublicKey: hex.EncodeToString(transportEncoded[:]),
 		}
 	}
 	raw, err := json.MarshalIndent(registry, "", "  ")
@@ -190,9 +196,12 @@ func cvLoadOldLockKeyMaterial(
 	material := &cvOldLockKeyMaterial{
 		members: append([]int(nil), expectedMembers...), threshold: threshold,
 		groupPublic: groupPublic, publicShares: make([]bls12381.G2Affine, len(expectedMembers)),
-		localShares: make(map[int]fr.Element, len(localMembers)),
+		transportPublicShares: make([]bls12381.G1Affine, len(expectedMembers)),
+		localShares:           make(map[int]fr.Element, len(localMembers)),
 	}
 	memberIndex := make(map[int]int, len(expectedMembers))
+	pairingG1 := make([]bls12381.G1Affine, 0, 2*len(expectedMembers))
+	pairingG2 := make([]bls12381.G2Affine, 0, 2*len(expectedMembers))
 	for i, entry := range registry.Members {
 		if entry.MemberID != expectedMembers[i] || entry.ShareIndex != i+1 {
 			return nil, fmt.Errorf("CV old-lock registry order/index mismatch")
@@ -202,7 +211,19 @@ func cvLoadOldLockKeyMaterial(
 			return nil, fmt.Errorf("invalid CV old-lock public share %d: %w", i+1, err)
 		}
 		material.publicShares[i] = publicShare
+		transportPublicShare, err := cvDecodeCanonicalG1(entry.TransportPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CV old-lock transport public share %d: %w", i+1, err)
+		}
+		var negPublicShare bls12381.G2Affine
+		negPublicShare.Neg(&publicShare)
+		pairingG1 = append(pairingG1, transportPublicShare, genG1)
+		pairingG2 = append(pairingG2, genG2, negPublicShare)
+		material.transportPublicShares[i] = transportPublicShare
 		memberIndex[entry.MemberID] = i
+	}
+	if ok, pairingErr := bls12381.PairingCheck(pairingG1, pairingG2); pairingErr != nil || !ok {
+		return nil, fmt.Errorf("CV old-lock transport keys do not match threshold public shares")
 	}
 	baseIndices := make([]int, threshold)
 	basePoints := make([]bls12381.G2Affine, threshold)
@@ -238,9 +259,27 @@ func cvLoadOldLockKeyMaterial(
 		if !publicShare.Equal(&material.publicShares[index]) {
 			return nil, fmt.Errorf("local old-lock secret/public mismatch for %d", member)
 		}
+		var transportPublic bls12381.G1Affine
+		transportPublic.ScalarMultiplication(&genG1, secret.BigInt(new(big.Int)))
+		if !transportPublic.Equal(&material.transportPublicShares[index]) {
+			return nil, fmt.Errorf("local old-lock transport secret/public mismatch for %d", member)
+		}
 		material.localShares[member] = secret
 	}
 	return material, nil
+}
+
+func cvDecodeCanonicalG1(encodedHex string) (bls12381.G1Affine, error) {
+	encoded, err := hex.DecodeString(encodedHex)
+	if err != nil || len(encoded) != bls12381.SizeOfG1AffineCompressed || hex.EncodeToString(encoded) != encodedHex {
+		return bls12381.G1Affine{}, fmt.Errorf("invalid canonical G1 encoding")
+	}
+	var point bls12381.G1Affine
+	consumed, err := point.SetBytes(encoded)
+	if err != nil || consumed != len(encoded) || !cvValidG1(&point, false) {
+		return bls12381.G1Affine{}, fmt.Errorf("invalid G1 point")
+	}
+	return point, nil
 }
 
 func cvDecodeCanonicalG2(encodedHex string) (bls12381.G2Affine, error) {

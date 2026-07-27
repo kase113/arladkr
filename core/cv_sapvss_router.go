@@ -112,6 +112,7 @@ type cvSAPVSSRouter struct {
 	epoch    int
 	oldNodes map[int]struct{}
 	newNodes map[int]struct{}
+	auth     *cvNetworkAuthenticator
 	queues   map[int]chan Message
 	errors   chan error
 	done     chan struct{}
@@ -139,6 +140,7 @@ func newCVSAPVSSRouterWithReceivers(
 	epoch int,
 	oldNodes, newNodes, localNodes []int,
 	queueCapacity int,
+	authenticators ...*cvNetworkAuthenticator,
 ) (*cvSAPVSSRouter, error) {
 	if ctx == nil || transport == nil || sid == "" || len(sid) > cvMaxNetworkEnvelopeSIDBytes ||
 		epoch < 0 || queueCapacity <= 0 || len(oldNodes) == 0 || len(localNodes) == 0 {
@@ -184,6 +186,10 @@ func newCVSAPVSSRouterWithReceivers(
 		inboxes[node] = inbox
 	}
 	routerContext, cancel := context.WithCancel(ctx)
+	var auth *cvNetworkAuthenticator
+	if len(authenticators) > 0 {
+		auth = authenticators[0]
+	}
 	router := &cvSAPVSSRouter{
 		ctx:      routerContext,
 		cancel:   cancel,
@@ -191,6 +197,7 @@ func newCVSAPVSSRouterWithReceivers(
 		epoch:    epoch,
 		oldNodes: oldSet,
 		newNodes: newSet,
+		auth:     auth,
 		queues:   make(map[int]chan Message, len(inboxes)),
 		errors:   make(chan error, 1),
 		done:     make(chan struct{}),
@@ -290,7 +297,11 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 			return Message{}, false
 		}
 	}
-	payload, err := cvDecodeNetworkEnvelope(msg.Body, r.sid, r.epoch)
+	envelope, err := r.auth.open(msg.From, msg.To, msg.Tag, msg.Body)
+	if err != nil {
+		return Message{}, false
+	}
+	payload, err := cvDecodeNetworkEnvelope(envelope, r.sid, r.epoch)
 	if err != nil {
 		return Message{}, false
 	}

@@ -228,6 +228,45 @@ func cvAggregateAcceptedLeaves(context *cvLeafContext, leaves []*cvLeaf) (*cvAgg
 	return cvFinalizeAggregate(agg)
 }
 
+func cvAggregateReceiverFast(
+	profile cvChunkProfile,
+	shares []*cvEncryptedShare,
+) (cvAggregateReceiver, error) {
+	_, _, chunks, err := cvProfile(profile)
+	if err != nil || len(shares) == 0 || shares[0] == nil ||
+		len(shares[0].scalarChunks) != chunks {
+		return cvAggregateReceiver{}, fmt.Errorf("invalid CV-sAPVSS aggregate receiver input")
+	}
+	receiverKey := shares[0].receiverPublicKey
+	jacobian := make([]bls12381.G1Jac, 2*chunks+2)
+	for _, share := range shares {
+		if share == nil || len(share.scalarChunks) != chunks ||
+			!share.receiverPublicKey.Equal(&receiverKey) {
+			return cvAggregateReceiver{}, fmt.Errorf("CV-sAPVSS aggregate mixes receiver lanes")
+		}
+		for chunk := range share.scalarChunks {
+			jacobian[2*chunk].AddMixed(&share.scalarChunks[chunk].r)
+			jacobian[2*chunk+1].AddMixed(&share.scalarChunks[chunk].c)
+		}
+		jacobian[2*chunks].AddMixed(&share.blinding.r)
+		jacobian[2*chunks+1].AddMixed(&share.blinding.c)
+	}
+	affine := bls12381.BatchJacobianToAffineG1(jacobian)
+	scalarChunks := make([]cvElGamalCiphertext, chunks)
+	for chunk := range scalarChunks {
+		scalarChunks[chunk] = cvElGamalCiphertext{
+			r: affine[2*chunk], c: affine[2*chunk+1],
+		}
+	}
+	return cvAggregateReceiver{
+		receiverPublicKey: receiverKey,
+		scalarChunks:      scalarChunks,
+		blinding: cvElGamalCiphertext{
+			r: affine[2*chunks], c: affine[2*chunks+1],
+		},
+	}, nil
+}
+
 func cvAggregateAcceptedLeavesUnfinalized(context *cvLeafContext, leaves []*cvLeaf) (*cvAggregateTranscript, error) {
 	agg := &cvAggregateTranscript{
 		context:     cvCloneLeafContext(*context),
@@ -237,6 +276,7 @@ func cvAggregateAcceptedLeavesUnfinalized(context *cvLeafContext, leaves []*cvLe
 			context.sharingDegree+1),
 		receivers: make([]cvAggregateReceiver, len(context.receiverPublicKeys)),
 	}
+	coefficientJacobian := make([]bls12381.G1Jac, len(agg.coefficientCommitments))
 	for i, leaf := range leaves {
 		if leaf == nil {
 			return nil, fmt.Errorf("nil CV-sAPVSS aggregate leaf")
@@ -247,28 +287,25 @@ func cvAggregateAcceptedLeavesUnfinalized(context *cvLeafContext, leaves []*cvLe
 		agg.dealerIDs[i] = leaf.dealerID
 		agg.leafDigests[i] = append([]byte(nil), leaf.digest...)
 		for j := range agg.coefficientCommitments {
-			if i == 0 {
-				agg.coefficientCommitments[j] = leaf.coefficientCommitments[j]
-			} else {
-				agg.coefficientCommitments[j].Add(&agg.coefficientCommitments[j], &leaf.coefficientCommitments[j])
-			}
+			coefficientJacobian[j].AddMixed(&leaf.coefficientCommitments[j])
 		}
 	}
-	for receiverIndex := range agg.receivers {
+	agg.coefficientCommitments = bls12381.BatchJacobianToAffineG1(coefficientJacobian)
+	err := cvRunParallelChecks(len(agg.receivers), func(receiverIndex int) error {
 		shares := make([]*cvEncryptedShare, len(leaves))
 		for dealerIndex := range leaves {
 			shares[dealerIndex] = leaves[dealerIndex].receivers[receiverIndex].encryptedShare
 		}
-		share, err := cvAggregate(context.profile, shares)
-		if err != nil {
-			return nil, fmt.Errorf("aggregate receiver %d: %w", receiverIndex+1, err)
+		receiver, aggregateErr := cvAggregateReceiverFast(context.profile, shares)
+		if aggregateErr != nil {
+			return fmt.Errorf("aggregate receiver %d: %w", receiverIndex+1, aggregateErr)
 		}
-		agg.receivers[receiverIndex] = cvAggregateReceiver{
-			receiverIndex:     receiverIndex + 1,
-			receiverPublicKey: share.receiverPublicKey,
-			scalarChunks:      share.scalarChunks,
-			blinding:          share.blinding,
-		}
+		receiver.receiverIndex = receiverIndex + 1
+		agg.receivers[receiverIndex] = receiver
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return agg, nil
 }
