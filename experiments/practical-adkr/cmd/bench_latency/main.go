@@ -27,6 +27,7 @@ type runStat struct {
 	phaseRecvBytes map[string]float64
 	totalSentBytes float64
 	totalRecvBytes float64
+	consensusHash  string
 }
 
 func main() {
@@ -46,6 +47,7 @@ func main() {
 		mvbaLocalIDs   = flag.String("mvba-local-ids", "", "local node IDs for tcp mode, e.g. 0,1,2")
 		protoAddrs     = flag.String("proto-addrs", "", "DXT/APDB node addresses, e.g. 0=10.0.0.1:9100,100=10.0.0.2:9101")
 		protoLocalIDs  = flag.String("proto-local-ids", "", "DXT/APDB local node IDs, e.g. 0,1,100,101")
+		coinAddrs      = flag.String("coin-addrs", "", "dedicated threshold Coin.Get addresses for old nodes")
 		fallbackPolicy = flag.String("fallback-policy", "off", "fallback policy for comparable e2e runs: off only")
 		ablationMode   = flag.String("ablation-mode", "none", "ablation mode: none|no-partial-verify")
 		commMetrics    = flag.Bool("comm-metrics", false, "enable protocol-layer communication byte counters")
@@ -139,6 +141,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "invalid protocol transport config: %v\n", err)
 		os.Exit(1)
 	}
+	coinAddrsVal := strings.TrimSpace(*coinAddrs)
+	if coinAddrsVal == "" {
+		coinAddrsVal = strings.TrimSpace(os.Getenv("PRACTICAL_COIN_NODE_ADDRS"))
+	}
+	if coinAddrsVal == "" {
+		parts := make([]string, 0, len(oldC))
+		for i, id := range oldC {
+			parts = append(parts, fmt.Sprintf("%d=127.0.0.1:%d", id, 18000+i))
+		}
+		coinAddrsVal = strings.Join(parts, ",")
+	}
 
 	cfg := core.Config{
 		SID:                      "practical-adkr-bench",
@@ -153,6 +166,7 @@ func main() {
 		DisableAgreementFallback: true,
 		ProtocolNodeAddrs:        protoAddrsVal,
 		ProtocolLocalNodeIDs:     protoLocalIDsVal,
+		CoinNodeAddrs:            coinAddrsVal,
 		AblationMode:             *ablationMode,
 		CommMetrics:              *commMetrics,
 		DelayInjectionEnabled:    strings.TrimSpace(os.Getenv("PRACTICAL_DELAY_ENABLE")) == "1",
@@ -166,6 +180,10 @@ func main() {
 	}
 	if err := core.PrewarmPracticalRecipientKeys(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "prewarm recipient keys failed: %v\n", err)
+		os.Exit(1)
+	}
+	if err := core.PrewarmPracticalThresholdCoin(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "prewarm threshold coin failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf(
@@ -186,9 +204,20 @@ func main() {
 	// In distributed mode (PRACTICAL_MVBA_NODE_ADDRS set), each host runs a subset.
 	localNodeIDs := parseNodeIDSet(mvbaLocalIDsVal)
 	localNodeCount := len(localNodeIDs)
+	localBarrierNodes := make([]int, 0, localNodeCount)
+	for id := range localNodeIDs {
+		localBarrierNodes = append(localBarrierNodes, id)
+	}
+	sort.Ints(localBarrierNodes)
 	if localNodeCount == 0 {
 		// Local mode or all nodes local: count = n
 		localNodeCount = committeeSize
+		localBarrierNodes = append([]int(nil), oldC...)
+	}
+	epochBarrierDir := strings.TrimSpace(os.Getenv("PRACTICAL_EPOCH_BARRIER_DIR"))
+	if *runs > 1 && localNodeCount < committeeSize && epochBarrierDir == "" {
+		fmt.Fprintln(os.Stderr, "multi-epoch distributed benchmark requires PRACTICAL_EPOCH_BARRIER_DIR")
+		os.Exit(1)
 	}
 
 	stats := make([]runStat, 0, *runs)
@@ -205,10 +234,12 @@ func main() {
 		requiredCompleted = localNodeCount
 	}
 	for i := 0; i < *runs; i++ {
+		runCfg := cfg
+		runCfg.Epoch = uint64(i)
 		attemptStart := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		start := time.Now()
-		res, err := core.RunPracticalADKR(ctx, cfg)
+		res, err := core.RunPracticalADKR(ctx, runCfg)
 		cancel()
 		attemptMs := float64(time.Since(attemptStart).Microseconds()) / 1000.0
 		if attemptMs <= 0 {
@@ -248,9 +279,25 @@ func main() {
 		if int(completed) < requiredCompleted {
 			continue
 		}
+		protocolLatencyMs := float64(time.Since(start).Microseconds()) / 1000.0
+		resultDigest, digestErr := practicalResultDigest(runCfg, res)
+		if digestErr != nil {
+			fmt.Fprintf(os.Stderr, "run=%d result digest failed: %v\n", i, digestErr)
+			continue
+		}
+		barrierCtx, barrierCancel := context.WithTimeout(context.Background(), *timeout)
+		barrierErr := waitForBenchmarkEpoch(
+			barrierCtx, epochBarrierDir, runCfg.SID, i+1, runCfg.Epoch,
+			oldC, localBarrierNodes, resultDigest,
+		)
+		barrierCancel()
+		if barrierErr != nil {
+			fmt.Fprintf(os.Stderr, "run=%d epoch barrier failed: %v\n", i, barrierErr)
+			continue
+		}
 		successRuns++
 		stats = append(stats, runStat{
-			latencyMs:      float64(time.Since(start).Microseconds()) / 1000.0,
+			latencyMs:      protocolLatencyMs,
 			completedNodes: completed,
 			decidedSetMean: float64(len(res.DecidedSet)),
 			selectedMean:   float64(res.SelectedCount),
@@ -262,6 +309,7 @@ func main() {
 			phaseRecvBytes: phaseBytesFloat(res.PhaseRecvBytes),
 			totalSentBytes: float64(res.TotalSentBytes),
 			totalRecvBytes: float64(res.TotalRecvBytes),
+			consensusHash:  resultDigest,
 		})
 	}
 
@@ -278,9 +326,10 @@ func main() {
 	meanRecvBytes := meanOf(stats, func(s runStat) float64 { return s.totalRecvBytes })
 	fallbackRuns := countFallbackRuns(stats)
 	timeoutRuns := *runs - successRuns
+	consensusHash := summarizePracticalResultDigests(stats)
 
 	fmt.Printf(
-		"E2E_BENCH_RESULT protocol=PRACTICAL-ADKR mode=strict start_phase=protocol_start end_phase=local_decide n=%d committee_size=%d total_logical_participants=%d f=%d kappa=%d kappa_profile=%s kappa_epoch_failure_prob=%.12g kappa_epoch_security_bits=%.6g kappa_lifetime_epochs=%d kappa_lifetime_union_bound=%.12g kappa_lifetime_security_bits=%.6g runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_selected_count=%.2f mean_verified_count=%.2f mean_setup_ms=%.2f mean_online_protocol_ms=%.2f mean_online_active_known_ms=%.2f mean_dxt_dealing_ms=%.2f mean_dxt_cache_hit_ms=%.2f mean_dxt_cache_build_ms=%.2f mean_dxt_cache_wait_ms=%.2f mean_apdb_dispersal_ms=%.2f mean_mvba_agree_ms=%.2f mean_mvba_peer_wait_ms=%.2f mean_mvba_active_known_ms=%.2f mean_coin_select_ms=%.2f mean_partial_verify_ms=%.2f mean_recover_ms=%.2f mean_recover_store_verify_ms=%.2f mean_recover_shard_verify_ms=%.2f mean_recover_verify_ms=%.2f mean_recover_store_seen=%.2f mean_recover_fetch_req_sent=%.2f mean_recover_fetch_resp_recv=%.2f mean_recover_recipient_seen=%.2f mean_derive_ms=%.2f mean_aggregate_derive_ms=%.2f mean_total_phase_ms=%.2f mean_total_sent_bytes=%.2f mean_total_recv_bytes=%.2f mean_recover_sent_bytes=%.2f mean_recover_recv_bytes=%.2f mean_derive_sent_bytes=%.2f mean_derive_recv_bytes=%.2f fallback_runs=%d timeout_runs=%d local_node_count=%d\n",
+		"E2E_BENCH_RESULT protocol=PRACTICAL-ADKR mode=strict start_phase=protocol_start end_phase=local_decide n=%d committee_size=%d total_logical_participants=%d f=%d kappa=%d kappa_profile=%s kappa_epoch_failure_prob=%.12g kappa_epoch_security_bits=%.6g kappa_lifetime_epochs=%d kappa_lifetime_union_bound=%.12g kappa_lifetime_security_bits=%.6g runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_selected_count=%.2f mean_verified_count=%.2f mean_setup_ms=%.2f mean_online_protocol_ms=%.2f mean_online_active_known_ms=%.2f mean_dxt_dealing_ms=%.2f mean_dxt_network_build_ms=%.2f mean_dxt_network_wait_ms=%.2f mean_dxt_cache_hit_ms=%.2f mean_dxt_cache_build_ms=%.2f mean_dxt_cache_wait_ms=%.2f mean_apdb_dispersal_ms=%.2f mean_mvba_agree_ms=%.2f mean_mvba_peer_wait_ms=%.2f mean_mvba_active_known_ms=%.2f mean_coin_select_ms=%.2f mean_partial_verify_ms=%.2f mean_recover_ms=%.2f mean_recover_ready_ms=%.2f mean_recover_completion_ms=%.2f mean_recover_store_verify_ms=%.2f mean_recover_shard_verify_ms=%.2f mean_recover_verify_ms=%.2f mean_recover_store_seen=%.2f mean_recover_fetch_req_sent=%.2f mean_recover_fetch_resp_recv=%.2f mean_recover_recipient_seen=%.2f mean_derive_ms=%.2f mean_aggregate_derive_ms=%.2f mean_total_phase_ms=%.2f mean_total_sent_bytes=%.2f mean_total_recv_bytes=%.2f mean_dxt_sent_bytes=%.2f mean_dxt_recv_bytes=%.2f mean_apdb_sent_bytes=%.2f mean_apdb_recv_bytes=%.2f mean_recover_sent_bytes=%.2f mean_recover_recv_bytes=%.2f mean_derive_sent_bytes=%.2f mean_derive_recv_bytes=%.2f fallback_runs=%d timeout_runs=%d local_node_count=%d consensus_hash=%s\n",
 		*n,
 		committeeSize,
 		committeeSize*2,
@@ -311,6 +360,8 @@ func main() {
 		meanOnlineProtocolMs(stats),
 		meanOnlineActiveKnownMs(stats),
 		meanPhaseMs(stats, "dxt_dealing"),
+		meanPhaseMs(stats, "dxt_network_build"),
+		meanPhaseMs(stats, "dxt_network_wait"),
 		meanPhaseMs(stats, "dxt_cache_hit"),
 		meanPhaseMs(stats, "dxt_cache_build"),
 		meanPhaseMs(stats, "dxt_cache_wait"),
@@ -321,6 +372,8 @@ func main() {
 		meanPhaseMs(stats, "coin_select"),
 		meanPhaseMs(stats, "partial_verify"),
 		meanPhaseMs(stats, "recover"),
+		meanPhaseMs(stats, "recover_ready"),
+		meanPhaseMs(stats, "recover_completion"),
 		meanPhaseMs(stats, "recover_store_verify"),
 		meanPhaseMs(stats, "recover_shard_verify"),
 		meanPhaseMs(stats, "recover_verify"),
@@ -333,6 +386,10 @@ func main() {
 		meanPhaseMs(stats, "total"),
 		meanSentBytes,
 		meanRecvBytes,
+		meanPhaseBytes(stats, "dxt_dealing", true),
+		meanPhaseBytes(stats, "dxt_dealing", false),
+		meanPhaseBytes(stats, "apdb_dispersal", true),
+		meanPhaseBytes(stats, "apdb_dispersal", false),
 		meanPhaseBytes(stats, "recover", true),
 		meanPhaseBytes(stats, "recover", false),
 		meanPhaseBytes(stats, "derive", true),
@@ -340,6 +397,7 @@ func main() {
 		fallbackRuns,
 		timeoutRuns,
 		localNodeCount,
+		consensusHash,
 	)
 	if successRuns != *runs {
 		os.Exit(1)

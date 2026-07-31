@@ -3,8 +3,6 @@ package core
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
@@ -26,8 +24,9 @@ import (
 )
 
 type mvbaSetPayload struct {
-	Proposer int   `json:"proposer"`
-	Set      []int `json:"set"`
+	Proposer     int               `json:"proposer"`
+	Set          []int             `json:"set"`
+	Certificates []APDBCertificate `json:"certificates"`
 }
 
 type mvbaTCPWire struct {
@@ -848,12 +847,20 @@ type practicalMVBABreakdown struct {
 	Wall     time.Duration
 }
 
+type practicalMVBADecision struct {
+	Set          []int
+	Certificates map[int]APDBCertificate
+}
+
 func decideByDumboMVBA(
 	ctx context.Context,
 	cfg Config,
 	old []int,
 	proposals map[int][]int,
-) ([]int, practicalMVBABreakdown, error) {
+	certificates map[int]APDBCertificate,
+	nodePub map[int]ed25519.PublicKey,
+	thresholdKeys *thresholdCoinKeySet,
+) (*practicalMVBADecision, practicalMVBABreakdown, error) {
 	breakdown := practicalMVBABreakdown{}
 	start := time.Now()
 	traceMVBA := func(format string, args ...any) {
@@ -917,12 +924,11 @@ func decideByDumboMVBA(
 	}
 	routeTimeout = durationFromEnvMsOr("PRACTICAL_MVBA_ROUTE_TIMEOUT_MS", routeTimeout)
 
-	// Always use TCP MVBA with TBLS coin.
-	localIDs := parseNodeIDSet(firstNonEmpty(cfg.MVBALocalNodeIDs, os.Getenv("PRACTICAL_MVBA_LOCAL_NODE_IDS")))
-	if len(localIDs) == 0 {
-		for i := 0; i < n; i++ {
-			localIDs[i] = struct{}{}
-		}
+	// Dumbo-MVBA addresses nodes by their 0..n-1 committee index. The public
+	// Practical config addresses nodes by their actual old-committee ID.
+	mvbaCfg, localIDs, err := internalMVBAEndpointConfig(cfg, old, indexByNode)
+	if err != nil {
+		return nil, breakdown, err
 	}
 
 	inputs := make([]dmvba.ProposalValue, n)
@@ -931,9 +937,18 @@ func decideByDumboMVBA(
 	for _, nodeID := range old {
 		i := indexByNode[nodeID]
 		stableSet := stableFirst(proposals[nodeID], len(proposals[nodeID]))
+		proposalCerts := make([]APDBCertificate, 0, len(stableSet))
+		for _, dealer := range stableSet {
+			cert, ok := certificates[dealer]
+			if !ok {
+				return nil, breakdown, fmt.Errorf("MVBA proposal for node %d lacks APDB certificate for dealer %d", nodeID, dealer)
+			}
+			proposalCerts = append(proposalCerts, cert)
+		}
 		payload := mvbaSetPayload{
-			Proposer: nodeID,
-			Set:      stableSet,
+			Proposer:     nodeID,
+			Set:          stableSet,
+			Certificates: proposalCerts,
 		}
 		raw, mErr := json.Marshal(payload)
 		if mErr != nil {
@@ -959,16 +974,27 @@ func decideByDumboMVBA(
 		float64(routeTimeout.Microseconds())/1000.0,
 	)
 
-	seed := sha256.Sum256([]byte(cfg.SID + ":practical-adkr:mvba"))
-	blsShares, blsPKs, blsPubKey, blsThreshold, blsErr := dmvba.GenerateBLS12381TBLSBundle(n, cfg.F, pracCoinStream(seed[:]))
-	if blsErr != nil {
-		return nil, breakdown, fmt.Errorf("mvba bls12381: %w", blsErr)
+	if thresholdKeys == nil || thresholdKeys.threshold != n-cfg.F || len(thresholdKeys.nodeIDs) != n {
+		return nil, breakdown, fmt.Errorf("MVBA requires the configured high-threshold old-committee key set")
+	}
+	for i, nodeID := range old {
+		if thresholdKeys.nodeIDs[i] != nodeID {
+			return nil, breakdown, fmt.Errorf("MVBA threshold key committee mismatch")
+		}
 	}
 
 	outs := make([]dmvba.ProposalValue, n)
 	errs := make([]error, n)
+	required := apdbFinishedSetThreshold(cfg.F, n)
+	predicate := func(from int, value dmvba.ProposalValue) bool {
+		if from < 0 || from >= len(old) {
+			return false
+		}
+		_, err := validateMVBASetPayload(value.Payload, old[from], old, required, nodePub)
+		return err == nil
+	}
 
-	hub, hubErr := newMVBATCPHub(cfg, recv)
+	hub, hubErr := newMVBATCPHub(mvbaCfg, recv)
 	if hubErr != nil {
 		return nil, breakdown, fmt.Errorf("mvba tcp hub: %w", hubErr)
 	}
@@ -1018,12 +1044,19 @@ func decideByDumboMVBA(
 
 	var wg sync.WaitGroup
 	for nid := range localIDs {
+		if nid < 0 || nid >= len(old) {
+			return nil, breakdown, fmt.Errorf("MVBA local index %d is outside old committee", nid)
+		}
 		wg.Add(1)
 		nid := nid
 		go func() {
 			defer wg.Done()
 			traceMVBA("node_begin id=%d payload_bytes=%d", nid, len(inputs[nid].Payload))
-			signer := dmvba.NewBLS12381Signer(nid, blsShares[nid], blsPubKey, blsPKs, n, blsThreshold)
+			signer, signerErr := thresholdKeys.signer(old[nid])
+			if signerErr != nil {
+				errs[nid] = fmt.Errorf("MVBA signer %d: %w", old[nid], signerErr)
+				return
+			}
 			neti := &mvbaTCPNet{id: nid, hub: hub}
 			traceMVBA("node_runacs_begin id=%d", nid)
 			vec, runErr := dmvba.RunMVBACCommonSubset(ctx,
@@ -1032,7 +1065,7 @@ func decideByDumboMVBA(
 					MaxRounds: maxRounds, WaitSPBCTimeout: waitSPBC,
 					RouteSendTimeout: routeTimeout,
 				},
-				neti, signer, recv[nid], inputs[nid], nil,
+				neti, signer, recv[nid], inputs[nid], predicate,
 			)
 			traceMVBA("node_runacs_end id=%d err=%v", nid, runErr)
 			nonNilVec := 0
@@ -1073,20 +1106,18 @@ func decideByDumboMVBA(
 	}
 
 	votes := make(map[string]int, n)
-	decoded := make(map[string][]int, n)
+	decoded := make(map[string]*mvbaSetPayload, n)
 	for i := 0; i < n; i++ {
 		if len(outs[i].Payload) == 0 {
 			continue
 		}
-		var p mvbaSetPayload
-		if err := json.Unmarshal(outs[i].Payload, &p); err != nil {
+		p, err := validateMVBASetPayload(outs[i].Payload, -1, old, required, nodePub)
+		if err != nil {
 			return nil, breakdown, fmt.Errorf("decode mvba output at node %d: %w", old[i], err)
 		}
-		set := stableFirst(p.Set, len(p.Set))
-		sort.Ints(set)
-		key := fmt.Sprintf("%v", set)
+		key := fmt.Sprintf("%v", p.Set)
 		votes[key]++
-		decoded[key] = set
+		decoded[key] = p
 	}
 
 	bestKey := ""
@@ -1100,8 +1131,115 @@ func decideByDumboMVBA(
 	if bestKey == "" {
 		return nil, breakdown, fmt.Errorf("mvba returned no decision")
 	}
+	selected := decoded[bestKey]
+	decision := &practicalMVBADecision{
+		Set:          append([]int(nil), selected.Set...),
+		Certificates: make(map[int]APDBCertificate, len(selected.Certificates)),
+	}
+	for _, certificate := range selected.Certificates {
+		decision.Certificates[certificate.Sender] = certificate
+	}
 	breakdown.Wall = time.Since(start)
-	return append([]int(nil), decoded[bestKey]...), breakdown, nil
+	return decision, breakdown, nil
+}
+
+func internalMVBAEndpointConfig(
+	cfg Config,
+	old []int,
+	indexByNode map[int]int,
+) (Config, map[int]struct{}, error) {
+	addrRaw := firstNonEmpty(cfg.MVBANodeAddrs, os.Getenv("PRACTICAL_MVBA_NODE_ADDRS"))
+	actualAddrs := parseNodeAddrMap(addrRaw)
+	if len(actualAddrs) < len(old) {
+		return Config{}, nil, fmt.Errorf("mvba node addresses incomplete: have=%d need=%d", len(actualAddrs), len(old))
+	}
+	addrParts := make([]string, len(old))
+	for internalID, actualID := range old {
+		addr, ok := actualAddrs[actualID]
+		if !ok || strings.TrimSpace(addr) == "" {
+			return Config{}, nil, fmt.Errorf("mvba address missing for old-committee node %d", actualID)
+		}
+		addrParts[internalID] = fmt.Sprintf("%d=%s", internalID, addr)
+	}
+
+	actualLocal := parseNodeIDSet(firstNonEmpty(cfg.MVBALocalNodeIDs, os.Getenv("PRACTICAL_MVBA_LOCAL_NODE_IDS")))
+	if len(actualLocal) == 0 {
+		actualLocal = make(map[int]struct{}, len(old))
+		for _, nodeID := range old {
+			actualLocal[nodeID] = struct{}{}
+		}
+	}
+	internalLocal := make(map[int]struct{}, len(actualLocal))
+	for actualID := range actualLocal {
+		internalID, ok := indexByNode[actualID]
+		if !ok {
+			return Config{}, nil, fmt.Errorf("MVBA local node %d is outside old committee", actualID)
+		}
+		internalLocal[internalID] = struct{}{}
+	}
+	localIndexes := make([]int, 0, len(internalLocal))
+	for internalID := range internalLocal {
+		localIndexes = append(localIndexes, internalID)
+	}
+	sort.Ints(localIndexes)
+	localParts := make([]string, len(localIndexes))
+	for i, internalID := range localIndexes {
+		localParts[i] = strconv.Itoa(internalID)
+	}
+
+	internalCfg := cfg
+	internalCfg.MVBANodeAddrs = strings.Join(addrParts, ",")
+	internalCfg.MVBALocalNodeIDs = strings.Join(localParts, ",")
+	return internalCfg, internalLocal, nil
+}
+
+func validateMVBASetPayload(
+	raw []byte,
+	expectedProposer int,
+	old []int,
+	required int,
+	nodePub map[int]ed25519.PublicKey,
+) (*mvbaSetPayload, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var payload mvbaSetPayload
+	if err := dec.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode MVBA APDB-lock payload: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("MVBA APDB-lock payload has trailing data")
+	}
+	if expectedProposer >= 0 && payload.Proposer != expectedProposer {
+		return nil, fmt.Errorf("MVBA proposer mismatch: got=%d want=%d", payload.Proposer, expectedProposer)
+	}
+	if required <= 0 || len(payload.Set) != required || len(payload.Certificates) != required {
+		return nil, fmt.Errorf("MVBA proposal must carry exactly %d dealers and certificates", required)
+	}
+	oldSet := make(map[int]struct{}, len(old))
+	for _, id := range old {
+		oldSet[id] = struct{}{}
+	}
+	for i, dealer := range payload.Set {
+		if _, ok := oldSet[dealer]; !ok {
+			return nil, fmt.Errorf("MVBA proposal contains non-committee dealer %d", dealer)
+		}
+		if i > 0 && payload.Set[i-1] >= dealer {
+			return nil, fmt.Errorf("MVBA dealer set is not strictly canonical")
+		}
+		cert := payload.Certificates[i]
+		if cert.Sender != dealer || len(cert.Receipts) != required {
+			return nil, fmt.Errorf("MVBA APDB certificate does not match dealer %d", dealer)
+		}
+		for receiptIndex := range cert.Receipts {
+			if receiptIndex > 0 && cert.Receipts[receiptIndex-1].NodeID >= cert.Receipts[receiptIndex].NodeID {
+				return nil, fmt.Errorf("MVBA APDB receipts are not strictly canonical")
+			}
+		}
+		if required%2 == 0 || !verifyAPDBCertificate(cert, nodePub, (required-1)/2) {
+			return nil, fmt.Errorf("MVBA APDB certificate for dealer %d is invalid", dealer)
+		}
+	}
+	return &payload, nil
 }
 
 func parseNodeAddrMap(raw string) map[int]string {
@@ -1184,10 +1322,4 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
-}
-
-func pracCoinStream(seed []byte) cipher.Stream {
-	key := sha256.Sum256(seed)
-	block, _ := aes.NewCipher(key[:])
-	return cipher.NewCTR(block, make([]byte, aes.BlockSize))
 }

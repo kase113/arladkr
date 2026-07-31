@@ -632,6 +632,13 @@ func cvDecodeLeafContext(wire []byte) (cvLeafContext, error) {
 	if err != nil {
 		return cvLeafContext{}, err
 	}
+	previousStateDigest, err := r.bytes(32)
+	if err != nil || len(previousStateDigest) != 32 {
+		return cvLeafContext{}, fmt.Errorf("invalid CV-sAPVSS previous-state digest")
+	}
+	if bytes.Equal(previousStateDigest, make([]byte, 32)) {
+		previousStateDigest = nil
+	}
 	params := make([]int, 6)
 	for i := range params {
 		params[i], err = r.uint32()
@@ -671,13 +678,14 @@ func cvDecodeLeafContext(wire []byte) (cvLeafContext, error) {
 		return cvLeafContext{}, fmt.Errorf("invalid CV-sAPVSS context suffix")
 	}
 	context := cvLeafContext{
-		sessionID:          sessionID,
-		epoch:              epoch,
-		sharingDegree:      params[1],
-		profile:            cvChunkProfile{maxComponents: params[2], chunkBits: uint(params[3])},
-		receiverPublicKeys: keys,
-		dealerSetPolicy:    dealerPolicy,
-		proofProfile:       string(proofProfile),
+		sessionID:           sessionID,
+		epoch:               epoch,
+		previousStateDigest: previousStateDigest,
+		sharingDegree:       params[1],
+		profile:             cvChunkProfile{maxComponents: params[2], chunkBits: uint(params[3])},
+		receiverPublicKeys:  keys,
+		dealerSetPolicy:     dealerPolicy,
+		proofProfile:        string(proofProfile),
 	}
 	base, _, chunks, profileErr := cvProfile(context.profile)
 	computedRegistry, registryErr := cvReceiverRegistryDigest(keys)

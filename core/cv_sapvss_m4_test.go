@@ -399,6 +399,9 @@ func TestCVSAPVSSM4DecodeRejectsOversizedReceiverCountBeforeAllocation(t *testin
 		t.Fatal(err)
 	}
 	cvWriteUint64(&wire, 1)
+	if err := cvWriteBytes(&wire, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
 	for _, value := range []int{receiverCount, 1, 2, 4, int(base), chunks} {
 		if err := cvWriteUint32(&wire, value); err != nil {
 			t.Fatal(err)

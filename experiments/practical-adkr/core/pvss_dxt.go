@@ -3,6 +3,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -29,15 +30,17 @@ type DXTBackend struct {
 	curve elliptic.Curve
 	order *big.Int
 
-	oldCommittee []int
-	newCommittee []int
-	f            int
+	oldCommittee  []int
+	newCommittee  []int
+	f             int
+	sharingDegree int
 
 	dealerPriv map[int]*ecdsa.PrivateKey
 	dealerPub  map[int]*ecdsa.PublicKey
 
 	recipientPub  map[int]*PaillierPublicKey
 	recipientPriv map[int]*PaillierPrivateKey
+	compPublic    map[int][]byte
 
 	// Ed25519 keys for new committee (for ack signatures)
 	recipientSignPriv map[int]*ecdsa.PrivateKey
@@ -51,6 +54,32 @@ type DXTBackend struct {
 	strictNetwork     bool
 	externalReceivers bool
 	shareStoreDir     string
+	networkService    *dxtNetworkService
+}
+
+func (b *DXTBackend) closeNetworkService() {
+	if b == nil || b.networkService == nil {
+		return
+	}
+	b.networkService.close()
+	b.networkService = nil
+}
+
+func (b *DXTBackend) setCompPublicKeys(public map[int][]byte) error {
+	if len(public) != len(b.newCommittee) {
+		return fmt.Errorf("CompProve public key count=%d want=%d", len(public), len(b.newCommittee))
+	}
+	curve := elliptic.P256()
+	b.compPublic = make(map[int][]byte, len(public))
+	for _, id := range b.newCommittee {
+		value := public[id]
+		x, _ := elliptic.UnmarshalCompressed(curve, value)
+		if x == nil {
+			return fmt.Errorf("invalid CompProve public key for receiver %d", id)
+		}
+		b.compPublic[id] = append([]byte(nil), value...)
+	}
+	return nil
 }
 
 type dxtLocalSharePayload struct {
@@ -256,6 +285,13 @@ func NewDXTBackend(
 	if len(oldCommittee) == 0 || len(newCommittee) == 0 {
 		return nil, errors.New("empty committee")
 	}
+	if f < 0 {
+		return nil, errors.New("negative Byzantine threshold")
+	}
+	if len(oldCommittee) < 3*f+1 || len(newCommittee) < 3*f+1 {
+		return nil, fmt.Errorf("high-threshold PVSS committees must satisfy n >= 3f+1")
+	}
+	sharingDegree := len(newCommittee) - f - 1
 	newIdx := make(map[int]int, len(newCommittee))
 	for i, id := range newCommittee {
 		newIdx[id] = i
@@ -270,6 +306,7 @@ func NewDXTBackend(
 		oldCommittee:      append([]int(nil), oldCommittee...),
 		newCommittee:      append([]int(nil), newCommittee...),
 		f:                 f,
+		sharingDegree:     sharingDegree,
 		dealerPriv:        dealerPriv,
 		dealerPub:         dealerPub,
 		recipientPub:      recipientPub,
@@ -414,8 +451,10 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 		s.Mod(secret, b.order)
 	}
 
-	// Generate degree-f polynomial (t = f+1 threshold)
-	deg := b.f
+	// The paper's high-threshold construction uses degree t=n-f-1, hence
+	// reconstruction requires t+1=n-f shares. At minimal n=3f+1 this is
+	// t=2f. The Byzantine bound f remains separate from the sharing degree.
+	deg := b.sharingDegree
 	coeffsF := make([]*big.Int, deg+1)
 	coeffsF[0] = s
 	for i := 1; i <= deg; i++ {
@@ -461,10 +500,12 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 	addrMap := parseNodeAddrMap(b.protoNodeAddrs)
 	localIDs := parseNodeIDSet(b.protoLocalNodeIDs)
 	netEnabled := len(addrMap) > 0 && len(localIDs) > 0
-	for rid := range localIDs {
-		if share, ok := shares[rid]; ok {
-			if err := b.storeLocalShare(dealer, rid, share); err != nil && b.strictNetwork {
-				return nil, nil, err
+	// In strict mode only the receiver service may persist plaintext ACK aux.
+	// Local compatibility mode may still use the colocated dealer result.
+	if !b.strictNetwork {
+		for rid := range localIDs {
+			if share, ok := shares[rid]; ok {
+				_ = b.storeLocalShare(dealer, rid, share)
 			}
 		}
 	}
@@ -520,31 +561,43 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 				}
 			}()
 
+			sendStop := make(chan struct{})
+			var sendStopOnce sync.Once
+			var sendWG sync.WaitGroup
 			for _, rid := range b.newCommittee {
+				rid := rid
 				addr, ok := addrMap[rid]
 				if !ok || strings.TrimSpace(addr) == "" {
 					continue
 				}
-				req := dxtDealReq{
-					Dealer:     dealer,
-					Recipient:  rid,
-					Commitment: commitments[rid],
-					ReplyAddr:  replyAddr,
-				}
+				req := dxtDealReq{Dealer: dealer, Recipient: rid, Commitment: commitments[rid], ReplyAddr: replyAddr}
 				req.ShareCiphertext, err = encryptDXTShare(b.dealerPriv[dealer], b.recipientSignPub[rid], dealer, rid, shares[rid].S, shares[rid].SR)
 				if err != nil {
 					continue
 				}
-				conn, err := dialWithOptionalDelay(dealer, rid, "tcp", addr, timeout)
-				if err != nil {
-					continue
-				}
-				_ = conn.SetWriteDeadline(time.Now().Add(timeout))
-				if body, mErr := json.Marshal(req); mErr == nil {
-					recordSentBytes(len(body))
-				}
-				_ = json.NewEncoder(conn).Encode(req)
-				_ = conn.Close()
+				sendWG.Add(1)
+				go func() {
+					defer sendWG.Done()
+					for {
+						conn, dialErr := dialWithOptionalDelay(dealer, rid, "tcp", addr, 300*time.Millisecond)
+						if dialErr == nil {
+							_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+							if body, marshalErr := json.Marshal(req); marshalErr == nil {
+								recordSentBytes(len(body) + 1)
+							}
+							writeErr := json.NewEncoder(conn).Encode(req)
+							_ = conn.Close()
+							if writeErr == nil {
+								return
+							}
+						}
+						select {
+						case <-sendStop:
+							return
+						case <-time.After(25 * time.Millisecond):
+						}
+					}
+				}()
 			}
 
 			deadline := time.NewTimer(timeout)
@@ -567,6 +620,8 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 				}
 			}
 			deadline.Stop()
+			sendStopOnce.Do(func() { close(sendStop) })
+			sendWG.Wait()
 			_ = replyLn.Close()
 			ackWG.Wait()
 		}
@@ -631,6 +686,7 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 
 	// For non-responsive recipients: use VE (Paillier encryption)
 	ciphertexts := make(map[int][]byte)
+	blindingCiphertexts := make(map[int]DXTBlindingCiphertext)
 	proofs := make(map[int][]byte)
 
 	for _, rid := range b.newCommittee {
@@ -648,6 +704,10 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 			return nil, nil, err
 		}
 		cBytes := c.Bytes()
+		blindingCiphertext, blindingRandomness, err := encryptDXTBlinding(b.curve, b.compPublic[rid], shares[rid].SR)
+		if err != nil {
+			return nil, nil, err
+		}
 
 		proof, err := buildEncryptedDLogProof(
 			b.curve,
@@ -658,11 +718,14 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 			rEnc,
 			commitments[rid],
 			cBytes,
+			b.compPublic[rid],
+			blindingCiphertext,
+			blindingRandomness,
 		)
 		if err != nil {
 			return nil, nil, err
 		}
-		sigInput := artifactProofHash(dealer, rid, commitments[rid], cBytes, proof.T, proof.Z, proof.ZR, proof.EU, proof.W)
+		sigInput := artifactProofHash(dealer, rid, commitments[rid], cBytes, b.compPublic[rid], blindingCiphertext, proof)
 		hash := sha256.Sum256(sigInput)
 		proof.DealerSig, err = ecdsa.SignASN1(rand.Reader, b.dealerPriv[dealer], hash[:])
 		if err != nil {
@@ -674,6 +737,7 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 		}
 
 		ciphertexts[rid] = cBytes
+		blindingCiphertexts[rid] = blindingCiphertext
 		proofs[rid] = proofBytes
 	}
 
@@ -690,11 +754,12 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 	}
 
 	transcript := &DXTTranscript{
-		Dealer:      dealer,
-		Commitments: commitments,
-		Ciphertexts: ciphertexts,
-		Proofs:      proofs,
-		Signatures:  selectedAcks,
+		Dealer:              dealer,
+		Commitments:         commitments,
+		Ciphertexts:         ciphertexts,
+		BlindingCiphertexts: blindingCiphertexts,
+		Proofs:              proofs,
+		Signatures:          selectedAcks,
 	}
 
 	return transcript, shares, nil
@@ -706,7 +771,7 @@ func (b *DXTBackend) VerifyTranscript(_ int, transcript *DXTTranscript) bool {
 	if !b.validateTranscriptShape(transcript) {
 		return false
 	}
-	if !verifyCommitmentDegree(b.curve, transcript.Commitments, b.newCommittee, b.f) {
+	if !verifyCommitmentDegree(b.curve, transcript.Commitments, b.newCommittee, b.sharingDegree) {
 		return false
 	}
 	for _, rid := range b.newCommittee {
@@ -760,7 +825,7 @@ func (b *DXTBackend) partialVerifyLanes(nodeID int, transcript *DXTTranscript) (
 	if !b.validateTranscriptShape(transcript) {
 		return nil, false
 	}
-	if !verifyCommitmentDegree(b.curve, transcript.Commitments, b.newCommittee, b.f) {
+	if !verifyCommitmentDegree(b.curve, transcript.Commitments, b.newCommittee, b.sharingDegree) {
 		return nil, false
 	}
 	ids, ok := b.partialLaneIDs(nodeID)
@@ -782,6 +847,7 @@ func (b *DXTBackend) validateTranscriptShape(transcript *DXTTranscript) bool {
 	threshold := 2*b.f + 1
 	if threshold <= 0 || threshold > n || len(transcript.Commitments) != n ||
 		len(transcript.Signatures) != threshold || len(transcript.Ciphertexts) != n-threshold ||
+		len(transcript.BlindingCiphertexts) != len(transcript.Ciphertexts) ||
 		len(transcript.Proofs) != len(transcript.Ciphertexts) {
 		return false
 	}
@@ -789,8 +855,10 @@ func (b *DXTBackend) validateTranscriptShape(transcript *DXTTranscript) bool {
 		commitment, hasCommitment := transcript.Commitments[rid]
 		_, hasSignature := transcript.Signatures[rid]
 		_, hasCiphertext := transcript.Ciphertexts[rid]
+		_, hasBlindingCiphertext := transcript.BlindingCiphertexts[rid]
 		_, hasProof := transcript.Proofs[rid]
-		if !hasCommitment || len(commitment) == 0 || hasSignature == hasCiphertext || hasCiphertext != hasProof {
+		if !hasCommitment || len(commitment) == 0 || hasSignature == hasCiphertext ||
+			hasCiphertext != hasBlindingCiphertext || hasCiphertext != hasProof {
 			return false
 		}
 		if hasSignature && b.recipientSignPub[rid] == nil {
@@ -798,6 +866,18 @@ func (b *DXTBackend) validateTranscriptShape(transcript *DXTTranscript) bool {
 		}
 		if hasCiphertext && b.recipientPub[rid] == nil {
 			return false
+		}
+		if hasCiphertext {
+			if x, _ := elliptic.UnmarshalCompressed(b.curve, b.compPublic[rid]); x == nil {
+				return false
+			}
+			blinding := transcript.BlindingCiphertexts[rid]
+			if x, _ := elliptic.UnmarshalCompressed(b.curve, blinding.C0); x == nil {
+				return false
+			}
+			if _, _, err := practicalPoint(b.curve, blinding.C1); err != nil {
+				return false
+			}
 		}
 	}
 	return true
@@ -816,22 +896,16 @@ func (b *DXTBackend) verifyTranscriptLane(transcript *DXTTranscript, rid int) bo
 	if err := json.Unmarshal(transcript.Proofs[rid], &proof); err != nil {
 		return false
 	}
-	sigInput := artifactProofHash(
-		transcript.Dealer,
-		rid,
-		commitment,
-		ciphertext,
-		proof.T,
-		proof.Z,
-		proof.ZR,
-		proof.EU,
-		proof.W,
-	)
+	blindingCiphertext := transcript.BlindingCiphertexts[rid]
+	sigInput := artifactProofHash(transcript.Dealer, rid, commitment, ciphertext, b.compPublic[rid], blindingCiphertext, &proof)
 	hash := sha256.Sum256(sigInput)
 	if !ecdsa.VerifyASN1(b.dealerPub[transcript.Dealer], hash[:], proof.DealerSig) {
 		return false
 	}
-	return verifyEncryptedDLogProof(b.curve, b.order, b.recipientPub[rid], commitment, ciphertext, &proof)
+	return verifyEncryptedDLogProof(
+		b.curve, b.order, b.recipientPub[rid], commitment, ciphertext,
+		b.compPublic[rid], blindingCiphertext, &proof,
+	)
 }
 
 func dialableReplyAddr(listenerAddr string, addrMap map[int]string, localIDs map[int]struct{}, newIndex map[int]int) string {
@@ -869,10 +943,18 @@ type EncryptedDLogProof struct {
 	ZR        []byte `json:"zr"`
 	EU        []byte `json:"eu"`
 	W         []byte `json:"w"`
+	ET0       []byte `json:"et0"`
+	ET1       []byte `json:"et1"`
+	ZA        []byte `json:"za"`
 	DealerSig []byte `json:"dealer_sig"`
 }
 
-func artifactProofHash(dealer, recipient int, commitment, ciphertext, t, z, zr, eu, w []byte) []byte {
+func artifactProofHash(
+	dealer, recipient int,
+	commitment, ciphertext, compPublic []byte,
+	blinding DXTBlindingCiphertext,
+	proof *EncryptedDLogProof,
+) []byte {
 	var buf [16]byte
 	binary.BigEndian.PutUint64(buf[:8], uint64(dealer))
 	binary.BigEndian.PutUint64(buf[8:], uint64(recipient))
@@ -881,11 +963,12 @@ func artifactProofHash(dealer, recipient int, commitment, ciphertext, t, z, zr, 
 	h.Write(buf[:])
 	writeDXTHashField(h, commitment)
 	writeDXTHashField(h, ciphertext)
-	writeDXTHashField(h, t)
-	writeDXTHashField(h, z)
-	writeDXTHashField(h, zr)
-	writeDXTHashField(h, eu)
-	writeDXTHashField(h, w)
+	writeDXTHashField(h, compPublic)
+	writeDXTHashField(h, blinding.C0)
+	writeDXTHashField(h, blinding.C1)
+	for _, field := range [][]byte{proof.T, proof.Z, proof.ZR, proof.EU, proof.W, proof.ET0, proof.ET1, proof.ZA} {
+		writeDXTHashField(h, field)
+	}
 	return h.Sum(nil)
 }
 
@@ -893,6 +976,9 @@ func buildEncryptedDLogProof(
 	curve elliptic.Curve, order *big.Int,
 	pk *PaillierPublicKey, share, shareRandomness, rEnc *big.Int,
 	commitment, ciphertext []byte,
+	compPublic []byte,
+	blindingCiphertext DXTBlindingCiphertext,
+	blindingRandomness *big.Int,
 ) (*EncryptedDLogProof, error) {
 	u, err := rand.Int(rand.Reader, order)
 	if err != nil {
@@ -911,13 +997,28 @@ func buildEncryptedDLogProof(
 	if err != nil {
 		return nil, err
 	}
-	e := proofChallenge(order, pk, commitment, ciphertext, t, eu.Bytes())
+	a, err := rand.Int(rand.Reader, order)
+	if err != nil {
+		return nil, err
+	}
+	et0 := practicalBasePoint(curve, a)
+	compA, err := practicalPointScalar(curve, compPublic, a)
+	if err != nil {
+		return nil, err
+	}
+	et1, err := practicalPointAdd(curve, compA, practicalHPoint(curve, v))
+	if err != nil {
+		return nil, err
+	}
+	e := proofChallenge(order, pk, commitment, ciphertext, compPublic, blindingCiphertext, t, eu.Bytes(), et0, et1)
 
 	z := new(big.Int).Mul(e, share)
 	z.Add(z, u)
 	zr := new(big.Int).Mul(e, shareRandomness)
 	zr.Add(zr, v)
 	zr.Mod(zr, order)
+	za := new(big.Int).Mul(e, blindingRandomness)
+	za.Add(za, a).Mod(za, order)
 
 	w := new(big.Int).Exp(rEnc, e, pk.N)
 	w.Mul(w, s)
@@ -930,11 +1031,14 @@ func buildEncryptedDLogProof(
 	}
 
 	return &EncryptedDLogProof{
-		T:  t,
-		Z:  z.Bytes(),
-		ZR: zr.Bytes(),
-		EU: eu.Bytes(),
-		W:  w.Bytes(),
+		T:   t,
+		Z:   z.Bytes(),
+		ZR:  zr.Bytes(),
+		EU:  eu.Bytes(),
+		W:   w.Bytes(),
+		ET0: et0,
+		ET1: et1,
+		ZA:  za.Bytes(),
 	}, nil
 }
 
@@ -942,6 +1046,8 @@ func verifyEncryptedDLogProof(
 	curve elliptic.Curve, order *big.Int,
 	pk *PaillierPublicKey,
 	commitment, ciphertext []byte,
+	compPublic []byte,
+	blindingCiphertext DXTBlindingCiphertext,
 	proof *EncryptedDLogProof,
 ) bool {
 	if proof == nil || pk == nil {
@@ -954,12 +1060,22 @@ func verifyEncryptedDLogProof(
 	}
 	z := new(big.Int).SetBytes(proof.Z)
 	zr := new(big.Int).SetBytes(proof.ZR)
+	za := new(big.Int).SetBytes(proof.ZA)
 	eui := new(big.Int).SetBytes(proof.EU)
 	if z.Sign() < 0 || z.Cmp(pk.N) >= 0 || zr.Cmp(order) >= 0 ||
-		eui.Sign() <= 0 || eui.Cmp(pk.NSquare) >= 0 {
+		za.Cmp(order) >= 0 || eui.Sign() <= 0 || eui.Cmp(pk.NSquare) >= 0 {
 		return false
 	}
-	e := proofChallenge(order, pk, commitment, ciphertext, proof.T, proof.EU)
+	if x, _ := elliptic.UnmarshalCompressed(curve, compPublic); x == nil {
+		return false
+	}
+	if x, _ := elliptic.UnmarshalCompressed(curve, blindingCiphertext.C0); x == nil {
+		return false
+	}
+	if _, _, err := practicalPoint(curve, blindingCiphertext.C1); err != nil {
+		return false
+	}
+	e := proofChallenge(order, pk, commitment, ciphertext, compPublic, blindingCiphertext, proof.T, proof.EU, proof.ET0, proof.ET1)
 
 	lhsBytes := commitSharePair(curve, new(big.Int).Mod(new(big.Int).Set(z), order), zr)
 	lhsX, lhsY := elliptic.UnmarshalCompressed(curve, lhsBytes)
@@ -985,20 +1101,54 @@ func verifyEncryptedDLogProof(
 		return false
 	}
 	rhs, err := pk.EncryptWithRandom(z, w)
+	if err != nil || lhs.Cmp(rhs) != 0 {
+		return false
+	}
+
+	lhs0 := practicalBasePoint(curve, za)
+	eC0, err := practicalPointScalar(curve, blindingCiphertext.C0, e)
 	if err != nil {
 		return false
 	}
-	return lhs.Cmp(rhs) == 0
+	rhs0, err := practicalPointAdd(curve, proof.ET0, eC0)
+	if err != nil || !bytes.Equal(lhs0, rhs0) {
+		return false
+	}
+	compZA, err := practicalPointScalar(curve, compPublic, za)
+	if err != nil {
+		return false
+	}
+	lhs1, err := practicalPointAdd(curve, compZA, practicalHPoint(curve, zr))
+	if err != nil {
+		return false
+	}
+	eC1, err := practicalPointScalar(curve, blindingCiphertext.C1, e)
+	if err != nil {
+		return false
+	}
+	rhs1, err := practicalPointAdd(curve, proof.ET1, eC1)
+	return err == nil && bytes.Equal(lhs1, rhs1)
 }
 
-func proofChallenge(order *big.Int, pk *PaillierPublicKey, commitment, ciphertext, t, eu []byte) *big.Int {
+func proofChallenge(
+	order *big.Int,
+	pk *PaillierPublicKey,
+	commitment, ciphertext, compPublic []byte,
+	blinding DXTBlindingCiphertext,
+	t, eu, et0, et1 []byte,
+) *big.Int {
 	h := sha256.New()
 	h.Write([]byte("PADKR-ENCRYPTED-DLOG"))
 	writeDXTHashField(h, pk.N.Bytes())
 	writeDXTHashField(h, commitment)
 	writeDXTHashField(h, ciphertext)
+	writeDXTHashField(h, compPublic)
+	writeDXTHashField(h, blinding.C0)
+	writeDXTHashField(h, blinding.C1)
 	writeDXTHashField(h, t)
 	writeDXTHashField(h, eu)
+	writeDXTHashField(h, et0)
+	writeDXTHashField(h, et1)
 	out := h.Sum(nil)
 	e := new(big.Int).SetBytes(out)
 	e.Mod(e, order)

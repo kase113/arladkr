@@ -115,7 +115,7 @@ func main() {
 		fNew                     = flag.Int("f-new", -1, "new-committee Byzantine threshold (-1 = use --f)")
 		kappa                    = flag.Int("kappa", 0, "aggregate dealer count (0 = f_old+1; other values are rejected)")
 		runs                     = flag.Int("runs", 3, "number of benchmark runs")
-		epochs                   = flag.Int("epochs", 1, "epochs per run (state-chained)")
+		epochs                   = flag.Int("epochs", 1, "sequential domain-separated epochs per benchmark run")
 		transport                = flag.String("transport", "tcp-distributed", "agreement transport: tcp-distributed|tcp-loopback")
 		bindHost                 = flag.String("bind-host", "0.0.0.0", "tcp bind host")
 		basePort                 = flag.Int("base-port", 0, "deterministic base port for node listeners when >0")
@@ -135,6 +135,7 @@ func main() {
 		cvPublicKeyDir           = flag.String("cv-public-key-dir", os.Getenv("RLADKR_CV_PUBLIC_KEY_DIR"), "CV public receiver registry directory")
 		cvLocalSecretDir         = flag.String("cv-local-secret-dir", os.Getenv("RLADKR_CV_LOCAL_SECRET_DIR"), "CV local receiver secret directory")
 		cvLocalReceiverRaw       = flag.String("cv-local-receiver-ids", os.Getenv("RLADKR_LOCAL_RECEIVER_IDS"), "comma-separated local new-committee receiver IDs")
+		cvStateChainDir          = flag.String("cv-state-chain-dir", os.Getenv("RLADKR_STATE_CHAIN_DIR"), "private directory for verified CV epoch output state")
 		cvKeygenOnly             = flag.Bool("cv-keygen-only", false, "generate CV receiver and old-lock keys and exit")
 	)
 	flag.Parse()
@@ -222,6 +223,15 @@ func main() {
 		return
 	}
 	requiredCompleted := requiredCompletedNodes(*n, oldFaults, localNodeIDs)
+	epochBarrierDir := strings.TrimSpace(os.Getenv("RLADKR_EPOCH_BARRIER_DIR"))
+	if (*runs)*(*epochs) > 1 && len(localNodeIDs) < *n && epochBarrierDir == "" {
+		fmt.Fprintln(os.Stderr, "multi-epoch distributed benchmark requires RLADKR_EPOCH_BARRIER_DIR")
+		os.Exit(1)
+	}
+	if (*runs)*(*epochs) > 1 && strings.TrimSpace(*cvStateChainDir) == "" {
+		fmt.Fprintln(os.Stderr, "multi-epoch benchmark requires --cv-state-chain-dir or RLADKR_STATE_CHAIN_DIR")
+		os.Exit(1)
+	}
 	if *prepareOnly {
 		cfg := core.NormalizeConfig(core.Config{
 			SID:                         "rladkr-go-bench",
@@ -267,9 +277,10 @@ func main() {
 		}
 		runSuccess := true
 		for epoch := 1; epoch <= *epochs; epoch++ {
+			globalEpoch := i*(*epochs) + epoch
 			cfg := core.NormalizeConfig(core.Config{
 				SID:                         "rladkr-go-bench",
-				Epoch:                       epoch,
+				Epoch:                       globalEpoch,
 				OldCommittee:                old,
 				NewCommittee:                newC,
 				FOld:                        oldFaults,
@@ -292,6 +303,17 @@ func main() {
 				CVLocalSecretDir:            *cvLocalSecretDir,
 				CVLocalReceiverIDs:          localReceiverIDs,
 			})
+			if globalEpoch > 1 {
+				previous, loadErr := core.LoadCVEpochState(
+					*cvStateChainDir, cfg.SID, globalEpoch-1, localReceiverIDs[0],
+				)
+				if loadErr != nil {
+					fmt.Fprintf(os.Stderr, "EPOCH_STATE_LOAD_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, loadErr)
+					runSuccess = false
+					break
+				}
+				cfg.PreviousEpochStateDigest = append([]byte(nil), previous.Digest...)
+			}
 
 			totalStart := time.Now()
 			attemptedEpochs++
@@ -304,18 +326,18 @@ func main() {
 				if prepErr != nil {
 					totalAttemptLatencyMs += float64(time.Since(totalStart).Microseconds()) / 1000.0
 					cancel()
-					fmt.Fprintf(os.Stderr, "EPOCH_SETUP_ERROR run=%d epoch=%d err=%v\n", i+1, epoch, prepErr)
+					fmt.Fprintf(os.Stderr, "EPOCH_SETUP_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, prepErr)
 					runSuccess = false
 					break
 				}
 				cfg = preparedCfg
 			}
-			traceBenchMain(localNodeIDs, "before_runepoch", fmt.Sprintf("run=%d epoch=%d", i+1, epoch))
+			traceBenchMain(localNodeIDs, "before_runepoch", fmt.Sprintf("run=%d epoch=%d", i+1, globalEpoch))
 			res, err := core.RunEpoch(ctx, cfg)
 			totalAttemptLatencyMs += float64(time.Since(totalStart).Microseconds()) / 1000.0
 			cancel()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "EPOCH_RUN_ERROR run=%d epoch=%d err=%v\n", i+1, epoch, err)
+				fmt.Fprintf(os.Stderr, "EPOCH_RUN_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, err)
 				runSuccess = false
 				break
 			}
@@ -329,15 +351,42 @@ func main() {
 					os.Stderr,
 					"EPOCH_RUN_INCOMPLETE run=%d epoch=%d completed=%d required=%d\n",
 					i+1,
-					epoch,
+					globalEpoch,
 					int(completed),
 					requiredCompleted,
 				)
 				runSuccess = false
 				break
 			}
+			epochLatencyMs := float64(time.Since(totalStart).Microseconds()) / 1000.0
+			resultDigest, digestErr := arlResultDigest(cfg, res)
+			if (*runs)*(*epochs) > 1 {
+				state, stateErr := core.PersistCVEpochState(*cvStateChainDir, cfg, res)
+				if stateErr != nil {
+					fmt.Fprintf(os.Stderr, "EPOCH_STATE_PERSIST_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, stateErr)
+					runSuccess = false
+					break
+				}
+				resultDigest = hex.EncodeToString(state.Digest)
+			}
+			if digestErr != nil {
+				fmt.Fprintf(os.Stderr, "EPOCH_RESULT_DIGEST_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, digestErr)
+				runSuccess = false
+				break
+			}
+			barrierCtx, barrierCancel := context.WithTimeout(context.Background(), runTimeoutValue)
+			barrierErr := waitForBenchmarkEpoch(
+				barrierCtx, epochBarrierDir, cfg.SID, i+1, globalEpoch,
+				old, localNodeIDs, resultDigest,
+			)
+			barrierCancel()
+			if barrierErr != nil {
+				fmt.Fprintf(os.Stderr, "EPOCH_BARRIER_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, barrierErr)
+				runSuccess = false
+				break
+			}
 			stats = append(stats, runStat{
-				latencyMs:                  float64(time.Since(totalStart).Microseconds()) / 1000.0,
+				latencyMs:                  epochLatencyMs,
 				setupMs:                    setupMs + float64(res.SetupLatency.Microseconds())/1000.0,
 				completedNodes:             completed,
 				decidedSetMean:             float64(len(res.LockedSet)),
@@ -377,7 +426,7 @@ func main() {
 				phaseRecvBytes:             phaseBytesFloat(res.PhaseRecvBytes),
 				totalSentBytes:             float64(res.TotalSentBytes),
 				totalRecvBytes:             float64(res.TotalRecvBytes),
-				consensusHash:              consensusHash(res.NewPublicKey),
+				consensusHash:              resultDigest,
 				cvComponentCount:           float64(res.CVComponentCount),
 				cvARCHolderCount:           float64(res.CVARCHolderCount),
 				cvRecoveredShardCount:      float64(res.CVRecoveredShardCount),
@@ -402,7 +451,7 @@ func main() {
 				cvRecoverShardMs:           float64(res.CVRecoverShardLatency.Microseconds()) / 1000.0,
 				cvReceiptMs:                float64(res.CVReceiptLatency.Microseconds()) / 1000.0,
 			})
-			traceBenchMain(localNodeIDs, "after_append_stats", fmt.Sprintf("run=%d epoch=%d", i+1, epoch))
+			traceBenchMain(localNodeIDs, "after_append_stats", fmt.Sprintf("run=%d epoch=%d", i+1, globalEpoch))
 		}
 		if runSuccess {
 			successRuns++
@@ -833,23 +882,16 @@ func summarizeConsensusHash(stats []runStat) string {
 	if len(stats) == 0 {
 		return "none"
 	}
-	first := ""
+	h := sha256.New()
+	_, _ = h.Write([]byte("ARL_ADKR_BENCH_RESULT_SEQUENCE_V1"))
 	for _, s := range stats {
 		if s.consensusHash == "" || s.consensusHash == "none" {
-			continue
+			return "none"
 		}
-		if first == "" {
-			first = s.consensusHash
-			continue
-		}
-		if s.consensusHash != first {
-			return "mixed"
-		}
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(s.consensusHash))
 	}
-	if first == "" {
-		return "none"
-	}
-	return first
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func phaseBytesFloat(src map[string]uint64) map[string]float64 {

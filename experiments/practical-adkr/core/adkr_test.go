@@ -1,13 +1,16 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,6 +145,12 @@ func TestPracticalADKR(t *testing.T) {
 		if !ok || len(share) == 0 {
 			t.Fatalf("missing share for new-committee node %d", rid)
 		}
+		if !bytes.Equal(commitScalar(elliptic.P256(), new(big.Int).SetBytes(share)), result.NewPublicShares[rid]) {
+			t.Fatalf("private/public share mismatch for new-committee node %d", rid)
+		}
+	}
+	if len(result.NewThresholdPK) == 0 || len(result.NewPublicShares) != len(cfg.NewCommittee) {
+		t.Fatal("Algorithm 3 did not output the threshold public key and complete public-share vector")
 	}
 
 	t.Logf("Practical ADKR completed:")
@@ -264,6 +273,13 @@ func setupDXTBackend(t *testing.T, cfg Config) *DXTBackend {
 	if err != nil {
 		t.Fatal(err)
 	}
+	compKeys, err := generatePracticalCompKeys(cfg.NewCommittee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dxt.setCompPublicKeys(compKeys.public); err != nil {
+		t.Fatal(err)
+	}
 	return dxt
 }
 
@@ -285,6 +301,12 @@ func TestAPDBCertificateThreshold(t *testing.T) {
 	if got := apdbCertificateThreshold(85, 256); got != 171 {
 		t.Fatalf("threshold f=85,n=256 = %d, want 171", got)
 	}
+	if got := apdbCertificateThreshold(2, 8); got != 6 {
+		t.Fatalf("receipt threshold f=2,n=8 = %d, want 6", got)
+	}
+	if got := apdbFinishedSetThreshold(2, 8); got != 5 {
+		t.Fatalf("finished-set threshold f=2,n=8 = %d, want 5", got)
+	}
 }
 
 func TestVerifyAPDBCertificateRejectsUndersizedQuorum(t *testing.T) {
@@ -299,9 +321,10 @@ func TestVerifyAPDBCertificateRejectsUndersizedQuorum(t *testing.T) {
 		nodePriv[i] = priv
 	}
 	root := sha256.Sum256([]byte("root"))
+	data := []byte("stored APDB payload")
 	receipts := make([]APDBReceipt, 0, 2)
 	for i := 0; i < 2; i++ {
-		chunkHash := hashChunk(root[:], 7, i)
+		chunkHash := hashChunk(root[:], 7, i, data)
 		msg := hashReceiptMsg(7, i, root[:], chunkHash)
 		receipts = append(receipts, APDBReceipt{
 			NodeID:    i,
@@ -313,6 +336,138 @@ func TestVerifyAPDBCertificateRejectsUndersizedQuorum(t *testing.T) {
 	cert := APDBCertificate{Sender: 7, Root: root[:], Receipts: receipts}
 	if verifyAPDBCertificate(cert, nodePub) {
 		t.Fatal("expected undersized certificate to be rejected")
+	}
+}
+
+func TestAPDBReceiptBindsTranscriptRootAndStoredData(t *testing.T) {
+	t.Setenv("PRACTICAL_ARTIFACT_CACHE_DIR", t.TempDir())
+	t.Setenv("PRACTICAL_RUN_ID", "apdb-binding-test")
+	cfg := Config{SID: "apdb-binding", NewCommittee: []int{10, 11, 12, 13}}
+	old := []int{0, 1, 2, 3}
+	tr := DXTTranscript{
+		Dealer:      7,
+		Commitments: map[int][]byte{10: []byte("commitment")},
+		Ciphertexts: map[int][]byte{},
+		Proofs:      map[int][]byte{},
+		Signatures:  map[int][]byte{},
+	}
+	raw, err := json.Marshal(&tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := sha256.Sum256(raw)
+	req := apdbReceiptRequest{Dealer: tr.Dealer, Root: root[:], TR: tr}
+	canonical, err := canonicalAPDBReceiptData(&req)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		t.Fatalf("valid transcript/root rejected: err=%v", err)
+	}
+
+	badRootReq := req
+	badRootReq.Root = append([]byte(nil), req.Root...)
+	badRootReq.Root[0] ^= 1
+	if _, err := canonicalAPDBReceiptData(&badRootReq); err == nil {
+		t.Fatal("accepted APDB request whose root does not bind TR")
+	}
+	badDealerReq := req
+	badDealerReq.Dealer++
+	if _, err := canonicalAPDBReceiptData(&badDealerReq); err == nil {
+		t.Fatal("accepted APDB request whose dealer does not match TR")
+	}
+
+	if err := persistAPDBTranscript(cfg, old, 1, tr.Dealer, root[:], raw); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(apdbTranscriptStorePath(cfg, old, 1, tr.Dealer, root[:]))
+	if err != nil || !bytes.Equal(stored, raw) {
+		t.Fatalf("write-before-sign store mismatch: err=%v", err)
+	}
+	mutated := append([]byte(nil), raw...)
+	mutated = append(mutated, 'x')
+	if err := persistAPDBTranscript(cfg, old, 1, tr.Dealer, root[:], mutated); err == nil {
+		t.Fatal("stored APDB bytes under an unrelated root")
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkHash := hashChunk(root[:], tr.Dealer, 1, raw)
+	receipt := APDBReceipt{
+		NodeID:    1,
+		Sender:    tr.Dealer,
+		ChunkHash: chunkHash,
+		Signature: ed25519.Sign(priv, hashReceiptMsg(tr.Dealer, 1, root[:], chunkHash)),
+	}
+	if !verifyAPDBReceiptForData(receipt, tr.Dealer, root[:], raw, map[int]ed25519.PublicKey{1: pub}) {
+		t.Fatal("valid data-bound APDB receipt rejected")
+	}
+	if verifyAPDBReceiptForData(receipt, tr.Dealer, root[:], mutated, map[int]ed25519.PublicKey{1: pub}) {
+		t.Fatal("APDB receipt accepted mutated stored data")
+	}
+}
+
+func TestMVBAExternalValidityRequiresCanonicalAPDBLocks(t *testing.T) {
+	old := []int{0, 1, 2, 3}
+	nodePub := make(map[int]ed25519.PublicKey, len(old))
+	nodePriv := make(map[int]ed25519.PrivateKey, len(old))
+	for _, nodeID := range old {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodePub[nodeID] = pub
+		nodePriv[nodeID] = priv
+	}
+
+	payload := mvbaSetPayload{Proposer: 0, Set: []int{0, 1, 2}}
+	for _, dealer := range payload.Set {
+		data := []byte(fmt.Sprintf("transcript-%d", dealer))
+		root := sha256.Sum256(data)
+		cert := APDBCertificate{Sender: dealer, Root: append([]byte(nil), root[:]...)}
+		for _, nodeID := range old[:3] {
+			chunkHash := hashChunk(root[:], dealer, nodeID, data)
+			cert.Receipts = append(cert.Receipts, APDBReceipt{
+				NodeID:    nodeID,
+				Sender:    dealer,
+				ChunkHash: chunkHash,
+				Signature: ed25519.Sign(nodePriv[nodeID], hashReceiptMsg(dealer, nodeID, root[:], chunkHash)),
+			})
+		}
+		payload.Certificates = append(payload.Certificates, cert)
+	}
+	raw, err := json.Marshal(&payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateMVBASetPayload(raw, 0, old, 3, nodePub); err != nil {
+		t.Fatalf("valid APDB-locked MVBA payload rejected: %v", err)
+	}
+	if _, err := validateMVBASetPayload(raw, 1, old, 3, nodePub); err == nil {
+		t.Fatal("accepted MVBA payload under a different proposer")
+	}
+
+	missing := payload
+	missing.Certificates = append([]APDBCertificate(nil), payload.Certificates[:2]...)
+	missingRaw, _ := json.Marshal(&missing)
+	if _, err := validateMVBASetPayload(missingRaw, 0, old, 3, nodePub); err == nil {
+		t.Fatal("accepted MVBA payload without one dealer lock")
+	}
+
+	duplicate := payload
+	duplicate.Set = []int{0, 1, 1}
+	duplicateRaw, _ := json.Marshal(&duplicate)
+	if _, err := validateMVBASetPayload(duplicateRaw, 0, old, 3, nodePub); err == nil {
+		t.Fatal("accepted non-canonical duplicate dealer set")
+	}
+
+	tampered := payload
+	tampered.Certificates = append([]APDBCertificate(nil), payload.Certificates...)
+	tampered.Certificates[0].Receipts = append([]APDBReceipt(nil), payload.Certificates[0].Receipts...)
+	tampered.Certificates[0].Receipts[0].Signature = append([]byte(nil), payload.Certificates[0].Receipts[0].Signature...)
+	tampered.Certificates[0].Receipts[0].Signature[0] ^= 1
+	tamperedRaw, _ := json.Marshal(&tampered)
+	if _, err := validateMVBASetPayload(tamperedRaw, 0, old, 3, nodePub); err == nil {
+		t.Fatal("accepted MVBA payload with forged APDB receipt")
 	}
 }
 

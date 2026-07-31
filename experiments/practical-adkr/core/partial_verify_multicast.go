@@ -247,6 +247,9 @@ func runPartialVerificationMulticast(
 		raw  []byte
 	}, len(localIDs))
 	for _, verifier := range localIDs {
+		if len(nodePriv[verifier]) != ed25519.PrivateKeySize {
+			return nil, nil, fmt.Errorf("partial verification local signer %d key unavailable", verifier)
+		}
 		prepared[verifier] = make(map[int]struct {
 			wire partialVerifyResultWire
 			raw  []byte

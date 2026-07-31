@@ -70,13 +70,14 @@ type cvDecryptedShare struct {
 }
 
 type cvLeafContext struct {
-	sessionID          []byte
-	epoch              uint64
-	sharingDegree      int
-	profile            cvChunkProfile
-	receiverPublicKeys []bls12381.G1Affine
-	dealerSetPolicy    []byte
-	proofProfile       string
+	sessionID           []byte
+	epoch               uint64
+	previousStateDigest []byte
+	sharingDegree       int
+	profile             cvChunkProfile
+	receiverPublicKeys  []bls12381.G1Affine
+	dealerSetPolicy     []byte
+	proofProfile        string
 }
 
 type cvLeafReceiver struct {
@@ -540,6 +541,9 @@ func cvValidateLeafContext(context *cvLeafContext) error {
 	if _, _, _, err := cvProfile(context.profile); err != nil {
 		return err
 	}
+	if len(context.previousStateDigest) != 0 && len(context.previousStateDigest) != 32 {
+		return fmt.Errorf("invalid CV-sAPVSS previous-state digest")
+	}
 	if len(context.receiverPublicKeys) == 0 || context.sharingDegree < 0 ||
 		context.sharingDegree >= len(context.receiverPublicKeys) {
 		return fmt.Errorf("invalid CV-sAPVSS Leaf sharing degree")
@@ -635,6 +639,13 @@ func cvLeafContextCanonicalBytes(context *cvLeafContext) ([]byte, error) {
 		return nil, err
 	}
 	cvWriteUint64(&wire, context.epoch)
+	previousStateDigest := context.previousStateDigest
+	if len(previousStateDigest) == 0 {
+		previousStateDigest = make([]byte, 32)
+	}
+	if err := cvWriteBytes(&wire, previousStateDigest); err != nil {
+		return nil, err
+	}
 	for _, value := range []int{
 		len(context.receiverPublicKeys),
 		context.sharingDegree,
@@ -678,6 +689,7 @@ func cvLeafContextDigest(context *cvLeafContext) []byte {
 
 func cvCloneLeafContext(context cvLeafContext) cvLeafContext {
 	context.sessionID = append([]byte(nil), context.sessionID...)
+	context.previousStateDigest = append([]byte(nil), context.previousStateDigest...)
 	context.receiverPublicKeys = append([]bls12381.G1Affine(nil), context.receiverPublicKeys...)
 	context.dealerSetPolicy = append([]byte(nil), context.dealerSetPolicy...)
 	return context

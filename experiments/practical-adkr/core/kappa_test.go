@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"math"
 	"testing"
 )
@@ -121,7 +122,8 @@ func TestResolvePracticalKappaMatchesTenYear128BitTable(t *testing.T) {
 }
 
 func TestCoinAndConfigRejectKappaClamping(t *testing.T) {
-	if _, err := coinSelectThreshold("sid", []int{0, 1, 2, 3, 4}, 6, 2); err == nil {
+	digest := sha256.Sum256([]byte("coin input"))
+	if _, err := selectByThresholdCoin([]int{0, 1, 2, 3, 4}, 6, []byte("signature"), digest[:]); err == nil {
 		t.Fatal("coin selection silently clamped kappa above the decided set")
 	}
 	cfg := Config{

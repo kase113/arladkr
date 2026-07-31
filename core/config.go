@@ -12,6 +12,9 @@ import (
 type Config struct {
 	SID   string
 	Epoch int
+	// PreviousEpochStateDigest hash-links this epoch to the verified public
+	// output state of the preceding epoch. Empty denotes the genesis state.
+	PreviousEpochStateDigest []byte
 
 	OldCommittee []int
 	NewCommittee []int
@@ -77,6 +80,9 @@ type Config struct {
 
 func validateCVEpochConfig(cfg Config) error {
 	c := NormalizeConfig(cfg)
+	if len(c.PreviousEpochStateDigest) != 0 && len(c.PreviousEpochStateDigest) != 32 {
+		return errors.New("CV epoch previous-state digest must be empty or 32 bytes")
+	}
 	if len(sortedUnique(c.LocalNodeIDs)) != 1 {
 		return errors.New("CV epoch requires exactly one local old node")
 	}

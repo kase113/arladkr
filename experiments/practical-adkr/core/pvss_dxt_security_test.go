@@ -127,6 +127,15 @@ func TestEncryptedDLogProofBindsPedersenRandomness(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitment := commitSharePair(curve, share, shareRandomness)
+	compKey, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compPublic := elliptic.MarshalCompressed(curve, compKey.X, compKey.Y)
+	blindingCiphertext, blindingRandomness, err := encryptDXTBlinding(curve, compPublic, shareRandomness)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proof, err := buildEncryptedDLogProof(
 		curve,
 		order,
@@ -136,11 +145,14 @@ func TestEncryptedDLogProofBindsPedersenRandomness(t *testing.T) {
 		rEnc,
 		commitment,
 		ciphertext.Bytes(),
+		compPublic,
+		blindingCiphertext,
+		blindingRandomness,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !verifyEncryptedDLogProof(curve, order, sk.PublicKey, commitment, ciphertext.Bytes(), proof) {
+	if !verifyEncryptedDLogProof(curve, order, sk.PublicKey, commitment, ciphertext.Bytes(), compPublic, blindingCiphertext, proof) {
 		t.Fatal("valid Pedersen/Paillier link proof was rejected")
 	}
 
@@ -148,8 +160,17 @@ func TestEncryptedDLogProofBindsPedersenRandomness(t *testing.T) {
 	tamperedZR := new(big.Int).SetBytes(proof.ZR)
 	tamperedZR.Add(tamperedZR, big.NewInt(1)).Mod(tamperedZR, order)
 	tampered.ZR = tamperedZR.Bytes()
-	if verifyEncryptedDLogProof(curve, order, sk.PublicKey, commitment, ciphertext.Bytes(), &tampered) {
+	if verifyEncryptedDLogProof(curve, order, sk.PublicKey, commitment, ciphertext.Bytes(), compPublic, blindingCiphertext, &tampered) {
 		t.Fatal("proof with tampered Pedersen-randomness response was accepted")
+	}
+
+	tamperedBlinding := blindingCiphertext
+	tamperedBlinding.C1, err = practicalPointAdd(curve, tamperedBlinding.C1, practicalBasePoint(curve, big.NewInt(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifyEncryptedDLogProof(curve, order, sk.PublicKey, commitment, ciphertext.Bytes(), compPublic, tamperedBlinding, proof) {
+		t.Fatal("proof accepted a mutated Algorithm 3 blinding ciphertext")
 	}
 }
 
@@ -175,6 +196,57 @@ func TestCommitmentDegreeCheckRejectsInconsistentEvaluation(t *testing.T) {
 	commitments[committee[len(committee)-1]] = commitSharePair(curve, big.NewInt(23), big.NewInt(29))
 	if verifyCommitmentDegree(curve, commitments, committee, degree) {
 		t.Fatal("inconsistent commitment evaluation passed degree check")
+	}
+}
+
+func TestDXTBackendUsesHighThresholdDegree(t *testing.T) {
+	committee := []int{10, 11, 12, 13, 14, 15, 16}
+	b, err := NewDXTBackend(
+		[]int{0, 1, 2, 3, 4, 5, 6}, committee, 2,
+		nil, nil, nil, nil, nil, nil, "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.f != 2 || b.sharingDegree != 4 {
+		t.Fatalf("threshold separation failed: f=%d degree=%d", b.f, b.sharingDegree)
+	}
+	bLarger, err := NewDXTBackend(
+		[]int{0, 1, 2, 3, 4, 5, 6, 7}, []int{10, 11, 12, 13, 14, 15, 16, 17}, 2,
+		nil, nil, nil, nil, nil, nil, "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bLarger.sharingDegree != 5 {
+		t.Fatalf("non-minimal committee degree=%d, want n-f-1=5", bLarger.sharingDegree)
+	}
+
+	curve := elliptic.P256()
+	order := curve.Params().N
+	coeffS := []*big.Int{big.NewInt(5), big.NewInt(7), big.NewInt(11), big.NewInt(13), big.NewInt(17)}
+	coeffR := []*big.Int{big.NewInt(19), big.NewInt(23), big.NewInt(29), big.NewInt(31), big.NewInt(37)}
+	commitments := make(map[int][]byte, len(committee))
+	for _, rid := range committee {
+		x := big.NewInt(int64(rid + 1))
+		commitments[rid] = commitSharePair(
+			curve,
+			evalPoly(coeffS, x, order),
+			evalPoly(coeffR, x, order),
+		)
+	}
+	if !verifyCommitmentDegree(curve, commitments, committee, b.sharingDegree) {
+		t.Fatal("valid degree-2f commitment evaluations were rejected")
+	}
+	if verifyCommitmentDegree(curve, commitments, committee, b.f) {
+		t.Fatal("degree-2f commitments unexpectedly passed the old degree-f check")
+	}
+
+	if _, err := NewDXTBackend(
+		[]int{0, 1, 2, 3}, []int{10, 11, 12, 13}, 2,
+		nil, nil, nil, nil, nil, nil, "", "",
+	); err == nil {
+		t.Fatal("accepted a committee too small for degree-2f sharing")
 	}
 }
 

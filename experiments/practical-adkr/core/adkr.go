@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -69,19 +70,23 @@ type recastStoreWire struct {
 }
 
 type recastWire struct {
-	Kind      string                          `json:"kind"`
-	Dealer    int                             `json:"dealer"`
-	Holder    int                             `json:"holder"`
-	Recipient int                             `json:"recipient,omitempty"`
-	Root      []byte                          `json:"root,omitempty"`
-	TR        *DXTTranscript                  `json:"tr,omitempty"`
-	Dealers   []int                           `json:"dealers,omitempty"`
-	Roots     map[int][]byte                  `json:"roots,omitempty"`
-	TRs       map[int]*DXTTranscript          `json:"trs,omitempty"`
-	Shards    map[int]RecoverShard            `json:"shards,omitempty"`
-	Attests   map[int]RecoverAttestation      `json:"attests,omitempty"`
-	Stores    map[int]RecoverStoreAttestation `json:"stores,omitempty"`
-	Certs     map[int]APDBCertificate         `json:"certs,omitempty"`
+	Kind             string                          `json:"kind"`
+	SID              string                          `json:"sid,omitempty"`
+	Epoch            uint64                          `json:"epoch,omitempty"`
+	Dealer           int                             `json:"dealer"`
+	Holder           int                             `json:"holder"`
+	Recipient        int                             `json:"recipient,omitempty"`
+	Root             []byte                          `json:"root,omitempty"`
+	TR               *DXTTranscript                  `json:"tr,omitempty"`
+	Dealers          []int                           `json:"dealers,omitempty"`
+	Roots            map[int][]byte                  `json:"roots,omitempty"`
+	TRs              map[int]*DXTTranscript          `json:"trs,omitempty"`
+	Shards           map[int]RecoverShard            `json:"shards,omitempty"`
+	Attests          map[int]RecoverAttestation      `json:"attests,omitempty"`
+	Stores           map[int]RecoverStoreAttestation `json:"stores,omitempty"`
+	Certs            map[int]APDBCertificate         `json:"certs,omitempty"`
+	CompletionDigest []byte                          `json:"completion_digest,omitempty"`
+	Signature        []byte                          `json:"signature,omitempty"`
 }
 
 type cacheLockMeta struct {
@@ -297,30 +302,14 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	setupStart := time.Now()
 	setCommPhase("setup")
 	tracef("phase=setup_begin sid=%s n_old=%d n_new=%d f=%d kappa=%d", cfg.SID, len(old), len(newC), cfg.F, kappa)
-	seed := benchmarkSeed()
-	// ECDSA keys for PVSS commitment signing (dealer DealerSig + recipient ack sig)
-	dealerECDSAPub := make(map[int]*ecdsa.PublicKey, len(old))
-	dealerECDSAPriv := make(map[int]*ecdsa.PrivateKey, len(old))
-	for _, id := range old {
-		sk, err := setupECDSAKey(seed, "practical-adkr:dealer-ecdsa", id)
-		if err != nil {
-			return nil, err
-		}
-		dealerECDSAPub[id] = &sk.PublicKey
-		dealerECDSAPriv[id] = sk
+	signingKeys, err := loadPracticalSigningKeys(cfg, old, newC)
+	if err != nil {
+		return failWithPartial(err, "setup")
 	}
-
-	// Ed25519 keys for APDB dispersal (separate protocol component)
-	dealerEDPub := make(map[int]ed25519.PublicKey, len(old))
-	dealerEDPriv := make(map[int]ed25519.PrivateKey, len(old))
-	for _, id := range old {
-		pk, sk, err := setupEd25519Key(seed, "practical-adkr:dealer-ed25519", id)
-		if err != nil {
-			return nil, err
-		}
-		dealerEDPub[id] = pk
-		dealerEDPriv[id] = sk
-	}
+	dealerECDSAPub := signingKeys.dealerECDSAPublic
+	dealerECDSAPriv := signingKeys.dealerECDSAPrivate
+	dealerEDPub := signingKeys.oldEdPublic
+	dealerEDPriv := signingKeys.oldEdPrivate
 
 	bits := cfg.PaillierBits
 	if bits <= 0 {
@@ -330,25 +319,41 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return failWithPartial(err, "setup")
 	}
-
-	// ECDSA signing keys for new committee (for PVSS share acks)
-	recipSignPub := make(map[int]*ecdsa.PublicKey, len(newC))
-	recipSignPriv := make(map[int]*ecdsa.PrivateKey, len(newC))
-	for _, id := range newC {
-		sk, err := setupECDSAKey(seed, "practical-adkr:recipient-ecdsa", id)
-		if err != nil {
-			return nil, err
-		}
-		recipSignPub[id] = &sk.PublicKey
-		recipSignPriv[id] = sk
+	compKeys, err := loadOrCreatePracticalCompKeys(cfg, newC)
+	if err != nil {
+		return failWithPartial(err, "setup")
 	}
+	compService, err := startCompKeyService(ctx, cfg, newC, compKeys.private)
+	if err != nil {
+		return failWithPartial(err, "setup")
+	}
+	defer compService.close()
+
+	recipSignPub := signingKeys.recipientPublic
+	recipSignPriv := signingKeys.recipientPrivate
 
 	dxt, err := NewDXTBackend(old, newC, cfg.F, dealerECDSAPriv, dealerECDSAPub,
 		recipPub, recipPriv, recipSignPriv, recipSignPub,
-		cfg.ProtocolNodeAddrs, cfg.ProtocolLocalNodeIDs,
+		dxtNodeAddrs(cfg), cfg.ProtocolLocalNodeIDs,
 	)
 	if err != nil {
 		return failWithPartial(err, "setup")
+	}
+	if err := dxt.setCompPublicKeys(compKeys.public); err != nil {
+		return failWithPartial(err, "setup")
+	}
+	defer dxt.closeNetworkService()
+	coinKeys, err := loadOrCreateThresholdCoinKeys(cfg, old)
+	if err != nil {
+		return failWithPartial(err, "setup")
+	}
+	var coinService *thresholdCoinService
+	if cfg.StrictNetwork || len(coinKeys.privateShare) != len(old) {
+		coinService, err = startThresholdCoinService(ctx, cfg, old, coinKeys.privateShare)
+		if err != nil {
+			return failWithPartial(err, "setup")
+		}
+		defer coinService.close()
 	}
 	dxt.strictNetwork = cfg.StrictNetwork
 	markPhase("setup", setupStart)
@@ -376,11 +381,19 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	apdbStart := time.Now()
 	setCommPhase("apdb_dispersal")
 	tracef("phase=apdb_begin")
+	var apdbService *networkAPDBService
+	if cfg.StrictNetwork {
+		apdbService, err = startNetworkAPDBService(ctx, cfg, old, transcripts, dealerEDPriv, dealerEDPub, dxt)
+		if err != nil {
+			return failWithPartial(err, "apdb_dispersal")
+		}
+		defer apdbService.close()
+	}
 	// Success-first benchmark path:
 	// prefer local APDB aggregation for liveness; if it still yields no valid set,
 	// fall back to deterministic full-dealer validity to keep experiments complete.
 	apdbCtx, apdbCancel := boundedAPDBContext(ctx)
-	apdbResult, err := runAPDBDispersal(apdbCtx, cfg, old, transcripts, dealerEDPriv, dealerEDPub, dxt)
+	apdbResult, err := runAPDBDispersal(apdbCtx, cfg, old, transcripts, dealerEDPriv, dealerEDPub, dxt, apdbService)
 	apdbCancel()
 	localValid := map[int][]int(nil)
 	apdbCerts := make(map[int]APDBCertificate, len(old))
@@ -412,7 +425,10 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 			root := sha256.Sum256(raw)
 			receipts := make([]APDBReceipt, 0, len(old))
 			for _, nodeID := range old {
-				chunkHash := hashChunk(root[:], dealer, nodeID)
+				if err := persistAPDBTranscript(cfg, old, nodeID, dealer, root[:], raw); err != nil {
+					continue
+				}
+				chunkHash := hashChunk(root[:], dealer, nodeID, raw)
 				msg := hashReceiptMsg(dealer, nodeID, root[:], chunkHash)
 				sig := ed25519.Sign(dealerEDPriv[nodeID], msg)
 				receipts = append(receipts, APDBReceipt{
@@ -435,10 +451,7 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 		apdbCerts = fillMissingAPDBCertificates(cfg, old, old, transcripts, dealerEDPriv, apdbCerts)
 	}
 
-	required := 2*cfg.F + 1
-	if required < cfg.F+1 {
-		required = cfg.F + 1
-	}
+	required := apdbFinishedSetThreshold(cfg.F, len(old))
 	proposals := make(map[int][]int, len(old))
 	for _, nodeID := range old {
 		v := stableFirst(localValid[nodeID], len(localValid[nodeID]))
@@ -463,9 +476,15 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	setCommPhase("mvba_agree")
 	tracef("phase=mvba_begin")
 	mvbaCtx, mvbaCancel := boundedMVBAContext(ctx)
-	mvbaSet, mvbaBreakdown, mvbaErr := decideByDumboMVBA(mvbaCtx, cfg, old, proposals)
+	mvbaDecision, mvbaBreakdown, mvbaErr := decideByDumboMVBA(mvbaCtx, cfg, old, proposals, apdbCerts, dealerEDPub, coinKeys)
 	mvbaCancel()
-	decidedSet := mvbaSet
+	var decidedSet []int
+	if mvbaDecision != nil {
+		decidedSet = append([]int(nil), mvbaDecision.Set...)
+		for dealer, certificate := range mvbaDecision.Certificates {
+			apdbCerts[dealer] = certificate
+		}
+	}
 	agreementFallback := false
 	if mvbaErr != nil || len(decidedSet) == 0 {
 		tracef("phase=mvba_fail err=%v decided=%d fallback_disabled=%v", mvbaErr, len(decidedSet), cfg.DisableAgreementFallback)
@@ -488,6 +507,11 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 		phaseTimings["mvba_active_known"] += mvbaBreakdown.Wall - mvbaBreakdown.PeerWait
 	}
 	tracef("phase=mvba_end ms=%.2f decided=%d fallback=%v", float64(time.Since(mvbaStart).Microseconds())/1000.0, len(decidedSet), agreementFallback)
+	// MVBA payloads carry the exact APDB certificates. Once agreement has
+	// completed, no later phase reuses the old-node protocol ports for APDB.
+	if apdbService != nil {
+		apdbService.close()
+	}
 
 	for _, nodeID := range old {
 		if state := perNodeState[nodeID]; state != nil {
@@ -502,7 +526,7 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	recastStart := time.Now()
 	setCommPhase("coin_select")
 	tracef("phase=recast_begin")
-	selectedIDs, err := coinSelectThreshold(cfg.SID, decidedSet, kappa, cfg.F)
+	selectedIDs, coinSignature, err := runThresholdCoin(ctx, cfg, old, decidedSet, kappa, coinKeys, coinService)
 	if err != nil {
 		return failWithPartial(fmt.Errorf("threshold coin selection failed: %w", err), "coin_select")
 	}
@@ -577,6 +601,8 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	markPhase("recover", aggregateStart)
 	phaseTimings["recover_verify"] += recoverTiming.FullVerify
+	phaseTimings["recover_ready"] += recoverTiming.ReadyWait
+	phaseTimings["recover_completion"] += recoverTiming.CompletionWait
 	phaseTimings["recover_store_verify"] += recoverTiming.StoreVerify
 	phaseTimings["recover_shard_verify"] += recoverTiming.ShardVerify
 	phaseTimings["recover_store_seen"] += time.Duration(recoverTiming.StoreSeen)
@@ -590,37 +616,12 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	newShares := make(map[int][]byte, len(newC))
-	for _, rid := range newC {
-		// For responsive recipients: aggregate their plaintext shares
-		shareAgg := new(big.Int)
-		hasPlaintext := true
-		for _, dealer := range verifiedSelected {
-			sp, ok := allShares[dealer][rid]
-			if !ok {
-				hasPlaintext = false
-				break
-			}
-			shareAgg.Add(shareAgg, sp.S)
-		}
-
-		if hasPlaintext {
-			shareAgg.Mod(shareAgg, dxt.order)
-			newShares[rid] = shareAgg.Bytes()
-		} else if len(aggCipher[rid]) > 0 {
-			// For non-responsive: decrypt aggregate ciphertext
-			if recipPriv[rid] == nil {
-				// Strict distributed mode only exposes the private key belonging to
-				// this process.  The receiver that owns rid performs this decrypt.
-				continue
-			}
-			c := new(big.Int).SetBytes(aggCipher[rid])
-			share, dErr := recipPriv[rid].Decrypt(c)
-			if dErr != nil {
-				return failWithPartial(fmt.Errorf("decrypt share for node %d: %w", rid, dErr), "derive")
-			}
-			newShares[rid] = share.Bytes()
-		}
+	newShares, newThresholdPK, newPublicShares, compCompletionCerts, err := runCompKeyDerivationMulticast(
+		ctx, cfg, newC, verifiedSelected, recoveredTranscripts, allShares,
+		recipPriv, compKeys, compService, dxt,
+	)
+	if err != nil {
+		return failWithPartial(fmt.Errorf("Algorithm 3 key derivation: %w", err), "derive")
 	}
 	markPhase("derive", deriveStart)
 	markPhase("aggregate_derive", aggregateStart)
@@ -644,25 +645,30 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	return &Result{
-		DecidedSet:                 decidedSet,
-		SelectedTranscripts:        verifiedSelected,
-		RecoveredTranscripts:       recoveredTranscripts,
-		AgreementMode:              agreementModeName(agreementFallback),
-		AgreementFallback:          agreementFallback,
-		AblationMode:               strings.ToLower(strings.TrimSpace(cfg.AblationMode)),
-		SelectedCount:              len(selectedIDs),
-		VerifiedCount:              len(verifiedSelected),
-		NewShares:                  newShares,
-		AggregateCommitments:       aggCommit,
-		AggregateCiphertexts:       aggCipher,
-		PerNode:                    buildPerNode(),
-		PhaseTimings:               phaseTimings,
-		TotalSentBytes:             totalSentBytes,
-		TotalRecvBytes:             totalRecvBytes,
-		PhaseSentBytes:             phaseSentBytes,
-		PhaseRecvBytes:             phaseRecvBytes,
-		PartialVerifyMode:          partialVerifyMode,
-		PartialVerifyPositiveVotes: partialVerifyPositiveVotes,
+		DecidedSet:                    decidedSet,
+		SelectedTranscripts:           verifiedSelected,
+		RecoveredTranscripts:          recoveredTranscripts,
+		AgreementMode:                 agreementModeName(agreementFallback),
+		AgreementFallback:             agreementFallback,
+		AblationMode:                  strings.ToLower(strings.TrimSpace(cfg.AblationMode)),
+		SelectedCount:                 len(selectedIDs),
+		VerifiedCount:                 len(verifiedSelected),
+		NewShares:                     newShares,
+		CoinSignature:                 append([]byte(nil), coinSignature...),
+		CoinThreshold:                 coinKeys.threshold,
+		AggregateCommitments:          aggCommit,
+		AggregateCiphertexts:          aggCipher,
+		NewThresholdPK:                newThresholdPK,
+		NewPublicShares:               newPublicShares,
+		CompKeyCompletionCertificates: compCompletionCerts,
+		PerNode:                       buildPerNode(),
+		PhaseTimings:                  phaseTimings,
+		TotalSentBytes:                totalSentBytes,
+		TotalRecvBytes:                totalRecvBytes,
+		PhaseSentBytes:                phaseSentBytes,
+		PhaseRecvBytes:                phaseRecvBytes,
+		PartialVerifyMode:             partialVerifyMode,
+		PartialVerifyPositiveVotes:    partialVerifyPositiveVotes,
 	}, nil
 }
 
@@ -781,7 +787,10 @@ func fillMissingAPDBCertificates(
 			if !ok {
 				continue
 			}
-			chunkHash := hashChunk(root[:], dealer, nodeID)
+			if err := persistAPDBTranscript(cfg, old, nodeID, dealer, root[:], raw); err != nil {
+				continue
+			}
+			chunkHash := hashChunk(root[:], dealer, nodeID, raw)
 			msg := hashReceiptMsg(dealer, nodeID, root[:], chunkHash)
 			sig := ed25519.Sign(sk, msg)
 			receipts = append(receipts, APDBReceipt{
@@ -808,70 +817,189 @@ func fillMissingAPDBCertificates(
 	return certs
 }
 
-func waitForRecastReadyBarrier(
+func waitForRecastReadyQuorum(
 	ctx context.Context,
 	cfg Config,
 	old []int,
 	newC []int,
 	localSet map[int]struct{},
 	lnByID map[int]net.Listener,
+	addrMap map[int]string,
 ) error {
-	cacheDir := strings.TrimSpace(os.Getenv("PRACTICAL_ARTIFACT_CACHE_DIR"))
-	if cacheDir == "" || len(old) == 0 || len(newC) == 0 {
-		return nil
+	if len(old) == 0 || len(newC) < len(old) {
+		return fmt.Errorf("recast readiness requires an old/new listener pair per old node: old=%d new=%d", len(old), len(newC))
 	}
-	recoverDir := filepath.Join(cacheDir, "recast-ready", practicalRunID(cfg, old, newC))
-	if err := os.MkdirAll(recoverDir, 0o755); err != nil {
-		return fmt.Errorf("create recast ready dir: %w", err)
-	}
-
-	pairNewByOld := make(map[int]int, len(old))
-	for i, oldID := range old {
-		if i < len(newC) {
-			pairNewByOld[oldID] = newC[i]
-		}
-	}
+	fromID := old[0]
 	for _, oldID := range old {
-		if _, ok := localSet[oldID]; !ok {
-			continue
-		}
-		newID, ok := pairNewByOld[oldID]
-		if !ok {
-			continue
-		}
-		if _, ok := lnByID[oldID]; !ok {
-			return fmt.Errorf("recast ready barrier missing old listener for node %d", oldID)
-		}
-		if _, ok := lnByID[newID]; !ok {
-			return fmt.Errorf("recast ready barrier missing new listener for node %d", newID)
-		}
-		readyPath := filepath.Join(recoverDir, fmt.Sprintf("old-%d.ready", oldID))
-		if err := os.WriteFile(readyPath, []byte("ready\n"), 0o644); err != nil {
-			return fmt.Errorf("write recast ready file: %w", err)
+		if _, ok := localSet[oldID]; ok {
+			fromID = oldID
+			break
 		}
 	}
-
-	expected := len(old) - cfg.F
+	expected := apdbCertificateThreshold(cfg.F, len(old))
 	if expected < 1 {
-		expected = len(old)
+		return fmt.Errorf("invalid recast readiness threshold: old=%d f=%d", len(old), cfg.F)
 	}
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		matches, err := filepath.Glob(filepath.Join(recoverDir, "old-*.ready"))
-		if err == nil && len(matches) >= expected {
+		type pairResult struct {
+			oldID int
+			ready bool
+		}
+		results := make(chan pairResult, len(old))
+		for index, oldID := range old {
+			newID := newC[index]
+			go func(oldID, newID int) {
+				oldReady := recastListenerReady(ctx, cfg, fromID, oldID, localSet, lnByID, addrMap)
+				newReady := recastListenerReady(ctx, cfg, fromID, newID, localSet, lnByID, addrMap)
+				results <- pairResult{oldID: oldID, ready: oldReady && newReady}
+			}(oldID, newID)
+		}
+		ready := 0
+		for range old {
+			if (<-results).ready {
+				ready++
+			}
+		}
+		if ready >= expected {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			have := 0
-			if err == nil {
-				have = len(matches)
-			}
-			return fmt.Errorf("waiting for recast ready barrier: have=%d need=%d old=%d f=%d: %w", have, expected, len(old), cfg.F, ctx.Err())
+			return fmt.Errorf("waiting for recast TCP readiness: have_pairs=%d need=%d old=%d f=%d: %w", ready, expected, len(old), cfg.F, ctx.Err())
 		case <-ticker.C:
 		}
 	}
+}
+
+func recastListenerReady(
+	ctx context.Context,
+	cfg Config,
+	fromID int,
+	target int,
+	localSet map[int]struct{},
+	lnByID map[int]net.Listener,
+	addrMap map[int]string,
+) bool {
+	if _, local := localSet[target]; local {
+		return lnByID[target] != nil
+	}
+	addr := strings.TrimSpace(addrMap[target])
+	if addr == "" {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	conn, err := dialWithOptionalDelay(fromID, target, "tcp", addr, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	wire := recastWire{Kind: "ready", SID: cfg.SID, Epoch: cfg.Epoch, Holder: target}
+	body, err := json.Marshal(wire)
+	if err != nil {
+		return false
+	}
+	if err := json.NewEncoder(conn).Encode(wire); err != nil {
+		return false
+	}
+	recordSentBytes(len(body) + 1)
+	var ack recastWire
+	if err := json.NewDecoder(conn).Decode(&ack); err != nil {
+		return false
+	}
+	if ackBody, err := json.Marshal(ack); err == nil {
+		recordRecvBytes(len(ackBody) + 1)
+	}
+	return ack.Kind == "ready_ack" && ack.SID == cfg.SID && ack.Epoch == cfg.Epoch && ack.Holder == target
+}
+
+func respondRecastReady(conn net.Conn, cfg Config, localID int, wire recastWire) bool {
+	if wire.Kind != "ready" || !validRecastWireContext(cfg, wire) || wire.Holder != localID {
+		return false
+	}
+	ack := recastWire{Kind: "ready_ack", SID: cfg.SID, Epoch: cfg.Epoch, Holder: localID}
+	body, err := json.Marshal(ack)
+	if err != nil {
+		return false
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	if err := json.NewEncoder(conn).Encode(ack); err != nil {
+		return false
+	}
+	recordSentBytes(len(body) + 1)
+	return true
+}
+
+func validRecastWireContext(cfg Config, wire recastWire) bool {
+	return wire.SID == cfg.SID && wire.Epoch == cfg.Epoch
+}
+
+func recastCompletionDigest(
+	cfg Config,
+	receiver int,
+	selectedIDs []int,
+	transcriptRoots map[int][]byte,
+) ([]byte, error) {
+	selected := append([]int(nil), selectedIDs...)
+	sort.Ints(selected)
+	if len(selected) == 0 {
+		return nil, errors.New("empty recast completion dealer set")
+	}
+	h := sha256.New()
+	h.Write([]byte("PRACTICAL-RECAST-RECEIVER-COMPLETION-v1"))
+	var numbers [8]byte
+	binary.BigEndian.PutUint64(numbers[:], uint64(len(cfg.SID)))
+	h.Write(numbers[:])
+	h.Write([]byte(cfg.SID))
+	binary.BigEndian.PutUint64(numbers[:], cfg.Epoch)
+	h.Write(numbers[:])
+	binary.BigEndian.PutUint64(numbers[:], uint64(receiver))
+	h.Write(numbers[:])
+	binary.BigEndian.PutUint64(numbers[:], uint64(len(selected)))
+	h.Write(numbers[:])
+	for index, dealer := range selected {
+		if index > 0 && selected[index-1] == dealer {
+			return nil, errors.New("duplicate dealer in recast completion")
+		}
+		root := transcriptRoots[dealer]
+		if len(root) != sha256.Size {
+			return nil, fmt.Errorf("missing transcript root for dealer %d", dealer)
+		}
+		binary.BigEndian.PutUint64(numbers[:], uint64(dealer))
+		h.Write(numbers[:])
+		h.Write(root)
+	}
+	return h.Sum(nil), nil
+}
+
+func verifyRecastCompletion(
+	cfg Config,
+	wire recastWire,
+	selectedIDs []int,
+	transcriptRoots map[int][]byte,
+	dxt *DXTBackend,
+) bool {
+	if wire.Kind != "completion" || !validRecastWireContext(cfg, wire) {
+		return false
+	}
+	if _, ok := dxt.newIndex[wire.Recipient]; !ok {
+		return false
+	}
+	if _, ok := dxt.oldIndex[wire.Holder]; !ok {
+		return false
+	}
+	expected, err := recastCompletionDigest(cfg, wire.Recipient, selectedIDs, transcriptRoots)
+	if err != nil || !bytes.Equal(expected, wire.CompletionDigest) {
+		return false
+	}
+	public := dxt.recipientSignPub[wire.Recipient]
+	return public != nil && ecdsa.VerifyASN1(public, expected, wire.Signature)
 }
 
 func runRecastRecovery(
@@ -931,6 +1059,7 @@ func runRecastRecovery(
 	fetchBuf := boundedQueueSize(len(selectedIDs)*len(newC), 256, 8192)
 	storeSeenCh := make(chan recastStoreWire, storeBuf)
 	fetchRespCh := make(chan recastWire, fetchBuf)
+	completionCh := make(chan recastWire, boundedQueueSize(len(old)*len(newC), 64, 8192))
 	lnByID := make(map[int]net.Listener, len(newC)+len(old))
 	listenerErrs := make(map[int]error)
 	var lnWG sync.WaitGroup
@@ -1109,7 +1238,17 @@ func runRecastRecovery(
 				if body, mErr := json.Marshal(wire); mErr == nil {
 					recordRecvBytes(len(body))
 				}
+				if !validRecastWireContext(cfg, wire) {
+					return
+				}
 				switch wire.Kind {
+				case "ready":
+					respondRecastReady(conn, cfg, localID, wire)
+				case "completion":
+					select {
+					case completionCh <- wire:
+					case <-stop:
+					}
 				case "store":
 					if _, ok := selectedSet[wire.Dealer]; !ok {
 						return
@@ -1250,7 +1389,7 @@ func runRecastRecovery(
 						shardHash := sha256.Sum256(shard.Data)
 						msg := hashRecoverShard(shard.Root, dealer, localID, wire.Recipient, holderIdx, shard.Data)
 						sk, ok := nodePriv[localID]
-						if !ok {
+						if !ok || len(sk) != ed25519.PrivateKeySize {
 							continue
 						}
 						respAttests[dealer] = RecoverAttestation{
@@ -1268,6 +1407,8 @@ func runRecastRecovery(
 					}
 					resp := recastWire{
 						Kind:      "fetch_resp_batch",
+						SID:       cfg.SID,
+						Epoch:     cfg.Epoch,
 						Holder:    localID,
 						Recipient: wire.Recipient,
 						Dealers:   respDealers,
@@ -1323,9 +1464,12 @@ func runRecastRecovery(
 		sort.Strings(missing)
 		return nil, timing, fmt.Errorf("recast listeners unavailable for local protocol nodes: %s", strings.Join(missing, "; "))
 	}
-	if err := waitForRecastReadyBarrier(ctx, cfg, old, newC, localSet, lnByID); err != nil {
+	readyStart := time.Now()
+	if err := waitForRecastReadyQuorum(ctx, cfg, old, newC, localSet, lnByID, addrMap); err != nil {
+		timing.ReadyWait += time.Since(readyStart)
 		return nil, timing, err
 	}
+	timing.ReadyWait += time.Since(readyStart)
 
 	requiredHolders := len(old) - 2*cfg.F
 	if requiredHolders < cfg.F+1 {
@@ -1518,6 +1662,8 @@ func runRecastRecovery(
 			}
 			req := recastWire{
 				Kind:      "fetch_req_batch",
+				SID:       cfg.SID,
+				Epoch:     cfg.Epoch,
 				Holder:    holder,
 				Recipient: recipient,
 				Dealers:   pending,
@@ -1564,7 +1710,10 @@ func runRecastRecovery(
 			certs := make(map[int]APDBCertificate, len(selectedIDs))
 			stores := make(map[int]RecoverStoreAttestation, len(selectedIDs))
 			trs := make(map[int]*DXTTranscript)
-			sk := nodePriv[holder]
+			sk, ok := nodePriv[holder]
+			if !ok || len(sk) != ed25519.PrivateKeySize {
+				return nil, timing, fmt.Errorf("recast local holder %d signing key unavailable", holder)
+			}
 			directTR := holderPos < directCarrierCount
 			for _, dealer := range selectedIDs {
 				roots[dealer] = append([]byte(nil), transcriptRoots[dealer]...)
@@ -1588,6 +1737,8 @@ func runRecastRecovery(
 			}
 			wire := recastWire{
 				Kind:      "store_batch",
+				SID:       cfg.SID,
+				Epoch:     cfg.Epoch,
 				Holder:    holder,
 				Recipient: recipient,
 				Dealers:   append([]int(nil), selectedIDs...),
@@ -1615,6 +1766,78 @@ func runRecastRecovery(
 			)
 		}
 	}
+	localOldIDs := make([]int, 0, len(old))
+	for _, holder := range old {
+		if _, ok := localSet[holder]; ok {
+			localOldIDs = append(localOldIDs, holder)
+		}
+	}
+	localReceiverIDs := make([]int, 0, len(newC))
+	for _, receiver := range newC {
+		if _, ok := localSet[receiver]; ok {
+			localReceiverIDs = append(localReceiverIDs, receiver)
+		}
+	}
+	if len(localOldIDs) == 0 || len(localReceiverIDs) == 0 {
+		return nil, timing, errors.New("recast completion requires local old and new identities")
+	}
+	completionThreshold := apdbCertificateThreshold(cfg.F, len(newC))
+	completionSeen := make(map[int]map[int]struct{}, len(localOldIDs))
+	for _, holder := range localOldIDs {
+		completionSeen[holder] = make(map[int]struct{}, completionThreshold)
+	}
+	completionStarted := false
+	completionWaitStart := time.Time{}
+	// Completion votes coordinate benchmark-process teardown only. They do not
+	// alter transcript validity, agreement, recovery, or the derived key.
+	completionSatisfied := func() bool {
+		for _, holder := range localOldIDs {
+			if len(completionSeen[holder]) < completionThreshold {
+				return false
+			}
+		}
+		return true
+	}
+	startCompletions := func() error {
+		completionStarted = true
+		completionWaitStart = time.Now()
+		for _, receiver := range localReceiverIDs {
+			digest, err := recastCompletionDigest(cfg, receiver, selectedIDs, transcriptRoots)
+			if err != nil {
+				return err
+			}
+			private := dxt.recipientSignPriv[receiver]
+			if private == nil {
+				return fmt.Errorf("recast completion private key unavailable for receiver %d", receiver)
+			}
+			signature, err := ecdsa.SignASN1(rand.Reader, private, digest)
+			if err != nil {
+				return err
+			}
+			for _, holder := range old {
+				addr := strings.TrimSpace(addrMap[holder])
+				if addr == "" {
+					continue
+				}
+				wire := recastWire{
+					Kind: "completion", SID: cfg.SID, Epoch: cfg.Epoch,
+					Holder: holder, Recipient: receiver,
+					CompletionDigest: append([]byte(nil), digest...), Signature: append([]byte(nil), signature...),
+				}
+				sendRecast(
+					receiver, holder, addr, wire,
+					func() { tracef("phase=recover_completion_send receiver=%d holder=%d", receiver, holder) },
+					func(err error) {
+						tracef("phase=recover_completion_dial_fail receiver=%d holder=%d err=%v", receiver, holder, err)
+					},
+					func(err error) {
+						tracef("phase=recover_completion_write_fail receiver=%d holder=%d err=%v", receiver, holder, err)
+					},
+				)
+			}
+		}
+		return nil
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	retryTickerInterval := recoverFetchStallInterval / 2
@@ -1623,9 +1846,21 @@ func runRecastRecovery(
 	}
 	retryTicker := time.NewTicker(retryTickerInterval)
 	defer retryTicker.Stop()
-	for len(recovered) < len(selectedIDs) {
+	for {
+		if len(recovered) == len(selectedIDs) && !completionStarted {
+			if err := startCompletions(); err != nil {
+				return nil, timing, err
+			}
+		}
+		if completionStarted && completionSatisfied() {
+			timing.CompletionWait += time.Since(completionWaitStart)
+			break
+		}
 		select {
 		case <-ctx.Done():
+			if completionStarted {
+				timing.CompletionWait += time.Since(completionWaitStart)
+			}
 			timing.StoreVerify += recoverStoreVerifyElapsed
 			timing.ShardVerify += recoverShardVerifyElapsed
 			timing.FullVerify += recoverVerifyElapsed
@@ -1635,6 +1870,9 @@ func runRecastRecovery(
 			timing.RecipientSeen += atomic.LoadUint64(&recipientSeenCount)
 			return nil, timing, ctx.Err()
 		case <-deadline.C:
+			if completionStarted {
+				timing.CompletionWait += time.Since(completionWaitStart)
+			}
 			missing := make([]string, 0, len(selectedIDs)-len(recovered))
 			for _, dealer := range selectedIDs {
 				if _, ok := recovered[dealer]; ok {
@@ -1652,7 +1890,24 @@ func runRecastRecovery(
 			timing.FetchReqSent += atomic.LoadUint64(&fetchReqSentCount)
 			timing.FetchRespRecv += atomic.LoadUint64(&fetchRespRecvCount)
 			timing.RecipientSeen += atomic.LoadUint64(&recipientSeenCount)
-			return nil, timing, fmt.Errorf("recast recovery timeout: %s", strings.Join(missing, "; "))
+			completionState := make([]string, 0, len(localOldIDs))
+			for _, holder := range localOldIDs {
+				completionState = append(completionState, fmt.Sprintf("holder=%d completions=%d/%d", holder, len(completionSeen[holder]), completionThreshold))
+			}
+			return nil, timing, fmt.Errorf("recast recovery timeout: %s; %s", strings.Join(missing, "; "), strings.Join(completionState, "; "))
+		case completion := <-completionCh:
+			if _, local := completionSeen[completion.Holder]; !local {
+				continue
+			}
+			if _, duplicate := completionSeen[completion.Holder][completion.Recipient]; duplicate {
+				continue
+			}
+			if !verifyRecastCompletion(cfg, completion, selectedIDs, transcriptRoots, dxt) {
+				tracef("phase=recover_completion_reject receiver=%d holder=%d", completion.Recipient, completion.Holder)
+				continue
+			}
+			completionSeen[completion.Holder][completion.Recipient] = struct{}{}
+			tracef("phase=recover_completion_recv receiver=%d holder=%d count=%d threshold=%d", completion.Recipient, completion.Holder, len(completionSeen[completion.Holder]), completionThreshold)
 		case seen := <-storeSeenCh:
 			storeSeenCount++
 			if _, ok := holderSeen[seen.Dealer]; !ok {
@@ -1673,7 +1928,7 @@ func runRecastRecovery(
 			}
 			if _, ok := storeCertSeen[seen.Dealer][seen.Holder]; !ok {
 				verifyStart := time.Now()
-				if !verifyAPDBCertificate(cert, nodePub) {
+				if !verifyAPDBCertificate(cert, nodePub, cfg.F) {
 					tracef("phase=recover_store_bad_cert dealer=%d holder=%d", seen.Dealer, seen.Holder)
 					continue
 				}
@@ -1890,6 +2145,9 @@ func validateStrictNetworkConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.ProtocolLocalNodeIDs) == "" {
 		return errors.New("strict-network requires protocol local node ids")
+	}
+	if strings.TrimSpace(cfg.CoinNodeAddrs) == "" {
+		return errors.New("strict-network requires dedicated threshold coin node addresses")
 	}
 	if !cfg.DisableAgreementFallback {
 		return errors.New("strict-network requires disabled agreement fallback")
@@ -2140,116 +2398,51 @@ func loadOrComputeDistributedDXTCache(
 	cacheTimings map[string]time.Duration,
 	tracef func(string, ...any),
 ) (map[int]*DXTTranscript, map[int]map[int]SharePair, map[string]time.Duration, error) {
-	dir := dxtDealerCacheDir(cacheDir, cfg, old, newC)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, nil, nil, fmt.Errorf("create distributed dxt cache dir: %w", err)
-	}
 	localDealers := localOldDealersFromProtocolIDs(cfg, old)
 	if len(localDealers) == 0 {
 		return nil, nil, nil, fmt.Errorf("strict-network distributed DXT has no local old dealer")
 	}
-	localReceivers := parseNodeIDSet(cfg.ProtocolLocalNodeIDs)
-
-	receiverTimeout := dxtNetworkTimeout()
-	shareDir := filepath.Join(dir, "receiver-shares")
+	localStateDir := strings.TrimSpace(os.Getenv("PRACTICAL_LOCAL_STATE_DIR"))
+	if localStateDir == "" {
+		localStateDir = filepath.Join(cacheDir, "process-local-"+strings.ReplaceAll(cfg.ProtocolLocalNodeIDs, ",", "-"))
+	}
+	shareDir := filepath.Join(localStateDir, "dxt-receiver-shares")
 	if err := dxt.setShareStoreDir(shareDir); err != nil {
 		return nil, nil, nil, err
 	}
-	stopReceivers, err := dxt.StartRecipientService(receiverTimeout)
+	service, err := startDXTNetworkService(ctx, cfg, old, dxt)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	defer stopReceivers()
+	dxt.networkService = service
 	dxt.externalReceivers = true
 	defer func() { dxt.externalReceivers = false }()
-
-	if err := waitForDXTReceiverReady(ctx, dir, old, localDealers); err != nil {
+	buildStart := time.Now()
+	for _, dealer := range localDealers {
+		tracef("phase=dxt_dealer_begin dealer=%d mode=network", dealer)
+		tr, _, dealErr := dxt.Deal(ctx, dealer, nil)
+		if dealErr != nil {
+			tracef("phase=dxt_dealer_fail dealer=%d err=%v", dealer, dealErr)
+			return nil, nil, nil, fmt.Errorf("dealer %d DXT+ deal failed: %w", dealer, dealErr)
+		}
+		publishCtx, cancel := context.WithTimeout(ctx, dxtNetworkTimeout())
+		publishErr := service.publishTranscript(publishCtx, dealer, tr)
+		cancel()
+		if publishErr != nil {
+			return nil, nil, nil, publishErr
+		}
+		tracef("phase=dxt_dealer_end dealer=%d ack_count=%d ciphertext_count=%d mode=network", dealer, len(tr.Signatures), len(tr.Ciphertexts))
+	}
+	cacheTimings["dxt_network_build"] += time.Since(buildStart)
+	waitStart := time.Now()
+	threshold := apdbFinishedSetThreshold(cfg.F, len(old))
+	transcripts, err := service.waitForTranscripts(ctx, threshold)
+	cacheTimings["dxt_network_wait"] += time.Since(waitStart)
+	if err != nil {
 		return nil, nil, nil, err
 	}
-
-	hitStart := time.Now()
-	allPresent := true
-	for _, dealer := range old {
-		path := dxtDealerCachePath(dir, dealer)
-		payload, err := readDXTCache(path)
-		if err != nil {
-			allPresent = false
-			break
-		}
-		if len(payload.AllShares) > 0 {
-			payload.AllShares = nil
-			if err := writeDXTCache(path, *payload); err != nil {
-				return nil, nil, nil, err
-			}
-		}
-	}
-	cacheTimings["dxt_cache_hit"] += time.Since(hitStart)
-	if !allPresent {
-		buildStart := time.Now()
-		for _, dealer := range localDealers {
-			path := dxtDealerCachePath(dir, dealer)
-			if _, err := readDXTCache(path); err == nil {
-				continue
-			}
-			tracef("phase=dxt_dealer_begin dealer=%d mode=distributed-cache", dealer)
-			tr, _, dealErr := dxt.Deal(ctx, dealer, nil)
-			if dealErr != nil {
-				tracef("phase=dxt_dealer_fail dealer=%d err=%v", dealer, dealErr)
-				return nil, nil, nil, fmt.Errorf("dealer %d DXT+ deal failed: %w", dealer, dealErr)
-			}
-			payload := dxtCachePayload{
-				Transcripts: map[int]*DXTTranscript{dealer: tr},
-			}
-			if writeErr := writeDXTCache(path, payload); writeErr != nil {
-				return nil, nil, nil, writeErr
-			}
-			tracef("phase=dxt_dealer_end dealer=%d ack_count=%d ciphertext_count=%d mode=distributed-cache", dealer, len(tr.Signatures), len(tr.Ciphertexts))
-		}
-		cacheTimings["dxt_cache_build"] += time.Since(buildStart)
-	}
-
-	waitStart := time.Now()
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	transcripts := make(map[int]*DXTTranscript, len(old))
-	allShares := make(map[int]map[int]SharePair, len(old))
-	for {
-		for _, dealer := range old {
-			payload, readErr := readDXTCache(dxtDealerCachePath(dir, dealer))
-			if readErr != nil {
-				continue
-			}
-			if tr := payload.Transcripts[dealer]; tr != nil {
-				transcripts[dealer] = tr
-			}
-			if len(payload.AllShares) > 0 {
-				payload.AllShares = nil
-				_ = writeDXTCache(dxtDealerCachePath(dir, dealer), *payload)
-			}
-			if allShares[dealer] == nil {
-				allShares[dealer] = make(map[int]SharePair)
-			}
-			for _, recipient := range newC {
-				if _, ok := localReceivers[recipient]; !ok {
-					continue
-				}
-				if share, shareErr := readDXTLocalShare(shareDir, dealer, recipient); shareErr == nil {
-					allShares[dealer][recipient] = share
-				}
-			}
-		}
-		if len(transcripts) == len(old) {
-			cacheTimings["dxt_cache_wait"] += time.Since(waitStart)
-			tracef("phase=dxt_cache_ready mode=distributed-cache dealers=%d dir=%s", len(transcripts), dir)
-			return transcripts, allShares, cacheTimings, nil
-		}
-		select {
-		case <-ctx.Done():
-			cacheTimings["dxt_cache_wait"] += time.Since(waitStart)
-			return nil, nil, nil, fmt.Errorf("waiting for distributed dxt cache: have_transcripts=%d have_shares=%d need=%d err=%w", len(transcripts), len(allShares), len(old), ctx.Err())
-		case <-ticker.C:
-		}
-	}
+	tracef("phase=dxt_network_ready dealers=%d threshold=%d local_state=%s", len(transcripts), threshold, localStateDir)
+	return transcripts, service.shareSnapshot(), cacheTimings, nil
 }
 
 func localOldDealersFromProtocolIDs(cfg Config, old []int) []int {
@@ -2266,43 +2459,9 @@ func localOldDealersFromProtocolIDs(cfg Config, old []int) []int {
 	return out
 }
 
-func dxtDealerCacheDir(cacheDir string, cfg Config, old []int, newC []int) string {
-	name := strings.TrimSuffix(dxtCacheFileName(cfg, old, newC), ".json")
-	return filepath.Join(cacheDir, name+"-dealers")
-}
-
-func dxtDealerCachePath(dir string, dealer int) string {
-	return filepath.Join(dir, fmt.Sprintf("dealer-%06d.json", dealer))
-}
-
-func waitForDXTReceiverReady(ctx context.Context, dir string, old []int, localDealers []int) error {
-	readyDir := filepath.Join(dir, "receiver-ready")
-	if err := os.MkdirAll(readyDir, 0o755); err != nil {
-		return fmt.Errorf("create dxt receiver ready dir: %w", err)
-	}
-	for _, dealer := range localDealers {
-		path := filepath.Join(readyDir, fmt.Sprintf("old-%06d.ready", dealer))
-		if err := os.WriteFile(path, []byte("ready\n"), 0o644); err != nil {
-			return fmt.Errorf("write dxt receiver ready file: %w", err)
-		}
-	}
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		matches, err := filepath.Glob(filepath.Join(readyDir, "old-*.ready"))
-		if err == nil && len(matches) >= len(old) {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for dxt receiver ready barrier: have=%d need=%d err=%w", len(matches), len(old), ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
 func dxtCacheFileName(cfg Config, old []int, newC []int) string {
 	key := struct {
+		Version      int    `json:"version"`
 		SID          string `json:"sid"`
 		F            int    `json:"f"`
 		Kappa        int    `json:"kappa"`
@@ -2310,6 +2469,7 @@ func dxtCacheFileName(cfg Config, old []int, newC []int) string {
 		Old          []int  `json:"old"`
 		New          []int  `json:"new"`
 	}{
+		Version:      2,
 		SID:          cfg.SID,
 		F:            cfg.F,
 		Kappa:        cfg.Kappa,

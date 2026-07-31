@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Run one strict-TCP PracticalADKR process per old-committee node.
-# The benchmark itself uses deterministic setup keys, while the artifact
-# directory is shared so DXT/APDB/Paillier barriers can exchange outputs.
+# The benchmark itself uses deterministic setup keys. The artifact directory
+# remains shared for the DXT/Paillier paths. Strict APDB
+# uses TCP; its per-holder RS shard files are local durable stores, not barriers.
 
 # The historical filename is retained for compatibility.  Override these
 # values for a matched committee experiment, e.g. n=16/f=5/kappa=6.
@@ -28,6 +29,7 @@ if [[ -d "${RUN_DIR}" && -n "$(find "${RUN_DIR}" -mindepth 1 -print -quit 2>/dev
   exit 2
 fi
 mkdir -p "${CACHE_DIR}" "${LOG_DIR}"
+mkdir -p "${RUN_DIR}/epoch-barrier"
 touch "${RESULTS_FILE}"
 
 cleanup() {
@@ -47,11 +49,14 @@ fi
 
 mvba_addrs=""
 proto_addrs=""
+coin_addrs=""
 for id in $(seq 0 $((N - 1))); do
   [[ -z "${mvba_addrs}" ]] || mvba_addrs+=","
   mvba_addrs+="${id}=127.0.0.1:$((23000 + id))"
   [[ -z "${proto_addrs}" ]] || proto_addrs+=","
-  proto_addrs+="${id}=127.0.0.1:$((24000 + id))"
+	proto_addrs+="${id}=127.0.0.1:$((24000 + id))"
+	[[ -z "${coin_addrs}" ]] || coin_addrs+=","
+	coin_addrs+="${id}=127.0.0.1:$((18000 + id))"
 done
 for id in $(seq 0 $((N - 1))); do
   new_id=$((N + id))
@@ -62,6 +67,8 @@ pids=()
 for id in $(seq 0 $((N - 1))); do
   log="${LOG_DIR}/node-${id}.log"
   PRACTICAL_ARTIFACT_CACHE_DIR="${CACHE_DIR}" \
+  PRACTICAL_LOCAL_STATE_DIR="${RUN_DIR}/local/node-${id}" \
+	PRACTICAL_EPOCH_BARRIER_DIR="${RUN_DIR}/epoch-barrier" \
   RLADKR_RANDOM_SEED="${RLADKR_RANDOM_SEED:-practical-adkr-multiprocess-n${N}}" \
   PRACTICAL_STRICT_NETWORK=1 \
   PRACTICAL_DELAY_ENABLE="${PRACTICAL_DELAY_ENABLE:-0}" \
@@ -71,7 +78,8 @@ for id in $(seq 0 $((N - 1))); do
     -paillier-bits "${PRACTICAL_MP_PAILLIER_BITS:-2048}" \
     -mvba-network tcp \
     -mvba-addrs "${mvba_addrs}" -mvba-local-ids "${id}" \
-    -proto-addrs "${proto_addrs}" -proto-local-ids "${id},$((N + id))" \
+	-proto-addrs "${proto_addrs}" -proto-local-ids "${id},$((N + id))" \
+	-coin-addrs "${coin_addrs}" \
     -strict-network=true -comm-metrics=true \
     >"${log}" 2>&1 &
   pids+=("$!")

@@ -69,8 +69,10 @@ func BenchmarkPracticalADKR(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				iterCfg := cfg
-				iterCfg.MVBANodeAddrs = buildNodeAddrCSV(old, nextBenchBase(400)+i*10)
-				iterCfg.ProtocolNodeAddrs = buildNodeAddrCSV(append(append([]int(nil), old...), newC...), nextBenchBase(400)+i*10)
+				runBase := nextBenchBase(400)
+				iterCfg.MVBANodeAddrs = buildNodeAddrCSV(old, runBase)
+				iterCfg.ProtocolNodeAddrs = buildNodeAddrCSV(append(append([]int(nil), old...), newC...), runBase+100)
+				iterCfg.CompNodeAddrs = buildNodeAddrCSV(newC, runBase+200)
 				_, err := RunPracticalADKR(ctx, iterCfg)
 				if err != nil {
 					b.Fatalf("ADKR failed: %v", err)
@@ -115,8 +117,10 @@ func TestBenchmarkCostReport(t *testing.T) {
 		var totalDuration time.Duration
 		for i := 0; i < runs; i++ {
 			cfg := baseCfg
-			cfg.MVBANodeAddrs = buildNodeAddrCSV(old, nextBenchBase(400)+i*10)
-			cfg.ProtocolNodeAddrs = buildNodeAddrCSV(append(append([]int(nil), old...), newC...), nextBenchBase(400)+i*10)
+			runBase := nextBenchBase(400)
+			cfg.MVBANodeAddrs = buildNodeAddrCSV(old, runBase)
+			cfg.ProtocolNodeAddrs = buildNodeAddrCSV(append(append([]int(nil), old...), newC...), runBase+100)
+			cfg.CompNodeAddrs = buildNodeAddrCSV(newC, runBase+200)
 			start := time.Now()
 			result, err := RunPracticalADKR(ctx, cfg)
 			elapsed := time.Since(start)
@@ -154,6 +158,7 @@ func TestPartialVerifyN7Comparison(t *testing.T) {
 			MVBALocalNodeIDs:     buildNodeIDsCSV(old),
 			ProtocolNodeAddrs:    buildNodeAddrCSV(append(append([]int(nil), old...), newC...), base+100),
 			ProtocolLocalNodeIDs: buildNodeIDsCSV(append(append([]int(nil), old...), newC...)),
+			CompNodeAddrs:        buildNodeAddrCSV(newC, base+200),
 			AblationMode:         mode,
 			CommMetrics:          true,
 		}

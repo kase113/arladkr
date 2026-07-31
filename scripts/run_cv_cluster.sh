@@ -10,10 +10,14 @@ else
 fi
 base_port="${4:-20000}"
 epoch_timeout="${RLADKR_CV_EPOCH_TIMEOUT:-90s}"
+wait_spbc_timeout="${RLADKR_CV_WAIT_SPBC_TIMEOUT:-}"
+route_send_timeout="${RLADKR_CV_ROUTE_SEND_TIMEOUT:-}"
 apvss_fallback_profile="${RLADKR_APVSS_FALLBACK_PROFILE:-exact-lane}"
 allow_experimental_apvss="${RLADKR_ALLOW_EXPERIMENTAL_APVSS:-false}"
 apvss_forced_fallback_count="${RLADKR_APVSS_FORCED_FALLBACK_COUNT:-0}"
 apvss_wait_all_acks="${RLADKR_APVSS_WAIT_ALL_ACKS:-false}"
+epochs="${RLADKR_CV_EPOCHS:-1}"
+runs="${RLADKR_CV_RUNS:-1}"
 # All n node processes share one host in this harness. Keep the default at one
 # crypto worker per process so the benchmark does not oversubscribe the host;
 # callers can still set RLADKR_CRYPTO_WORKERS explicitly.
@@ -29,7 +33,7 @@ generated_secret_dir="$root/keys/generated-private"
 log_dir="$root/logs"
 results_file="$root/cluster-results.log"
 
-if (( n <= 0 || f < 0 || n < 3 * f + 1 )); then
+if (( n <= 0 || f < 0 || n < 3 * f + 1 || epochs <= 0 || runs <= 0 )); then
   printf 'invalid committee parameters: n=%s f=%s\n' "$n" "$f" >&2
   exit 2
 fi
@@ -55,7 +59,15 @@ if [[ -d "$root" && -n "$(find "$root" -mindepth 1 -print -quit 2>/dev/null)" ]]
 fi
 
 mkdir -p "$repo_dir/bin" "$public_dir" "$generated_secret_dir" "$root/ready" "$log_dir"
+mkdir -p "$root/epoch-barrier"
 touch "$results_file"
+bench_timeout_args=()
+if [[ -n "$wait_spbc_timeout" ]]; then
+  bench_timeout_args+=( -wait-spbc-timeout "$wait_spbc_timeout" )
+fi
+if [[ -n "$route_send_timeout" ]]; then
+  bench_timeout_args+=( -route-send-timeout "$route_send_timeout" )
+fi
 (cd "$repo_dir" && go build -buildvcs=false -o "$binary" ./cmd/rladkrbench)
 "$binary" -n "$n" -f "$f" -runs 1 -cv-keygen-only \
   -cv-public-key-dir "$public_dir" -cv-local-secret-dir "$generated_secret_dir"
@@ -94,15 +106,18 @@ for ((i=0; i<n; i++)); do
     export RLADKR_NODE_ADDRS="$node_addrs"
     export RLADKR_MVBA_NODE_ADDRS="$mvba_addrs"
     export RLADKR_ARTIFACT_CACHE_DIR="$root/node-$i/store"
+		export RLADKR_STATE_CHAIN_DIR="$root/node-$i/state-chain"
     export RLADKR_LISTENER_READY_DIR="$root/ready"
     export RLADKR_LISTENER_READY_NODE_COUNT="$n"
+		export RLADKR_EPOCH_BARRIER_DIR="$root/epoch-barrier"
     export RLADKR_CV_DEBUG="${RLADKR_CV_DEBUG:-1}"
     export RLADKR_CV_PERF_COUNTERS="${RLADKR_CV_PERF_COUNTERS:-1}"
     export RLADKR_CRYPTO_WORKERS="$crypto_workers"
     export RLADKR_LANE_WORKERS="$lane_workers"
-    "$binary" -n "$n" -f "$f" -runs 1 -epochs 1 \
+    "$binary" -n "$n" -f "$f" -runs "$runs" -epochs "$epochs" \
       -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \
+			"${bench_timeout_args[@]}" \
       -apvss-fallback-profile "$apvss_fallback_profile" \
       -allow-experimental-apvss="$allow_experimental_apvss" \
       -apvss-forced-fallback-count "$apvss_forced_fallback_count" \

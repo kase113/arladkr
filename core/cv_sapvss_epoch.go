@@ -120,13 +120,14 @@ func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLea
 	policy = append(policy, encodeInts(sortedUnique(c.OldCommittee))...)
 	policy = append(policy, byte(c.Kappa>>24), byte(c.Kappa>>16), byte(c.Kappa>>8), byte(c.Kappa))
 	context := cvLeafContext{
-		sessionID:          []byte(c.SID),
-		epoch:              uint64(c.Epoch),
-		sharingDegree:      c.FNew,
-		profile:            cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
-		receiverPublicKeys: append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
-		dealerSetPolicy:    policy,
-		proofProfile:       cvLeafStructuralProofProfile,
+		sessionID:           []byte(c.SID),
+		epoch:               uint64(c.Epoch),
+		previousStateDigest: append([]byte(nil), c.PreviousEpochStateDigest...),
+		sharingDegree:       c.FNew,
+		profile:             cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
+		receiverPublicKeys:  append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
+		dealerSetPolicy:     policy,
+		proofProfile:        cvLeafStructuralProofProfile,
 	}
 	if err := cvValidateLeafContext(&context); err != nil {
 		return cvLeafContext{}, err

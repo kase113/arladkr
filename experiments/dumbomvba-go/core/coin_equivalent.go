@@ -47,10 +47,14 @@ func (m *DumboMVBA) makeSharedCoin(
 			if len(shares) >= threshold {
 				if hasTS && m.cfg.EquivalentCoinMode != "deterministic" {
 					recovered, recErr := ts.Recover("EQ_COIN_SHARE", dig, shares)
-					if recErr == nil && ts.VerifyRecovered("EQ_COIN_SHARE", dig, recovered) {
-						h := hashBytes([]byte("EQ_COIN_REC"), []byte(sid), []byte(nonce), recovered)
-						return int(binary.BigEndian.Uint64(h[:8]) & 0x7fffffff), nil
+					if recErr != nil {
+						return 0, fmt.Errorf("recover equivalent threshold coin: %w", recErr)
 					}
+					if !ts.VerifyRecovered("EQ_COIN_SHARE", dig, recovered) {
+						return 0, fmt.Errorf("verify recovered equivalent threshold coin")
+					}
+					h := hashBytes([]byte("EQ_COIN_REC"), []byte(sid), []byte(nonce), recovered)
+					return int(binary.BigEndian.Uint64(h[:8]) & 0x7fffffff), nil
 				}
 				return deriveCoinValue(m.cfg.EquivalentCoinMode, sid, nonce, shares), nil
 			}

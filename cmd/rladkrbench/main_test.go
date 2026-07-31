@@ -23,6 +23,14 @@ func TestFormatBenchResultIncludesEffectiveKappa(t *testing.T) {
 	}
 }
 
+func TestSummarizeConsensusHashBindsEpochSequence(t *testing.T) {
+	first := summarizeConsensusHash([]runStat{{consensusHash: "a"}, {consensusHash: "b"}})
+	second := summarizeConsensusHash([]runStat{{consensusHash: "b"}, {consensusHash: "a"}})
+	if first == "none" || first == "mixed" || first == second {
+		t.Fatalf("sequence digest is not ordered: first=%q second=%q", first, second)
+	}
+}
+
 func TestFormatBenchResultReportsCommitteeFaultThresholds(t *testing.T) {
 	asymmetric := formatBenchResult(benchResultInput{fOld: 1, fNew: 2, runs: 1})
 	for _, token := range []string{" f_old=1 ", " f_new=2 "} {

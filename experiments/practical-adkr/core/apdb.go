@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -36,7 +37,11 @@ func runAPDBDispersal(
 	nodePriv map[int]ed25519.PrivateKey,
 	nodePub map[int]ed25519.PublicKey,
 	dxt *DXTBackend,
+	networkService *networkAPDBService,
 ) (*APDBDispersalResult, error) {
+	if cfg.StrictNetwork {
+		return runNetworkRSAPDB(ctx, cfg, old, transcripts, nodePub, networkService)
+	}
 	threshold := apdbCertificateThreshold(cfg.F, len(old))
 	localValid := make(map[int][]int, len(old))
 	certs := make(map[int]APDBCertificate, len(old))
@@ -109,10 +114,16 @@ func runAPDBDispersal(
 					recordRecvBytes(len(body))
 				}
 				_ = conn.Close()
-				if !dxt.VerifyTranscript(id, &req.TR) {
+				raw, err := canonicalAPDBReceiptData(&req)
+				if err != nil || !dxt.VerifyTranscript(id, &req.TR) {
 					continue
 				}
-				chunkHash := hashChunk(req.Root, req.Dealer, id)
+				// A receipt is an availability statement. Publish it only after
+				// the exact root-bound bytes are durable in this holder's store.
+				if err := persistAPDBTranscript(cfg, old, id, req.Dealer, req.Root, raw); err != nil {
+					continue
+				}
+				chunkHash := hashChunk(req.Root, req.Dealer, id, raw)
 				msg := hashReceiptMsg(req.Dealer, id, req.Root, chunkHash)
 				sig := ed25519.Sign(nodePriv[id], msg)
 				resp := apdbReceiptResponse{
@@ -140,13 +151,6 @@ func runAPDBDispersal(
 	if len(lnByID) == 0 {
 		return nil, fmt.Errorf("apdb listeners unavailable for configured protocol transport")
 	}
-	if cfg.StrictNetwork {
-		if err := waitForAPDBReady(ctx, cfg, old, lnByID); err != nil {
-			return nil, err
-		}
-		return collectDistributedAPDBCertificates(ctx, cfg, old, transcripts, nodePub, addrMap, localIDs)
-	}
-
 	for _, dealer := range old {
 		select {
 		case <-ctx.Done():
@@ -238,6 +242,9 @@ func runAPDBDispersal(
 				if resp.Dealer != dealer {
 					continue
 				}
+				if !verifyAPDBReceiptForData(resp.Receipt, dealer, root[:], raw, nodePub) {
+					continue
+				}
 				if _, ok := seen[resp.Receipt.NodeID]; ok {
 					continue
 				}
@@ -263,7 +270,7 @@ func runAPDBDispersal(
 		certs[dealer] = cert
 
 		for _, nodeID := range old {
-			if verifyAPDBCertificate(cert, nodePub) {
+			if verifyAPDBCertificate(cert, nodePub, cfg.F) {
 				localValid[nodeID] = append(localValid[nodeID], dealer)
 			}
 		}
@@ -272,213 +279,6 @@ func runAPDBDispersal(
 		LocalValid:   localValid,
 		Certificates: certs,
 	}, nil
-}
-
-func collectDistributedAPDBCertificates(
-	ctx context.Context,
-	cfg Config,
-	old []int,
-	transcripts map[int]*DXTTranscript,
-	nodePub map[int]ed25519.PublicKey,
-	addrMap map[int]string,
-	localIDs map[int]struct{},
-) (*APDBDispersalResult, error) {
-	cacheDir := strings.TrimSpace(os.Getenv("PRACTICAL_ARTIFACT_CACHE_DIR"))
-	if cacheDir == "" {
-		return nil, fmt.Errorf("strict-network distributed APDB requires PRACTICAL_ARTIFACT_CACHE_DIR")
-	}
-	dir := filepath.Join(cacheDir, "apdb-certs", practicalRunID(cfg, old, cfg.NewCommittee))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create apdb cert dir: %w", err)
-	}
-	localDealers := make([]int, 0, len(localIDs))
-	for _, dealer := range old {
-		if _, ok := localIDs[dealer]; ok {
-			localDealers = append(localDealers, dealer)
-		}
-	}
-	if len(localDealers) == 0 {
-		return nil, fmt.Errorf("strict-network distributed APDB has no local old dealer")
-	}
-	threshold := apdbCertificateThreshold(cfg.F, len(old))
-	receiptTO := 8 * time.Second
-	if cfg.RouteSendTimeout > 0 {
-		candidate := 8 * cfg.RouteSendTimeout
-		if candidate > receiptTO {
-			receiptTO = candidate
-		}
-	}
-	for _, dealer := range localDealers {
-		path := apdbCertCachePath(dir, dealer)
-		if cert, err := readAPDBCertCache(path); err == nil && verifyAPDBCertificate(cert, nodePub) {
-			continue
-		}
-		tr := transcripts[dealer]
-		if tr == nil {
-			return nil, fmt.Errorf("missing transcript for local APDB dealer %d", dealer)
-		}
-		cert, err := collectAPDBCertificateForDealer(ctx, dealer, tr, old, threshold, receiptTO, addrMap, localIDs, nodePub)
-		if err != nil {
-			return nil, err
-		}
-		if err := writeAPDBCertCache(path, cert); err != nil {
-			return nil, err
-		}
-	}
-
-	localValid := make(map[int][]int, len(old))
-	for _, nodeID := range old {
-		localValid[nodeID] = make([]int, 0, len(old))
-	}
-	certs := make(map[int]APDBCertificate, len(old))
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		for _, dealer := range old {
-			if _, ok := certs[dealer]; ok {
-				continue
-			}
-			cert, err := readAPDBCertCache(apdbCertCachePath(dir, dealer))
-			if err != nil || !verifyAPDBCertificate(cert, nodePub) {
-				continue
-			}
-			certs[dealer] = cert
-		}
-		if len(certs) == len(old) {
-			dealers := make([]int, 0, len(certs))
-			for dealer := range certs {
-				dealers = append(dealers, dealer)
-			}
-			sort.Ints(dealers)
-			for _, nodeID := range old {
-				localValid[nodeID] = append(localValid[nodeID], dealers...)
-			}
-			return &APDBDispersalResult{
-				LocalValid:   localValid,
-				Certificates: certs,
-			}, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("waiting for distributed apdb certs: have=%d need=%d err=%w", len(certs), len(old), ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
-func collectAPDBCertificateForDealer(
-	ctx context.Context,
-	dealer int,
-	tr *DXTTranscript,
-	old []int,
-	threshold int,
-	receiptTO time.Duration,
-	addrMap map[int]string,
-	localIDs map[int]struct{},
-	nodePub map[int]ed25519.PublicKey,
-) (APDBCertificate, error) {
-	raw, err := json.Marshal(tr)
-	if err != nil {
-		return APDBCertificate{}, err
-	}
-	root := sha256.Sum256(raw)
-	replyLn, err := net.Listen("tcp", "0.0.0.0:0")
-	if err != nil {
-		return APDBCertificate{}, err
-	}
-	replyAddr := dialableProtocolReplyAddr(replyLn.Addr().String(), addrMap, localIDs)
-	respCh := make(chan apdbReceiptResponse, len(old)*2)
-	var replyWG sync.WaitGroup
-	replyWG.Add(1)
-	go func() {
-		defer replyWG.Done()
-		for {
-			conn, err := replyLn.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.SetReadDeadline(time.Now().Add(receiptTO))
-			var resp apdbReceiptResponse
-			if err := json.NewDecoder(conn).Decode(&resp); err == nil {
-				if body, mErr := json.Marshal(resp); mErr == nil {
-					recordRecvBytes(len(body))
-				}
-				select {
-				case respCh <- resp:
-				default:
-				}
-			}
-			_ = conn.Close()
-		}
-	}()
-	req := apdbReceiptRequest{
-		Dealer: dealer,
-		Root:   root[:],
-		Reply:  replyAddr,
-		TR:     *tr,
-	}
-	reqBytes, err := json.Marshal(req)
-	if err != nil {
-		_ = replyLn.Close()
-		replyWG.Wait()
-		return APDBCertificate{}, err
-	}
-	for _, nodeID := range old {
-		addr, ok := addrMap[nodeID]
-		if !ok || strings.TrimSpace(addr) == "" {
-			continue
-		}
-		conn, err := dialWithOptionalDelay(dealer, nodeID, "tcp", addr, receiptTO)
-		if err != nil {
-			continue
-		}
-		_ = conn.SetWriteDeadline(time.Now().Add(receiptTO))
-		recordSentBytes(len(reqBytes))
-		_, _ = conn.Write(reqBytes)
-		_ = conn.Close()
-	}
-	receipts := make([]APDBReceipt, 0, len(old))
-	seen := make(map[int]struct{}, len(old))
-	deadline := time.NewTimer(receiptTO)
-collectReceipts:
-	for len(receipts) < threshold {
-		select {
-		case <-ctx.Done():
-			deadline.Stop()
-			_ = replyLn.Close()
-			replyWG.Wait()
-			return APDBCertificate{}, ctx.Err()
-		case <-deadline.C:
-			break collectReceipts
-		case resp := <-respCh:
-			if resp.Dealer != dealer {
-				continue
-			}
-			if _, ok := seen[resp.Receipt.NodeID]; ok {
-				continue
-			}
-			seen[resp.Receipt.NodeID] = struct{}{}
-			receipts = append(receipts, resp.Receipt)
-		}
-	}
-	deadline.Stop()
-	_ = replyLn.Close()
-	replyWG.Wait()
-	if len(receipts) < threshold {
-		return APDBCertificate{}, fmt.Errorf("distributed APDB dealer %d insufficient receipts: have=%d need=%d", dealer, len(receipts), threshold)
-	}
-	sort.Slice(receipts, func(i, j int) bool {
-		return receipts[i].NodeID < receipts[j].NodeID
-	})
-	cert := APDBCertificate{
-		Sender:   dealer,
-		Root:     append([]byte(nil), root[:]...),
-		Receipts: append([]APDBReceipt(nil), receipts[:threshold]...),
-	}
-	if !verifyAPDBCertificate(cert, nodePub) {
-		return APDBCertificate{}, fmt.Errorf("distributed APDB dealer %d produced invalid cert", dealer)
-	}
-	return cert, nil
 }
 
 func dialableProtocolReplyAddr(listenerAddr string, addrMap map[int]string, localIDs map[int]struct{}) string {
@@ -500,71 +300,6 @@ func dialableProtocolReplyAddr(listenerAddr string, addrMap map[int]string, loca
 		}
 	}
 	return net.JoinHostPort("127.0.0.1", port)
-}
-
-func waitForAPDBReady(ctx context.Context, cfg Config, old []int, lnByID map[int]net.Listener) error {
-	cacheDir := strings.TrimSpace(os.Getenv("PRACTICAL_ARTIFACT_CACHE_DIR"))
-	if cacheDir == "" {
-		return fmt.Errorf("strict-network APDB ready barrier requires PRACTICAL_ARTIFACT_CACHE_DIR")
-	}
-	readyDir := filepath.Join(cacheDir, "apdb-ready", practicalRunID(cfg, old, cfg.NewCommittee))
-	if err := os.MkdirAll(readyDir, 0o755); err != nil {
-		return fmt.Errorf("create apdb ready dir: %w", err)
-	}
-	for nodeID := range lnByID {
-		path := filepath.Join(readyDir, fmt.Sprintf("old-%06d.ready", nodeID))
-		if err := os.WriteFile(path, []byte("ready\n"), 0o644); err != nil {
-			return fmt.Errorf("write apdb ready file: %w", err)
-		}
-	}
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		matches, err := filepath.Glob(filepath.Join(readyDir, "old-*.ready"))
-		if err == nil && len(matches) >= len(old) {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for apdb ready barrier: have=%d need=%d err=%w", len(matches), len(old), ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
-func apdbCertCachePath(dir string, dealer int) string {
-	return filepath.Join(dir, fmt.Sprintf("dealer-%06d.json", dealer))
-}
-
-func readAPDBCertCache(path string) (APDBCertificate, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return APDBCertificate{}, err
-	}
-	var cert APDBCertificate
-	if err := json.Unmarshal(data, &cert); err != nil {
-		return APDBCertificate{}, err
-	}
-	if len(cert.Receipts) == 0 {
-		return APDBCertificate{}, fmt.Errorf("empty apdb cert cache")
-	}
-	return cert, nil
-}
-
-func writeAPDBCertCache(path string, cert APDBCertificate) error {
-	data, err := json.Marshal(&cert)
-	if err != nil {
-		return fmt.Errorf("marshal apdb cert cache: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write apdb cert cache temp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename apdb cert cache: %w", err)
-	}
-	return nil
 }
 
 func runAPDBDispersalLocal(
@@ -611,7 +346,10 @@ func runAPDBDispersalLocal(
 				if !dxt.VerifyTranscript(nid, tr) {
 					return
 				}
-				chunkHash := hashChunk(root[:], dealer, nid)
+				if err := persistAPDBTranscript(cfg, old, nid, dealer, root[:], raw); err != nil {
+					return
+				}
+				chunkHash := hashChunk(root[:], dealer, nid, raw)
 				msg := hashReceiptMsg(dealer, nid, root[:], chunkHash)
 				sig := ed25519.Sign(nodePriv[nid], msg)
 				select {
@@ -656,7 +394,7 @@ func runAPDBDispersalLocal(
 		}
 		certs[dealer] = cert
 		for _, nodeID := range old {
-			if verifyAPDBCertificate(cert, nodePub) {
+			if verifyAPDBCertificate(cert, nodePub, cfg.F) {
 				localValid[nodeID] = append(localValid[nodeID], dealer)
 			}
 		}
@@ -667,21 +405,35 @@ func runAPDBDispersalLocal(
 	}, nil
 }
 
-func verifyAPDBCertificate(cert APDBCertificate, nodePub map[int]ed25519.PublicKey) bool {
-	if len(cert.Receipts) == 0 {
+func verifyAPDBCertificate(cert APDBCertificate, nodePub map[int]ed25519.PublicKey, configuredFaults ...int) bool {
+	if len(cert.Root) != sha256.Size || len(cert.Receipts) == 0 {
 		return false
 	}
-	required := 0
-	if committeeSize := len(nodePub); committeeSize > 0 {
-		f := (committeeSize - 1) / 3
-		required = apdbCertificateThreshold(f, committeeSize)
+	committeeSize := len(nodePub)
+	f := (committeeSize - 1) / 3
+	if len(configuredFaults) > 1 || (len(configuredFaults) == 1 && configuredFaults[0] < 0) {
+		return false
 	}
+	if len(configuredFaults) == 1 {
+		f = configuredFaults[0]
+	}
+	if committeeSize <= 0 || committeeSize < 3*f+1 {
+		return false
+	}
+	if len(cert.MerkleRoot) > 0 || len(cert.ValueDigest) > 0 || cert.DataShards > 0 || cert.TotalShards > 0 {
+		if len(cert.MerkleRoot) != sha256.Size || len(cert.ValueDigest) != sha256.Size ||
+			cert.TotalShards != committeeSize || cert.DataShards != committeeSize-2*f ||
+			!bytes.Equal(cert.Root, apdbCommitmentRoot(cert.Sender, cert.ValueDigest, cert.MerkleRoot, cert.DataShards, cert.TotalShards)) {
+			return false
+		}
+	}
+	required := apdbCertificateThreshold(f, committeeSize)
 	if required > 0 && len(cert.Receipts) < required {
 		return false
 	}
 	seen := make(map[int]struct{}, len(cert.Receipts))
 	for _, rc := range cert.Receipts {
-		if rc.Sender != cert.Sender {
+		if rc.Sender != cert.Sender || len(rc.ChunkHash) != sha256.Size {
 			return false
 		}
 		if _, ok := seen[rc.NodeID]; ok {
@@ -701,6 +453,17 @@ func verifyAPDBCertificate(cert APDBCertificate, nodePub map[int]ed25519.PublicK
 }
 
 func apdbCertificateThreshold(f int, committeeSize int) int {
+	threshold := committeeSize - f
+	if threshold < f+1 {
+		threshold = f + 1
+	}
+	if committeeSize > 0 && threshold > committeeSize {
+		threshold = committeeSize
+	}
+	return threshold
+}
+
+func apdbFinishedSetThreshold(f int, committeeSize int) int {
 	threshold := 2*f + 1
 	if threshold < f+1 {
 		threshold = f + 1
@@ -711,7 +474,7 @@ func apdbCertificateThreshold(f int, committeeSize int) int {
 	return threshold
 }
 
-func hashChunk(root []byte, dealer int, nodeID int) []byte {
+func hashChunk(root []byte, dealer int, nodeID int, data []byte) []byte {
 	h := sha256.New()
 	h.Write([]byte("PADKR-APDB-CHUNK"))
 	h.Write(root)
@@ -719,7 +482,108 @@ func hashChunk(root []byte, dealer int, nodeID int) []byte {
 	binary.BigEndian.PutUint64(b[:8], uint64(dealer))
 	binary.BigEndian.PutUint64(b[8:], uint64(nodeID))
 	h.Write(b[:])
+	dataDigest := sha256.Sum256(data)
+	h.Write(dataDigest[:])
 	return h.Sum(nil)
+}
+
+func canonicalAPDBReceiptData(req *apdbReceiptRequest) ([]byte, error) {
+	if req == nil || req.Dealer != req.TR.Dealer {
+		return nil, fmt.Errorf("APDB dealer/transcript mismatch")
+	}
+	raw, err := json.Marshal(&req.TR)
+	if err != nil {
+		return nil, fmt.Errorf("marshal APDB transcript: %w", err)
+	}
+	root := sha256.Sum256(raw)
+	if len(req.Root) != sha256.Size || !bytes.Equal(req.Root, root[:]) {
+		return nil, fmt.Errorf("APDB root does not bind transcript")
+	}
+	return raw, nil
+}
+
+func verifyAPDBReceiptForData(
+	receipt APDBReceipt,
+	dealer int,
+	root []byte,
+	data []byte,
+	nodePub map[int]ed25519.PublicKey,
+) bool {
+	if receipt.Sender != dealer || len(root) != sha256.Size {
+		return false
+	}
+	pk, ok := nodePub[receipt.NodeID]
+	if !ok {
+		return false
+	}
+	expected := hashChunk(root, dealer, receipt.NodeID, data)
+	if !bytes.Equal(receipt.ChunkHash, expected) {
+		return false
+	}
+	return ed25519.Verify(pk, hashReceiptMsg(dealer, receipt.NodeID, root, expected), receipt.Signature)
+}
+
+func apdbTranscriptStorePath(cfg Config, old []int, nodeID, dealer int, root []byte) string {
+	base := strings.TrimSpace(os.Getenv("PRACTICAL_ARTIFACT_CACHE_DIR"))
+	if base == "" {
+		base = filepath.Join(os.TempDir(), "practical-adkr-artifacts")
+	}
+	return filepath.Join(
+		base,
+		"apdb-transcripts",
+		practicalRunID(cfg, old, cfg.NewCommittee),
+		fmt.Sprintf("node-%06d", nodeID),
+		fmt.Sprintf("dealer-%06d-%x.tr.json", dealer, root),
+	)
+}
+
+func persistAPDBTranscript(cfg Config, old []int, nodeID, dealer int, root, raw []byte) error {
+	computed := sha256.Sum256(raw)
+	if len(root) != sha256.Size || !bytes.Equal(root, computed[:]) {
+		return fmt.Errorf("refuse to store APDB transcript with mismatched root")
+	}
+	path := apdbTranscriptStorePath(cfg, old, nodeID, dealer, root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create APDB transcript store: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".apdb-transcript-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create APDB transcript temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		cleanup()
+		return fmt.Errorf("chmod APDB transcript temp file: %w", err)
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		cleanup()
+		return fmt.Errorf("write APDB transcript: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync APDB transcript: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close APDB transcript: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publish APDB transcript: %w", err)
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open APDB transcript directory: %w", err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync APDB transcript directory: %w", err)
+	}
+	return nil
 }
 
 func hashReceiptMsg(dealer int, nodeID int, root []byte, chunkHash []byte) []byte {

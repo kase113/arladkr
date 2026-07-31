@@ -14,9 +14,10 @@ import (
 // Config holds the configuration for a Practical ADKR instance.
 type Config struct {
 	SID          string
-	OldCommittee []int // 旧委员会节点 ID 列表
-	NewCommittee []int // 新委员会节点 ID 列表
-	F            int   // 容错上限 (n >= 3f+1)
+	Epoch        uint64 // reconfiguration epoch, bound into Coin.Get
+	OldCommittee []int  // 旧委员会节点 ID 列表
+	NewCommittee []int  // 新委员会节点 ID 列表
+	F            int    // 容错上限 (n >= 3f+1)
 
 	// Kappa is the number of transcripts to select in the Recast phase.
 	// It must not exceed 2F+1. If 0, the core derives the smallest value for
@@ -45,6 +46,15 @@ type Config struct {
 	ProtocolNodeAddrs string
 	// ProtocolLocalNodeIDs selects locally hosted ids (old+new) for DXT/APDB stage listeners.
 	ProtocolLocalNodeIDs string
+	// DXTNodeAddrs optionally gives setup-long DXT lane/transcript listener
+	// addresses. If empty, ports are derived from ProtocolNodeAddrs.
+	DXTNodeAddrs string
+	// CoinNodeAddrs optionally gives dedicated, setup-long threshold Coin.Get
+	// listener addresses. If empty, ports are derived from ProtocolNodeAddrs.
+	CoinNodeAddrs string
+	// CompNodeAddrs optionally gives dedicated, long-lived Algorithm 3 KEY
+	// listener addresses. If empty, ports are derived from ProtocolNodeAddrs.
+	CompNodeAddrs string
 
 	// UsePythonBridge enables Python cryptography bridge (fallback).
 	UsePythonBridge bool
@@ -95,6 +105,9 @@ type DXTTranscript struct {
 
 	// Ciphertexts only for non-responsive recipients: recipient_id -> Paillier ciphertext
 	Ciphertexts map[int][]byte
+	// BlindingCiphertexts encrypt h^{r_i} under the receiver's independent
+	// CompProve ElGamal key for every VE lane.
+	BlindingCiphertexts map[int]DXTBlindingCiphertext
 
 	// Proofs for non-responsive recipients: recipient_id -> EncryptedDLogProof
 	Proofs map[int][]byte
@@ -123,11 +136,15 @@ type APDBReceipt struct {
 	Signature []byte
 }
 
-// APDBCertificate proves a transcript was successfully dispersed (2f+1 receipts).
+// APDBCertificate proves a transcript was successfully dispersed (n-f receipts).
 type APDBCertificate struct {
-	Sender   int
-	Root     []byte
-	Receipts []APDBReceipt
+	Sender      int
+	Root        []byte
+	ValueDigest []byte
+	MerkleRoot  []byte
+	DataShards  int
+	TotalShards int
+	Receipts    []APDBReceipt
 }
 
 // APDBDispersalResult summarizes the dispersal outcome needed by later recover.
@@ -162,13 +179,15 @@ type RecoverStoreAttestation struct {
 }
 
 type RecoverTimingBreakdown struct {
-	StoreVerify   time.Duration
-	ShardVerify   time.Duration
-	FullVerify    time.Duration
-	StoreSeen     uint64
-	FetchReqSent  uint64
-	FetchRespRecv uint64
-	RecipientSeen uint64
+	ReadyWait      time.Duration
+	CompletionWait time.Duration
+	StoreVerify    time.Duration
+	ShardVerify    time.Duration
+	FullVerify     time.Duration
+	StoreSeen      uint64
+	FetchReqSent   uint64
+	FetchRespRecv  uint64
+	RecipientSeen  uint64
 }
 
 // --- Distributed Verification Types ---
@@ -188,6 +207,25 @@ type VerifyVote struct {
 type NIZKProof struct {
 	Challenge []byte
 	Response  []byte
+}
+
+type DXTBlindingCiphertext struct {
+	C0 []byte `json:"c0"`
+	C1 []byte `json:"c1"`
+}
+
+type CompProof struct {
+	AckBlinding []byte    `json:"ack_blinding"`
+	Y           []byte    `json:"y"`
+	Secret      NIZKProof `json:"secret"`
+	AckOpening  NIZKProof `json:"ack_opening"`
+	DH          NIZKProof `json:"dh"`
+}
+
+type CompPublicKeyShare struct {
+	NodeID  int       `json:"node_id"`
+	PKShare []byte    `json:"pk_share"`
+	Proof   CompProof `json:"proof"`
 }
 
 // PublicKeyShare is a node's contribution to the new threshold public key.
@@ -228,7 +266,11 @@ type Result struct {
 	AggregateCiphertexts map[int][]byte
 
 	// New threshold public key (compressed EC point)
-	NewThresholdPK []byte
+	NewThresholdPK                []byte
+	NewPublicShares               map[int][]byte
+	CompKeyCompletionCertificates map[int]CompKeyCompletionCertificate
+	CoinSignature                 []byte
+	CoinThreshold                 int
 
 	PerNode                    []NodeOutput
 	PhaseTimings               map[string]time.Duration
@@ -238,6 +280,18 @@ type Result struct {
 	PhaseRecvBytes             map[string]uint64
 	PartialVerifyMode          string
 	PartialVerifyPositiveVotes map[string]int
+}
+
+// CompKeyCompletionCertificate is a receiver-signed completion attestation
+// created only after that receiver verifies n-f Algorithm 3 public-key shares.
+// It does not let third parties skip verification of the underlying shares.
+type CompKeyCompletionCertificate struct {
+	Recipient      int
+	Threshold      int
+	SelectedDigest []byte
+	GroupPublicKey []byte
+	ShareDigests   map[int][]byte
+	Signature      []byte
 }
 
 type PartialResultError struct {
