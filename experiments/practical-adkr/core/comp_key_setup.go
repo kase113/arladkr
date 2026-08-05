@@ -63,6 +63,9 @@ func loadOrCreatePracticalCompKeys(cfg Config, newCommittee []int) (*practicalCo
 	publicPath := practicalCompPublicPath(cacheDir, nodes)
 	lockPath := publicPath + ".lock"
 	if _, _, err := readPracticalCompPublic(publicPath); err != nil {
+		if practicalSetupReadOnly() {
+			return nil, fmt.Errorf("read-only Practical setup is missing CompProve public artifact: %w", err)
+		}
 		lock, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if lockErr == nil {
 			_, _ = lock.WriteString(fmt.Sprintf("pid=%d\n", os.Getpid()))

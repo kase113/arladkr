@@ -833,5 +833,6 @@ func cvCloneLeafForTest(in *cvLeaf) *cvLeaf {
 		}
 		out.proof = &proof
 	}
+	out.compactProof = apvssCloneCompactFallbackProofForTest(in.compactProof)
 	return &out
 }

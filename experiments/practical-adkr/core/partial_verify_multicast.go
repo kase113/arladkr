@@ -2,7 +2,8 @@ package core
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -82,12 +83,10 @@ func partialVerifyNetworkTimeout(cfg Config) time.Duration {
 func runPartialVerificationMulticast(
 	ctx context.Context,
 	cfg Config,
-	old []int,
+	verifiers []int,
 	selectedIDs []int,
 	transcripts map[int]*DXTTranscript,
 	dxt *DXTBackend,
-	nodePriv map[int]ed25519.PrivateKey,
-	nodePub map[int]ed25519.PublicKey,
 	tracef func(string, ...any),
 ) ([]int, map[string]int, error) {
 	if len(selectedIDs) == 0 {
@@ -96,19 +95,19 @@ func runPartialVerificationMulticast(
 	addrMap := parseNodeAddrMap(cfg.ProtocolNodeAddrs)
 	configuredLocal := parseNodeIDSet(cfg.ProtocolLocalNodeIDs)
 	localIDs := make([]int, 0, len(configuredLocal))
-	oldSet := make(map[int]struct{}, len(old))
-	for _, id := range old {
-		oldSet[id] = struct{}{}
+	verifierSet := make(map[int]struct{}, len(verifiers))
+	for _, id := range verifiers {
+		verifierSet[id] = struct{}{}
 		if _, ok := configuredLocal[id]; ok {
 			localIDs = append(localIDs, id)
 		}
 	}
 	sort.Ints(localIDs)
 	if len(addrMap) == 0 || len(localIDs) == 0 {
-		return nil, nil, errors.New("partial verification multicast requires protocol transport and local old verifier")
+		return nil, nil, errors.New("partial verification multicast requires protocol transport and a local new-committee verifier")
 	}
 	coverage := make(map[int]int, len(dxt.newCommittee))
-	for _, verifier := range old {
+	for _, verifier := range verifiers {
 		lanes, ok := dxt.partialLaneIDs(verifier)
 		if !ok {
 			return nil, nil, fmt.Errorf("partial verification verifier %d has no responsibility window", verifier)
@@ -127,15 +126,15 @@ func runPartialVerificationMulticast(
 			return nil, nil, fmt.Errorf("partial verification lane %d coverage=%d need=%d", rid, coverage[rid], 2*dxt.f+1)
 		}
 	}
-	for _, id := range old {
+	for _, id := range verifiers {
 		if strings.TrimSpace(addrMap[id]) == "" {
-			return nil, nil, fmt.Errorf("partial verification missing address for old verifier %d", id)
+			return nil, nil, fmt.Errorf("partial verification missing address for verifier %d", id)
 		}
 	}
 
 	stageCtx, cancel := context.WithTimeout(ctx, partialVerifyNetworkTimeout(cfg))
 	defer cancel()
-	wireCh := make(chan partialVerifyResultWire, len(old)*len(selectedIDs)*2)
+	wireCh := make(chan partialVerifyResultWire, len(verifiers)*len(selectedIDs)*2)
 	lnByID := make(map[int]net.Listener, len(localIDs))
 	var listenerWG sync.WaitGroup
 	cleanupListeners := func() {
@@ -199,10 +198,10 @@ func runPartialVerificationMulticast(
 	seen := make(map[int]map[int]map[int]struct{}, len(selectedIDs))
 	for _, dealer := range selectedIDs {
 		positive[dealer] = make(map[int]int, len(dxt.newCommittee))
-		seen[dealer] = make(map[int]map[int]struct{}, len(old))
+		seen[dealer] = make(map[int]map[int]struct{}, len(verifiers))
 	}
 	accept := func(wire partialVerifyResultWire) {
-		if _, ok := oldSet[wire.Verifier]; !ok {
+		if _, ok := verifierSet[wire.Verifier]; !ok {
 			return
 		}
 		if _, ok := positive[wire.Dealer]; !ok {
@@ -211,8 +210,8 @@ func runPartialVerificationMulticast(
 		if !bytesEqual(wire.TranscriptDigest, transcriptDigests[wire.Dealer]) {
 			return
 		}
-		pub := nodePub[wire.Verifier]
-		if len(pub) == 0 || !ed25519.Verify(pub, partialVerifyResultMessage(&wire), wire.Signature) {
+		pub := dxt.recipientSignPub[wire.Verifier]
+		if pub == nil || !ecdsa.VerifyASN1(pub, partialVerifyResultMessage(&wire), wire.Signature) {
 			return
 		}
 		expected, ok := dxt.partialLaneIDs(wire.Verifier)
@@ -247,7 +246,7 @@ func runPartialVerificationMulticast(
 		raw  []byte
 	}, len(localIDs))
 	for _, verifier := range localIDs {
-		if len(nodePriv[verifier]) != ed25519.PrivateKeySize {
+		if dxt.recipientSignPriv[verifier] == nil {
 			return nil, nil, fmt.Errorf("partial verification local signer %d key unavailable", verifier)
 		}
 		prepared[verifier] = make(map[int]struct {
@@ -265,7 +264,11 @@ func runPartialVerificationMulticast(
 				}
 			}
 			wire := partialVerifyResultWire{Dealer: dealer, Verifier: verifier, TranscriptDigest: transcriptDigests[dealer], Lanes: lanes}
-			wire.Signature = ed25519.Sign(nodePriv[verifier], partialVerifyResultMessage(&wire))
+			var err error
+			wire.Signature, err = ecdsa.SignASN1(rand.Reader, dxt.recipientSignPriv[verifier], partialVerifyResultMessage(&wire))
+			if err != nil {
+				return nil, nil, err
+			}
 			raw, err := json.Marshal(wire)
 			if err != nil {
 				return nil, nil, err
@@ -285,7 +288,7 @@ func runPartialVerificationMulticast(
 		for _, dealer := range selectedIDs {
 			preparedResult := prepared[verifier][dealer]
 			raw := preparedResult.raw
-			for _, target := range old {
+			for _, target := range verifiers {
 				if target == verifier {
 					continue
 				}
@@ -345,7 +348,7 @@ func runPartialVerificationMulticast(
 	// multicast writes finish.  Drain those writes to keep communication
 	// measurements representative; distributed processes do not take this
 	// path and retain the threshold-first latency behavior.
-	if len(localIDs) == len(old) {
+	if len(localIDs) == len(verifiers) {
 		sendWG.Wait()
 	}
 	cancel()

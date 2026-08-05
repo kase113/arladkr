@@ -35,15 +35,17 @@ var (
 )
 
 const (
-	cvMaxChunkBits               = 20
-	cvMaxDLogBound               = uint64(1) << 32
-	cvLeafStructuralProofProfile = "m1a-structural-no-nizk"
-	cvLeafGrothProofProfile      = "m1b-groth-32x8-exact-range"
-	cvLeafContextDigestDomain    = "ARL-CV-sAPVSS/context"
-	cvLeafStatementDigestDomain  = "ARL-CV-sAPVSS/statement"
-	cvLeafDigestDomain           = "ARL-CV-sAPVSS/leaf"
-	cvLeafReceiverRegistryDomain = "ARL-CV-sAPVSS/registry"
-	cvLeafGroupID                = "BLS12-381-G1/fr"
+	cvMaxChunkBits                = 20
+	cvMaxDLogBound                = uint64(1) << 32
+	cvLeafStructuralProofProfile  = "m1a-structural-no-nizk"
+	cvLeafGrothProofProfile       = "m1b-groth-32x8-exact-range"
+	cvLeafFullCompactProofProfile = "m1c-pedersen-full-compact-batch-experimental-v1"
+	cvLeafFullFieldProofProfile   = "m1d-pedersen-full-field-congruent-experimental-v1"
+	cvLeafContextDigestDomain     = "ARL-CV-sAPVSS/context"
+	cvLeafStatementDigestDomain   = "ARL-CV-sAPVSS/statement"
+	cvLeafDigestDomain            = "ARL-CV-sAPVSS/leaf"
+	cvLeafReceiverRegistryDomain  = "ARL-CV-sAPVSS/registry"
+	cvLeafGroupID                 = "BLS12-381-G1/fr"
 )
 
 type cvChunkProfile struct {
@@ -93,6 +95,7 @@ type cvLeaf struct {
 	receivers              []cvLeafReceiver
 	hasLeafNIZK            bool
 	proof                  *cvLeafProof
+	compactProof           *apvssCompactFallbackProof
 	digest                 []byte
 }
 
@@ -535,7 +538,9 @@ func cvVerifyRelation(aggregate *cvEncryptedShare, decrypted *cvDecryptedShare) 
 func cvValidateLeafContext(context *cvLeafContext) error {
 	if context == nil || len(context.sessionID) == 0 || len(context.dealerSetPolicy) == 0 ||
 		(context.proofProfile != cvLeafStructuralProofProfile &&
-			context.proofProfile != cvLeafGrothProofProfile) {
+			context.proofProfile != cvLeafGrothProofProfile &&
+			context.proofProfile != cvLeafFullCompactProofProfile &&
+			context.proofProfile != cvLeafFullFieldProofProfile) {
 		return fmt.Errorf("invalid CV-sAPVSS Leaf context")
 	}
 	if _, _, _, err := cvProfile(context.profile); err != nil {
@@ -798,9 +803,11 @@ func cvReferenceDeal(
 		dealerID:               dealerID,
 		coefficientCommitments: commitments,
 		receivers:              receivers,
-		hasLeafNIZK:            context.proofProfile == cvLeafGrothProofProfile,
+		hasLeafNIZK: context.proofProfile == cvLeafGrothProofProfile ||
+			context.proofProfile == cvLeafFullCompactProofProfile ||
+			context.proofProfile == cvLeafFullFieldProofProfile,
 	}
-	if leaf.hasLeafNIZK {
+	if context.proofProfile == cvLeafGrothProofProfile {
 		leaf.proof, err = cvProveLeaf(
 			leaf,
 			scalarEvaluations,
@@ -808,6 +815,32 @@ func cvReferenceDeal(
 			scalarCoins[0],
 			blindingCoins[0],
 		)
+		if err != nil {
+			return nil, err
+		}
+	} else if context.proofProfile == cvLeafFullCompactProofProfile {
+		indices := make([]int, len(receivers))
+		for i := range indices {
+			indices[i] = i + 1
+		}
+		leaf.compactProof, err = apvssProveCompactFallback(leaf, &apvssDealerWitness{
+			scalars:       scalarEvaluations,
+			blindings:     blindingEvaluations,
+			scalarCoins:   scalarCoins,
+			blindingCoins: blindingCoins,
+		}, indices)
+		if err != nil {
+			return nil, err
+		}
+	} else if context.proofProfile == cvLeafFullFieldProofProfile {
+		indices := make([]int, len(receivers))
+		for i := range indices {
+			indices[i] = i + 1
+		}
+		leaf.compactProof, err = apvssProveCompactFieldCongruent(leaf, &apvssDealerWitness{
+			scalars: scalarEvaluations, blindings: blindingEvaluations,
+			scalarCoins: scalarCoins, blindingCoins: blindingCoins,
+		}, indices)
 		if err != nil {
 			return nil, err
 		}
@@ -886,16 +919,40 @@ func cvLeafCanonicalBytes(leaf *cvLeaf) ([]byte, error) {
 	_, _ = wire.Write(statement)
 	switch leaf.context.proofProfile {
 	case cvLeafStructuralProofProfile:
-		if leaf.hasLeafNIZK || leaf.proof != nil {
+		if leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof != nil {
 			return nil, fmt.Errorf("invalid CV-sAPVSS structural Leaf capability")
 		}
 		_ = wire.WriteByte(0)
 	case cvLeafGrothProofProfile:
-		if !leaf.hasLeafNIZK || leaf.proof == nil {
+		if !leaf.hasLeafNIZK || leaf.proof == nil || leaf.compactProof != nil {
 			return nil, fmt.Errorf("missing CV-sAPVSS Leaf proof")
 		}
 		_ = wire.WriteByte(1)
 		proofWire, err := cvLeafProofCanonicalBytes(leaf.proof)
+		if err != nil {
+			return nil, err
+		}
+		if err := cvWriteBytes(&wire, proofWire); err != nil {
+			return nil, err
+		}
+	case cvLeafFullCompactProofProfile:
+		if !leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof == nil {
+			return nil, fmt.Errorf("missing CV-sAPVSS full compact proof")
+		}
+		_ = wire.WriteByte(2)
+		proofWire, err := apvssCompactFallbackProofCanonicalBytes(leaf, leaf.compactProof)
+		if err != nil {
+			return nil, err
+		}
+		if err := cvWriteBytes(&wire, proofWire); err != nil {
+			return nil, err
+		}
+	case cvLeafFullFieldProofProfile:
+		if !leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof == nil {
+			return nil, fmt.Errorf("missing CV-sAPVSS field-congruent proof")
+		}
+		_ = wire.WriteByte(3)
+		proofWire, err := apvssCompactFieldProofCanonicalBytes(leaf, leaf.compactProof)
 		if err != nil {
 			return nil, err
 		}
@@ -1004,12 +1061,20 @@ func cvVerifyLeafCanonical(
 	}
 	switch expectedContext.proofProfile {
 	case cvLeafStructuralProofProfile:
-		if leaf.hasLeafNIZK || leaf.proof != nil {
+		if leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof != nil {
 			return fmt.Errorf("invalid CV-sAPVSS structural Leaf capability")
 		}
 	case cvLeafGrothProofProfile:
-		if !leaf.hasLeafNIZK || leaf.proof == nil {
+		if !leaf.hasLeafNIZK || leaf.proof == nil || leaf.compactProof != nil {
 			return fmt.Errorf("missing CV-sAPVSS Leaf proof")
+		}
+	case cvLeafFullCompactProofProfile:
+		if !leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof == nil {
+			return fmt.Errorf("missing CV-sAPVSS full compact proof")
+		}
+	case cvLeafFullFieldProofProfile:
+		if !leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof == nil || leaf.compactProof.comparator != nil {
+			return fmt.Errorf("missing CV-sAPVSS field-congruent proof")
 		}
 	default:
 		return fmt.Errorf("unsupported CV-sAPVSS Leaf proof profile")
@@ -1050,6 +1115,14 @@ func cvVerifyLeafCanonical(
 	if expectedContext.proofProfile == cvLeafGrothProofProfile {
 		if err := cvVerifyLeafProof(leaf); err != nil {
 			return err
+		}
+	} else if expectedContext.proofProfile == cvLeafFullCompactProofProfile {
+		if err := apvssVerifyCompactFallback(leaf, leaf.compactProof); err != nil {
+			return fmt.Errorf("invalid CV-sAPVSS full compact proof: %w", err)
+		}
+	} else if expectedContext.proofProfile == cvLeafFullFieldProofProfile {
+		if err := apvssVerifyCompactFieldCongruent(leaf, leaf.compactProof); err != nil {
+			return fmt.Errorf("invalid CV-sAPVSS field-congruent proof: %w", err)
 		}
 	}
 	if cvPerfCountersEnabled {

@@ -154,10 +154,15 @@ type APDBDispersalResult struct {
 }
 
 type RecoverShard struct {
-	Dealer int    `json:"dealer"`
-	Index  int    `json:"index"`
-	Root   []byte `json:"root"`
-	Data   []byte `json:"data"`
+	Dealer      int      `json:"dealer"`
+	Index       int      `json:"index"`
+	Root        []byte   `json:"root"`
+	ValueDigest []byte   `json:"value_digest"`
+	MerkleRoot  []byte   `json:"merkle_root"`
+	DataShards  int      `json:"data_shards"`
+	TotalShards int      `json:"total_shards"`
+	Data        []byte   `json:"data"`
+	Proof       [][]byte `json:"proof"`
 }
 
 type RecoverAttestation struct {

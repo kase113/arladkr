@@ -74,7 +74,7 @@ func apvssValidateCompactLinkShape(
 	proof *apvssCompactLinkProof,
 ) error {
 	if leaf == nil || proof == nil || len(proof.lanes) == 0 ||
-		len(proof.lanes) > leaf.context.sharingDegree {
+		len(proof.lanes) > apvssCompactLaneLimit(leaf) {
 		return fmt.Errorf("invalid APVSS compact-link proof shape")
 	}
 	_, _, chunks, err := cvProfile(leaf.context.profile)
@@ -88,6 +88,17 @@ func apvssValidateCompactLinkShape(
 			lane.receiverIndex > len(leaf.receivers) || len(lane.digits) != chunks {
 			return fmt.Errorf("invalid APVSS compact-link lane shape %d", laneIndex)
 		}
+		previous = lane.receiverIndex
+	}
+	return nil
+}
+
+func apvssValidateCompactLinkPoints(proof *apvssCompactLinkProof) error {
+	if proof == nil {
+		return fmt.Errorf("invalid APVSS compact-link proof")
+	}
+	for laneIndex := range proof.lanes {
+		lane := &proof.lanes[laneIndex]
 		for digitIndex := range lane.digits {
 			digit := &lane.digits[digitIndex]
 			for _, point := range []*bls12381.G1Affine{
@@ -110,7 +121,6 @@ func apvssValidateCompactLinkShape(
 				return fmt.Errorf("invalid APVSS compact-link lane point %d", laneIndex)
 			}
 		}
-		previous = lane.receiverIndex
 	}
 	return nil
 }
@@ -119,16 +129,25 @@ func apvssCompactLinkFirstMoveBytes(
 	leaf *cvLeaf,
 	proof *apvssCompactLinkProof,
 ) ([]byte, error) {
-	if err := apvssValidateCompactLinkShape(leaf, proof); err != nil {
-		return nil, err
-	}
-	statementDigest, err := apvssFallbackSetStatementDigest(
-		leaf,
-		apvssCompactLinkReceiverIndices(proof),
-		apvssFallbackCompactBatchProfile,
+	statementDigest, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(proof),
 	)
 	if err != nil {
 		return nil, err
+	}
+	return apvssCompactLinkFirstMoveBytesWithStatement(leaf, proof, statementDigest)
+}
+
+func apvssCompactLinkFirstMoveBytesWithStatement(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
+	statementDigest []byte,
+) ([]byte, error) {
+	if err := apvssValidateCompactLinkShape(leaf, proof); err != nil {
+		return nil, err
+	}
+	if len(statementDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS compact-link statement digest")
 	}
 	var wire bytes.Buffer
 	if err := cvWriteBytes(&wire, []byte(apvssCompactLinkProofDomain)); err != nil {
@@ -170,7 +189,21 @@ func apvssCompactLinkChallenge(
 	leaf *cvLeaf,
 	proof *apvssCompactLinkProof,
 ) (fr.Element, error) {
-	firstMove, err := apvssCompactLinkFirstMoveBytes(leaf, proof)
+	statementDigest, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(proof),
+	)
+	if err != nil {
+		return fr.Element{}, err
+	}
+	return apvssCompactLinkChallengeWithStatement(leaf, proof, statementDigest)
+}
+
+func apvssCompactLinkChallengeWithStatement(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
+	statementDigest []byte,
+) (fr.Element, error) {
+	firstMove, err := apvssCompactLinkFirstMoveBytesWithStatement(leaf, proof, statementDigest)
 	if err != nil {
 		return fr.Element{}, err
 	}
@@ -222,11 +255,7 @@ func apvssProveCompactLinkWithOpenings(
 		len(witness.blindingCoins) != len(leaf.receivers) {
 		return nil, fmt.Errorf("invalid APVSS compact-link witness shape")
 	}
-	if _, err := apvssFallbackSetStatementDigest(
-		leaf,
-		receiverIndices,
-		apvssFallbackCompactBatchProfile,
-	); err != nil {
+	if _, err := apvssCompactSetStatementDigest(leaf, receiverIndices); err != nil {
 		return nil, err
 	}
 	base, _, chunks, err := cvProfile(leaf.context.profile)
@@ -378,10 +407,27 @@ func apvssProveCompactLinkWithOpenings(
 }
 
 func apvssVerifyCompactLink(leaf *cvLeaf, proof *apvssCompactLinkProof) error {
+	statementDigest, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(proof),
+	)
+	if err != nil {
+		return err
+	}
+	return apvssVerifyCompactLinkWithStatement(leaf, proof, statementDigest)
+}
+
+func apvssVerifyCompactLinkWithStatement(
+	leaf *cvLeaf,
+	proof *apvssCompactLinkProof,
+	statementDigest []byte,
+) error {
 	if err := apvssValidateCompactLinkShape(leaf, proof); err != nil {
 		return err
 	}
-	challenge, err := apvssCompactLinkChallenge(leaf, proof)
+	if err := apvssValidateCompactLinkPoints(proof); err != nil {
+		return err
+	}
+	challenge, err := apvssCompactLinkChallengeWithStatement(leaf, proof, statementDigest)
 	if err != nil {
 		return err
 	}
@@ -487,6 +533,14 @@ func apvssDecodeCompactLinkProof(
 	wire []byte,
 	leaf *cvLeaf,
 ) (*apvssCompactLinkProof, error) {
+	return apvssDecodeCompactLinkProofWithVerify(wire, leaf, true)
+}
+
+func apvssDecodeCompactLinkProofWithVerify(
+	wire []byte,
+	leaf *cvLeaf,
+	verify bool,
+) (*apvssCompactLinkProof, error) {
 	if leaf == nil || len(wire) == 0 || len(wire) > cvMaxLeafWireBytes {
 		return nil, fmt.Errorf("invalid APVSS compact-link wire")
 	}
@@ -504,7 +558,7 @@ func apvssDecodeCompactLinkProof(
 		return nil, fmt.Errorf("invalid APVSS compact-link statement digest")
 	}
 	laneCount, err := r.uint32()
-	if err != nil || laneCount <= 0 || laneCount > leaf.context.sharingDegree {
+	if err != nil || laneCount <= 0 || laneCount > apvssCompactLaneLimit(leaf) {
 		return nil, fmt.Errorf("invalid APVSS compact-link lane count")
 	}
 	proof := &apvssCompactLinkProof{lanes: make([]apvssCompactLinkLaneProof, laneCount)}
@@ -562,10 +616,8 @@ func apvssDecodeCompactLinkProof(
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing APVSS compact-link bytes")
 	}
-	expectedStatement, err := apvssFallbackSetStatementDigest(
-		leaf,
-		apvssCompactLinkReceiverIndices(proof),
-		apvssFallbackCompactBatchProfile,
+	expectedStatement, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(proof),
 	)
 	if err != nil || !bytes.Equal(statementDigest, expectedStatement) {
 		return nil, fmt.Errorf("APVSS compact-link statement mismatch")
@@ -574,8 +626,10 @@ func apvssDecodeCompactLinkProof(
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical APVSS compact-link proof")
 	}
-	if err := apvssVerifyCompactLink(leaf, proof); err != nil {
-		return nil, err
+	if verify {
+		if err := apvssVerifyCompactLink(leaf, proof); err != nil {
+			return nil, err
+		}
 	}
 	return proof, nil
 }

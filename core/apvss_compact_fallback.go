@@ -14,6 +14,7 @@ const (
 	apvssCompactComparatorStatementDomain = "ARL-APVSS/canonical-comparator/statement"
 	apvssCompactComparatorWeightDomain    = "ARL-APVSS/canonical-comparator/weight"
 	apvssCompactComparatorChallengeDomain = "ARL-APVSS/canonical-comparator/challenge"
+	apvssCompactFieldStatementDomain      = "ARL-APVSS/field-congruent/statement"
 )
 
 type apvssCompactComparatorProof struct {
@@ -114,13 +115,22 @@ func apvssCompactComparatorStatement(
 	if leaf == nil || link == nil || proof == nil {
 		return nil, fmt.Errorf("invalid APVSS comparator statement")
 	}
-	fallbackDigest, err := apvssFallbackSetStatementDigest(
-		leaf,
-		apvssCompactLinkReceiverIndices(link),
-		apvssFallbackCompactBatchProfile,
+	fallbackDigest, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(link),
 	)
 	if err != nil {
 		return nil, err
+	}
+	return apvssCompactComparatorStatementWithSetDigest(link, proof, fallbackDigest)
+}
+
+func apvssCompactComparatorStatementWithSetDigest(
+	link *apvssCompactLinkProof,
+	proof *apvssCompactComparatorProof,
+	fallbackDigest []byte,
+) ([]byte, error) {
+	if link == nil || proof == nil || len(fallbackDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS comparator statement digest")
 	}
 	var wire bytes.Buffer
 	if err := cvWriteBytes(&wire, []byte(apvssCompactComparatorStatementDomain)); err != nil {
@@ -350,8 +360,22 @@ func apvssVerifyCompactComparator(
 	link *apvssCompactLinkProof,
 	proof *apvssCompactComparatorProof,
 ) error {
-	if leaf == nil || link == nil || proof == nil || !cvValidG1(&proof.tRelation, true) {
-		return fmt.Errorf("invalid APVSS compact comparator proof")
+	statement, err := apvssCompactComparatorStatement(leaf, link, proof)
+	if err != nil {
+		return err
+	}
+	return apvssVerifyCompactComparatorWithStatement(leaf, link, proof, statement)
+}
+
+func apvssVerifyCompactComparatorWithStatement(
+	leaf *cvLeaf,
+	link *apvssCompactLinkProof,
+	proof *apvssCompactComparatorProof,
+	statement []byte,
+) error {
+	if leaf == nil || link == nil || proof == nil || len(statement) != 32 ||
+		!cvValidG1(&proof.tRelation, true) {
+		return fmt.Errorf("invalid APVSS compact comparator proof or statement")
 	}
 	_, _, chunks, err := cvProfile(leaf.context.profile)
 	if err != nil {
@@ -360,10 +384,6 @@ func apvssVerifyCompactComparator(
 	if len(proof.complementCommitments) != len(link.lanes)*chunks ||
 		len(proof.borrowCommitments) != len(link.lanes)*(chunks-1) {
 		return fmt.Errorf("invalid APVSS compact comparator shape")
-	}
-	statement, err := apvssCompactComparatorStatement(leaf, link, proof)
-	if err != nil {
-		return err
 	}
 	if err := apvssVerifyCompactRange(
 		apvssCompactSubproofStatement(statement, "complement-range"),
@@ -452,10 +472,18 @@ func apvssVerifyCompactFallback(leaf *cvLeaf, proof *apvssCompactFallbackProof) 
 	if leaf == nil || proof == nil || proof.link == nil || proof.comparator == nil {
 		return fmt.Errorf("invalid APVSS compact fallback proof")
 	}
-	if err := apvssVerifyCompactLink(leaf, proof.link); err != nil {
+	setDigest, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(proof.link),
+	)
+	if err != nil {
 		return err
 	}
-	statement, err := apvssCompactComparatorStatement(leaf, proof.link, proof.comparator)
+	if err := apvssVerifyCompactLinkWithStatement(leaf, proof.link, setDigest); err != nil {
+		return err
+	}
+	statement, err := apvssCompactComparatorStatementWithSetDigest(
+		proof.link, proof.comparator, setDigest,
+	)
 	if err != nil {
 		return err
 	}
@@ -467,7 +495,164 @@ func apvssVerifyCompactFallback(leaf *cvLeaf, proof *apvssCompactFallbackProof) 
 	); err != nil {
 		return fmt.Errorf("invalid APVSS scalar digit range: %w", err)
 	}
-	return apvssVerifyCompactComparator(leaf, proof.link, proof.comparator)
+	return apvssVerifyCompactComparatorWithStatement(
+		leaf, proof.link, proof.comparator, statement,
+	)
+}
+
+func apvssCompactFieldStatement(
+	link *apvssCompactLinkProof,
+	setDigest []byte,
+) ([]byte, error) {
+	if link == nil || len(setDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS field-congruent statement")
+	}
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, []byte(apvssCompactFieldStatementDomain)); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, setDigest); err != nil {
+		return nil, err
+	}
+	if err := cvWritePointVector(&wire, apvssCompactLinkCommitments(link)); err != nil {
+		return nil, err
+	}
+	return hashBytes([]byte(apvssCompactFieldStatementDomain), wire.Bytes()), nil
+}
+
+// apvssProveCompactFieldCongruent proves bounded radix digits and their joint
+// ciphertext/Pedersen link. Unlike the canonical compact profile it does not
+// prove that the reconstructed 256-bit integer is below q; the public relation
+// binds the represented scalar modulo the BLS12-381 scalar field.
+func apvssProveCompactFieldCongruent(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
+	receiverIndices []int,
+) (*apvssCompactFallbackProof, error) {
+	var digitValues []uint64
+	var digitBlindings []fr.Element
+	link, err := apvssProveCompactLinkWithOpenings(
+		leaf, witness, receiverIndices, &digitValues, &digitBlindings,
+	)
+	if err != nil {
+		return nil, err
+	}
+	setDigest, err := apvssCompactSetStatementDigest(leaf, receiverIndices)
+	if err != nil {
+		return nil, err
+	}
+	statement, err := apvssCompactFieldStatement(link, setDigest)
+	if err != nil {
+		return nil, err
+	}
+	proof := &apvssCompactFallbackProof{link: link}
+	proof.digitRange, err = apvssProveCompactRange(
+		apvssCompactSubproofStatement(statement, "scalar-digit-range"),
+		apvssCompactLinkCommitments(link), digitValues, digitBlindings, 8,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return proof, nil
+}
+
+func apvssVerifyCompactFieldCongruent(leaf *cvLeaf, proof *apvssCompactFallbackProof) error {
+	if leaf == nil || leaf.context.proofProfile != cvLeafFullFieldProofProfile ||
+		proof == nil || proof.link == nil || proof.digitRange == nil || proof.comparator != nil {
+		return fmt.Errorf("invalid APVSS field-congruent proof")
+	}
+	setDigest, err := apvssCompactSetStatementDigest(
+		leaf, apvssCompactLinkReceiverIndices(proof.link),
+	)
+	if err != nil {
+		return err
+	}
+	if err := apvssVerifyCompactLinkWithStatement(leaf, proof.link, setDigest); err != nil {
+		return err
+	}
+	statement, err := apvssCompactFieldStatement(proof.link, setDigest)
+	if err != nil {
+		return err
+	}
+	if err := apvssVerifyCompactRange(
+		apvssCompactSubproofStatement(statement, "scalar-digit-range"),
+		apvssCompactLinkCommitments(proof.link), proof.digitRange, 8,
+	); err != nil {
+		return fmt.Errorf("invalid APVSS field-congruent digit range: %w", err)
+	}
+	return nil
+}
+
+func apvssCompactFieldProofCanonicalBytes(
+	leaf *cvLeaf,
+	proof *apvssCompactFallbackProof,
+) ([]byte, error) {
+	if leaf == nil || leaf.context.proofProfile != cvLeafFullFieldProofProfile ||
+		proof == nil || proof.link == nil || proof.digitRange == nil || proof.comparator != nil {
+		return nil, fmt.Errorf("invalid APVSS field-congruent proof")
+	}
+	linkWire, err := apvssCompactLinkProofCanonicalBytes(leaf, proof.link)
+	if err != nil {
+		return nil, err
+	}
+	rangeWire, err := apvssCompactRangeProofCanonicalBytes(proof.digitRange)
+	if err != nil {
+		return nil, err
+	}
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, linkWire); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, rangeWire); err != nil {
+		return nil, err
+	}
+	return wire.Bytes(), nil
+}
+
+func apvssDecodeCompactFieldProofWithVerify(
+	wire []byte,
+	leaf *cvLeaf,
+	verify bool,
+) (*apvssCompactFallbackProof, error) {
+	if leaf == nil || leaf.context.proofProfile != cvLeafFullFieldProofProfile ||
+		len(wire) == 0 || len(wire) > cvMaxLeafProofWireBytes {
+		return nil, fmt.Errorf("invalid APVSS field-congruent proof wire")
+	}
+	r := newCVWireReader(wire)
+	linkWire, err := r.bytes(cvMaxLeafProofWireBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decode APVSS field-congruent link: %w", err)
+	}
+	link, err := apvssDecodeCompactLinkProofWithVerify(linkWire, leaf, false)
+	if err != nil {
+		return nil, err
+	}
+	rangeWire, err := r.bytes(cvMaxLeafProofWireBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decode APVSS field-congruent range: %w", err)
+	}
+	if r.reader.Len() != 0 {
+		return nil, fmt.Errorf("trailing APVSS field-congruent proof bytes")
+	}
+	_, _, chunks, err := cvProfile(leaf.context.profile)
+	if err != nil {
+		return nil, err
+	}
+	digitRange, err := apvssDecodeCompactRangeProof(rangeWire, len(link.lanes)*chunks, 8)
+	if err != nil {
+		return nil, err
+	}
+	proof := &apvssCompactFallbackProof{link: link, digitRange: digitRange}
+	canonical, err := apvssCompactFieldProofCanonicalBytes(leaf, proof)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical APVSS field-congruent proof")
+	}
+	if verify {
+		if err := apvssVerifyCompactFieldCongruent(leaf, proof); err != nil {
+			return nil, err
+		}
+	}
+	return proof, nil
 }
 
 func apvssCompactFallbackProofCanonicalBytes(
@@ -530,7 +715,10 @@ func apvssDecodeCompactFallbackProofWithVerify(
 	if err != nil {
 		return nil, fmt.Errorf("decode APVSS compact fallback link: %w", err)
 	}
-	link, err := apvssDecodeCompactLinkProof(linkWire, leaf)
+	// The outer fallback verifier checks the link together with the range and
+	// comparator equations. Avoid verifying the same link once during decode
+	// and again in apvssVerifyCompactFallback.
+	link, err := apvssDecodeCompactLinkProofWithVerify(linkWire, leaf, false)
 	if err != nil {
 		return nil, err
 	}

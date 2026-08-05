@@ -119,6 +119,19 @@ func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLea
 	policy := append([]byte("ARL-CV-sAPVSS/first-f-plus-one|registry="), material.registryDigest...)
 	policy = append(policy, encodeInts(sortedUnique(c.OldCommittee))...)
 	policy = append(policy, byte(c.Kappa>>24), byte(c.Kappa>>16), byte(c.Kappa>>8), byte(c.Kappa))
+	proofProfile := cvLeafStructuralProofProfile
+	if c.APVSSMode == APVSSModeFullPublicVE {
+		switch c.APVSSFullProofProfile {
+		case APVSSFullProofExact:
+			proofProfile = cvLeafGrothProofProfile
+		case APVSSFullProofCompactBatch:
+			proofProfile = cvLeafFullCompactProofProfile
+		case APVSSFullProofFieldCongruent:
+			proofProfile = cvLeafFullFieldProofProfile
+		default:
+			return cvLeafContext{}, fmt.Errorf("unsupported full-public-ve proof profile %q", c.APVSSFullProofProfile)
+		}
+	}
 	context := cvLeafContext{
 		sessionID:           []byte(c.SID),
 		epoch:               uint64(c.Epoch),
@@ -127,7 +140,7 @@ func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLea
 		profile:             cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
 		receiverPublicKeys:  append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
 		dealerSetPolicy:     policy,
-		proofProfile:        cvLeafStructuralProofProfile,
+		proofProfile:        proofProfile,
 	}
 	if err := cvValidateLeafContext(&context); err != nil {
 		return cvLeafContext{}, err
@@ -162,21 +175,39 @@ func cvRandomDealerLeafWithWitness(
 	if err != nil {
 		return nil, nil, err
 	}
-	commonCoins := make([]fr.Element, chunks)
-	for i := range commonCoins {
-		if _, err := commonCoins[i].SetRandom(); err != nil {
-			return nil, nil, fmt.Errorf("sample CV-sAPVSS chunk coin: %w", err)
-		}
-	}
-	var commonBlindingCoin fr.Element
-	if _, err := commonBlindingCoin.SetRandom(); err != nil {
-		return nil, nil, fmt.Errorf("sample CV-sAPVSS blinding coin: %w", err)
-	}
 	scalarCoins := make([][]fr.Element, len(context.receiverPublicKeys))
 	blindingCoins := make([]fr.Element, len(context.receiverPublicKeys))
-	for i := range scalarCoins {
-		scalarCoins[i] = append([]fr.Element(nil), commonCoins...)
-		blindingCoins[i] = commonBlindingCoin
+	if context.proofProfile == cvLeafGrothProofProfile {
+		// The current full-proof prototype proves one shared-randomness relation.
+		// It remains behind the backend gate until the cited multi-receiver
+		// security theorem is matched to this exact statement.
+		commonCoins := make([]fr.Element, chunks)
+		for i := range commonCoins {
+			if _, err := commonCoins[i].SetRandom(); err != nil {
+				return nil, nil, fmt.Errorf("sample CV-sAPVSS chunk coin: %w", err)
+			}
+		}
+		var commonBlindingCoin fr.Element
+		if _, err := commonBlindingCoin.SetRandom(); err != nil {
+			return nil, nil, fmt.Errorf("sample CV-sAPVSS blinding coin: %w", err)
+		}
+		for i := range scalarCoins {
+			scalarCoins[i] = append([]fr.Element(nil), commonCoins...)
+			blindingCoins[i] = commonBlindingCoin
+		}
+	} else {
+		// ACK/fallback proofs are lane-local and do not need correlated coins.
+		for receiver := range scalarCoins {
+			scalarCoins[receiver] = make([]fr.Element, chunks)
+			for chunk := range scalarCoins[receiver] {
+				if _, err := scalarCoins[receiver][chunk].SetRandom(); err != nil {
+					return nil, nil, fmt.Errorf("sample CV-sAPVSS receiver chunk coin: %w", err)
+				}
+			}
+			if _, err := blindingCoins[receiver].SetRandom(); err != nil {
+				return nil, nil, fmt.Errorf("sample CV-sAPVSS receiver blinding coin: %w", err)
+			}
+		}
 	}
 	leaf, err := cvReferenceDeal(
 		context, uint64(dealer), scalarCoefficients, blindingCoefficients, scalarCoins, blindingCoins,
@@ -291,23 +322,48 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	prototype, err := service.CollectAPVSSLaneACKs(ctx, leaf, witness)
-	if err != nil {
-		return nil, err
-	}
-	proofBytes, err := apvssProofMaterialBytes(prototype)
-	if err != nil {
-		return nil, err
-	}
-	prototypeWire, err := apvssLeafPrototypeCanonicalBytes(prototype)
-	if err != nil {
-		return nil, err
+	proofBytes := 0
+	leafWireBytes := 0
+	ackCount := 0
+	fallbackCount := 0
+	var prototype *apvssLeafPrototype
+	if cfg.APVSSMode == APVSSModeFullPublicVE {
+		proofWire, proofErr := cvFullPublicProofCanonicalBytes(leaf)
+		if proofErr != nil {
+			return nil, proofErr
+		}
+		leafWire, wireErr := cvLeafCanonicalBytes(leaf)
+		if wireErr != nil {
+			return nil, wireErr
+		}
+		proofBytes = len(proofWire)
+		leafWireBytes = len(leafWire)
+	} else {
+		prototype, err = service.CollectAPVSSLaneACKs(ctx, leaf, witness)
+		if err != nil {
+			return nil, err
+		}
+		proofBytes, err = apvssProofMaterialBytes(prototype)
+		if err != nil {
+			return nil, err
+		}
+		prototypeWire, wireErr := apvssLeafPrototypeCanonicalBytes(prototype)
+		if wireErr != nil {
+			return nil, wireErr
+		}
+		leafWireBytes = len(prototypeWire)
+		ackCount = len(prototype.acks)
+		fallbackCount = apvssPrototypeFallbackCount(prototype)
 	}
 	leafBuildLatency := time.Since(leafBuildStart)
 	traceCVEpochPhase(cfg, localNode, "leaf_built")
 	cfg.runtime.setCommPhase("component_disperse")
 	phaseStart := time.Now()
-	_, err = service.DisperseAPVSS(ctx, prototype)
+	if cfg.APVSSMode == APVSSModeFullPublicVE {
+		_, err = service.Disperse(ctx, leaf)
+	} else {
+		_, err = service.DisperseAPVSS(ctx, prototype)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +431,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	dealers := append([]int(nil), decidedRLO.Header.Dealers...)
 	totalLatency := time.Since(start)
 	return &EpochResult{
-		AgreementMode: "cv-single-mvba-aggrlo", AblationMode: cfg.AblationMode,
+		AgreementMode: "cv-single-mvba-aggrlo", AblationMode: cfg.AblationMode, CVAPVSSMode: cfg.APVSSMode,
 		LockedSet: dealers, SampledSet: append([]int(nil), dealers...), AggRLODealers: append([]int(nil), dealers...),
 		RecoveredAggregate: recoveredWire, AggRLODigest: append([]byte(nil), decidedRLO.Digest...),
 		AggRLOReadyLatency: componentLatency + commonLatency + aggregateLatency,
@@ -393,8 +449,8 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVComponentDisperseLatency: componentLatency, CVCommonCandidateLatency: commonLatency,
 		CVAggregateDisperseLatency: aggregateLatency, CVAggregateAgreementLatency: aggregateAgreementLatency,
 		CVRecoverShardLatency: recoverLatency, CVReceiptLatency: receiptLatency,
-		CVAPVSSACKCount: len(prototype.acks), CVAPVSSFallbackCount: apvssPrototypeFallbackCount(prototype),
-		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: len(prototypeWire),
+		CVAPVSSACKCount: ackCount, CVAPVSSFallbackCount: fallbackCount,
+		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: leafWireBytes,
 		CVAggregateGateWaitLatency:    materialized.metrics.gateWait,
 		CVAggregateLeafLoadLatency:    materialized.metrics.leafLoad,
 		CVAggregateBuildLatency:       materialized.metrics.aggregate,
@@ -405,4 +461,20 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVAggregateCertificateLatency: materialized.metrics.certificate,
 		PerNode:                       []NodeOutput{{NodeID: localNode, DecidedSet: append([]int(nil), dealers...), Latency: totalLatency}},
 	}, nil
+}
+
+func cvFullPublicProofCanonicalBytes(leaf *cvLeaf) ([]byte, error) {
+	if leaf == nil {
+		return nil, fmt.Errorf("nil CV-sAPVSS full-public leaf")
+	}
+	switch leaf.context.proofProfile {
+	case cvLeafGrothProofProfile:
+		return cvLeafProofCanonicalBytes(leaf.proof)
+	case cvLeafFullCompactProofProfile:
+		return apvssCompactFallbackProofCanonicalBytes(leaf, leaf.compactProof)
+	case cvLeafFullFieldProofProfile:
+		return apvssCompactFieldProofCanonicalBytes(leaf, leaf.compactProof)
+	default:
+		return nil, fmt.Errorf("unsupported CV-sAPVSS full-public proof profile %q", leaf.context.proofProfile)
+	}
 }

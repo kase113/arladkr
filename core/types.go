@@ -45,6 +45,7 @@ type NodeOutput struct {
 type EpochResult struct {
 	AgreementMode string
 	AblationMode  string
+	CVAPVSSMode   string
 	LockedSet     []int
 	SampledSet    []int
 	AggRLODealers []int

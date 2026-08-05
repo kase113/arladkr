@@ -160,6 +160,14 @@ func verifyRecoverAttestation(att RecoverAttestation, shard RecoverShard, holder
 	return ed25519.Verify(holderPub, msg, att.Signature)
 }
 
+func cloneByteSlices(values [][]byte) [][]byte {
+	out := make([][]byte, len(values))
+	for i := range values {
+		out[i] = append([]byte(nil), values[i]...)
+	}
+	return out
+}
+
 func hashRecoverStore(root []byte, certRoot []byte, dealer int, holder int) []byte {
 	h := sha256.New()
 	h.Write([]byte("PADKR-RECOVER-STORE"))
@@ -313,8 +321,9 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 
 	bits := cfg.PaillierBits
 	if bits <= 0 {
-		bits = 2048
+		bits = 3072
 	}
+	cfg.PaillierBits = bits
 	recipPub, recipPriv, err := loadOrComputeRecipientPaillierKeys(cfg, newC, tracef)
 	if err != nil {
 		return failWithPartial(err, "setup")
@@ -535,11 +544,33 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	tracef("phase=recast_selected ids=%v", selectedIDs)
 
 	// ============================================
-	// Phase 5: DISTRIBUTED VERIFICATION of selected transcripts
+	// Phase 5: RECAST selected PD shards to the new committee
+	// ============================================
+	aggregateStart := time.Now()
+	setCommPhase("recover")
+	tracef("phase=recover_begin")
+	recoveredTranscripts, recoverTiming, err := runRecastRecovery(ctx, cfg, old, newC, selectedIDs, transcripts, apdbCerts, dealerEDPriv, dealerEDPub, dxt)
+	if err != nil {
+		return failWithPartial(err, "recover")
+	}
+	markPhase("recover", aggregateStart)
+	phaseTimings["recover_verify"] += recoverTiming.FullVerify
+	phaseTimings["recover_ready"] += recoverTiming.ReadyWait
+	phaseTimings["recover_completion"] += recoverTiming.CompletionWait
+	phaseTimings["recover_store_verify"] += recoverTiming.StoreVerify
+	phaseTimings["recover_shard_verify"] += recoverTiming.ShardVerify
+	phaseTimings["recover_store_seen"] += time.Duration(recoverTiming.StoreSeen)
+	phaseTimings["recover_fetch_req_sent"] += time.Duration(recoverTiming.FetchReqSent)
+	phaseTimings["recover_fetch_resp_recv"] += time.Duration(recoverTiming.FetchRespRecv)
+	phaseTimings["recover_recipient_seen"] += time.Duration(recoverTiming.RecipientSeen)
+	tracef("phase=recover_end ms=%.2f recovered=%d", float64(time.Since(aggregateStart).Microseconds())/1000.0, len(recoveredTranscripts))
+
+	// ============================================
+	// Phase 6: new-committee verification after RC, as in Algorithm 2
 	// ============================================
 	verifyStart := time.Now()
 	setCommPhase("partial_verify")
-	tracef("phase=verify_begin")
+	tracef("phase=verify_begin actor=new-committee")
 	verifiedSelected := make([]int, 0, len(selectedIDs))
 	partialVerifyMode := "result-multicast"
 	partialVerifyPositiveVotes := make(map[string]int)
@@ -555,61 +586,40 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		partialVerifyMode = "full-local-verify"
 		for _, dealer := range selectedIDs {
-			if dxt.VerifyTranscript(0, transcripts[dealer]) {
+			if dxt.VerifyTranscript(0, recoveredTranscripts[dealer]) {
 				verifiedSelected = append(verifiedSelected, dealer)
 			}
 		}
-		if len(verifiedSelected) != len(selectedIDs) {
-			return failWithPartial(fmt.Errorf("selected transcript verification failed: valid=%d selected=%d", len(verifiedSelected), len(selectedIDs)), "partial_verify")
-		}
 	} else {
-		verified, positiveVotes, multicastErr := runPartialVerificationMulticast(ctx, cfg, old, selectedIDs, transcripts, dxt, dealerEDPriv, dealerEDPub, tracef)
+		verified, positiveVotes, multicastErr := runPartialVerificationMulticast(
+			ctx, cfg, newC, selectedIDs, recoveredTranscripts, dxt, tracef,
+		)
 		if multicastErr != nil {
 			if cfg.StrictNetwork {
 				return failWithPartial(multicastErr, "partial_verify")
 			}
-			// Local compatibility mode retains the complete verification fallback
-			// when no usable protocol transport is configured.
 			tracef("phase=partial_verify_multicast_fallback err=%v", multicastErr)
 			partialVerifyMode = "full-local-fallback"
 			for _, dealer := range selectedIDs {
-				if dxt.VerifyTranscript(0, transcripts[dealer]) {
+				if dxt.VerifyTranscript(0, recoveredTranscripts[dealer]) {
 					verifiedSelected = append(verifiedSelected, dealer)
 				}
-			}
-			if len(verifiedSelected) != len(selectedIDs) {
-				return failWithPartial(fmt.Errorf("selected transcript verification failed: valid=%d selected=%d", len(verifiedSelected), len(selectedIDs)), "partial_verify")
 			}
 		} else {
 			verifiedSelected = verified
 			partialVerifyPositiveVotes = positiveVotes
 		}
 	}
+	if len(verifiedSelected) != len(selectedIDs) {
+		return failWithPartial(fmt.Errorf("selected transcript verification failed after RC: valid=%d selected=%d", len(verifiedSelected), len(selectedIDs)), "partial_verify")
+	}
 	markPhase("partial_verify", verifyStart)
 	tracef("phase=verify_end ms=%.2f verified=%d", float64(time.Since(verifyStart).Microseconds())/1000.0, len(verifiedSelected))
 	tracef("phase=verify_selected ids=%v", verifiedSelected)
 
 	// ============================================
-	// Phase 6: AGGREGATE & DERIVE NEW SHARES
+	// Phase 7: AGGREGATE & DERIVE NEW SHARES
 	// ============================================
-	aggregateStart := time.Now()
-	setCommPhase("recover")
-	tracef("phase=aggregate_begin")
-	recoveredTranscripts, recoverTiming, err := runRecastRecovery(ctx, cfg, old, newC, verifiedSelected, transcripts, apdbCerts, dealerEDPriv, dealerEDPub, dxt)
-	if err != nil {
-		return failWithPartial(err, "recover")
-	}
-	markPhase("recover", aggregateStart)
-	phaseTimings["recover_verify"] += recoverTiming.FullVerify
-	phaseTimings["recover_ready"] += recoverTiming.ReadyWait
-	phaseTimings["recover_completion"] += recoverTiming.CompletionWait
-	phaseTimings["recover_store_verify"] += recoverTiming.StoreVerify
-	phaseTimings["recover_shard_verify"] += recoverTiming.ShardVerify
-	phaseTimings["recover_store_seen"] += time.Duration(recoverTiming.StoreSeen)
-	phaseTimings["recover_fetch_req_sent"] += time.Duration(recoverTiming.FetchReqSent)
-	phaseTimings["recover_fetch_resp_recv"] += time.Duration(recoverTiming.FetchRespRecv)
-	phaseTimings["recover_recipient_seen"] += time.Duration(recoverTiming.RecipientSeen)
-
 	deriveStart := time.Now()
 	setCommPhase("derive")
 	aggCommit, aggCipher, err := aggregateTranscripts(recoveredTranscripts, verifiedSelected, newC, recipPub)
@@ -1036,6 +1046,26 @@ func runRecastRecovery(
 		}
 		return out, RecoverTimingBreakdown{}, nil
 	}
+	if !cfg.StrictNetwork {
+		completeRS := true
+		for _, dealer := range selectedIDs {
+			cert := apdbCerts[dealer]
+			if len(cert.ValueDigest) != sha256.Size || len(cert.MerkleRoot) != sha256.Size ||
+				cert.DataShards <= 0 || cert.TotalShards != len(old) {
+				completeRS = false
+				break
+			}
+		}
+		if !completeRS {
+			out := make(map[int]*DXTTranscript, len(selectedIDs))
+			for _, dealer := range selectedIDs {
+				if tr := transcripts[dealer]; tr != nil {
+					out[dealer] = tr
+				}
+			}
+			return out, RecoverTimingBreakdown{}, nil
+		}
+	}
 	timing := RecoverTimingBreakdown{}
 
 	timeout := 120 * time.Second
@@ -1170,7 +1200,6 @@ func runRecastRecovery(
 
 	selectedSet := make(map[int]struct{}, len(selectedIDs))
 	transcriptRoots := make(map[int][]byte, len(selectedIDs))
-	transcriptShards := make(map[int][][]byte, len(selectedIDs))
 	holderKeys := make(map[int]ed25519.PublicKey, len(old))
 	recovered := make(map[int]*DXTTranscript, len(selectedIDs))
 	var recoveredMu sync.RWMutex
@@ -1180,26 +1209,16 @@ func runRecastRecovery(
 	}
 	for _, dealer := range selectedIDs {
 		selectedSet[dealer] = struct{}{}
-		tr := transcripts[dealer]
-		if tr == nil {
-			return nil, timing, fmt.Errorf("missing transcript for dealer %d during recast", dealer)
+		cert, ok := apdbCerts[dealer]
+		if !ok || !verifyAPDBCertificate(cert, nodePub, cfg.F) ||
+			len(cert.ValueDigest) != sha256.Size || len(cert.MerkleRoot) != sha256.Size ||
+			cert.DataShards != erasureK || cert.TotalShards != len(old) {
+			return nil, timing, fmt.Errorf("selected dealer %d lacks a complete RS/Merkle APDB certificate", dealer)
 		}
-		raw, err := json.Marshal(tr)
-		if err != nil {
-			return nil, timing, err
-		}
-		root := sha256.Sum256(raw)
-		transcriptRoots[dealer] = append([]byte(nil), root[:]...)
-		shards, err := recoverEncodeValue(raw, erasureK, len(old))
-		if err != nil {
-			return nil, timing, fmt.Errorf("encode recover shards for dealer %d: %w", dealer, err)
-		}
-		transcriptShards[dealer] = shards
-		if cert, ok := apdbCerts[dealer]; ok {
-			for _, rc := range cert.Receipts {
-				if pk, ok := nodePub[rc.NodeID]; ok {
-					holderKeys[rc.NodeID] = pk
-				}
+		transcriptRoots[dealer] = append([]byte(nil), cert.Root...)
+		for _, rc := range cert.Receipts {
+			if pk, ok := nodePub[rc.NodeID]; ok {
+				holderKeys[rc.NodeID] = pk
 			}
 		}
 	}
@@ -1370,24 +1389,26 @@ func runRecastRecovery(
 					respDealers := make([]int, 0, len(dealers))
 					for _, dealer := range dealers {
 						tracef("phase=recover_fetch_req_recv holder=%d dealer=%d recipient=%d", localID, dealer, wire.Recipient)
-						shards := transcriptShards[dealer]
-						if len(shards) == 0 {
+						cert, ok := apdbCerts[dealer]
+						if !ok {
 							continue
 						}
-						holderIdx := sort.SearchInts(old, localID)
-						if holderIdx >= len(old) || old[holderIdx] != localID || holderIdx >= len(shards) {
+						stored, loadErr := loadNetworkAPDBShard(cfg, old, localID, cert)
+						if loadErr != nil {
+							tracef("phase=recover_load_pd_shard_fail holder=%d dealer=%d err=%v", localID, dealer, loadErr)
 							continue
 						}
 						respDealers = append(respDealers, dealer)
 						shard := RecoverShard{
-							Dealer: dealer,
-							Index:  holderIdx,
-							Root:   append([]byte(nil), transcriptRoots[dealer]...),
-							Data:   append([]byte(nil), shards[holderIdx]...),
+							Dealer: dealer, Index: stored.ShardIndex,
+							Root: append([]byte(nil), stored.Root...), ValueDigest: append([]byte(nil), stored.ValueDigest...),
+							MerkleRoot: append([]byte(nil), stored.MerkleRoot...), DataShards: stored.DataShards,
+							TotalShards: stored.TotalShards, Data: append([]byte(nil), stored.Shard...),
+							Proof: cloneByteSlices(stored.Proof),
 						}
 						respShards[dealer] = shard
 						shardHash := sha256.Sum256(shard.Data)
-						msg := hashRecoverShard(shard.Root, dealer, localID, wire.Recipient, holderIdx, shard.Data)
+						msg := hashRecoverShard(shard.Root, dealer, localID, wire.Recipient, shard.Index, shard.Data)
 						sk, ok := nodePriv[localID]
 						if !ok || len(sk) != ed25519.PrivateKeySize {
 							continue
@@ -1396,7 +1417,7 @@ func runRecastRecovery(
 							Dealer:    dealer,
 							Holder:    localID,
 							Recipient: wire.Recipient,
-							Index:     holderIdx,
+							Index:     shard.Index,
 							Root:      append([]byte(nil), shard.Root...),
 							ShardHash: append([]byte(nil), shardHash[:]...),
 							Signature: append([]byte(nil), ed25519.Sign(sk, msg)...),
@@ -1489,30 +1510,21 @@ func runRecastRecovery(
 	if requiredRecipients <= 0 {
 		requiredRecipients = 1
 	}
-	directCarrierCount := erasureK + min(cfg.F, max(1, cfg.F/4))
-	if directCarrierCount < erasureK {
-		directCarrierCount = erasureK
-	}
-	if directCarrierCount > len(old) {
-		directCarrierCount = len(old)
-	}
-	if raw := strings.TrimSpace(os.Getenv("PRACTICAL_RECOVER_DIRECT_TR_CARRIERS")); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-			directCarrierCount = v
-			if directCarrierCount > len(old) {
-				directCarrierCount = len(old)
-			}
-		}
-	}
-	activeStoreHolderCount := max(requiredHolders, directCarrierCount)
+	// PD certifies an arbitrary n-f subset of holders. Activating another
+	// arbitrary n-f subset guarantees an intersection of at least n-2f
+	// persisted shards, which is exactly the RS reconstruction threshold.
+	// Activating only n-2f holders is insufficient: the two subsets may
+	// intersect below the decoding threshold even with no Byzantine faults.
+	activeStoreHolderCount := len(old) - cfg.F
 	if activeStoreHolderCount > len(old) {
 		activeStoreHolderCount = len(old)
 	}
 	if raw := strings.TrimSpace(os.Getenv("PRACTICAL_RECOVER_STORE_HOLDERS")); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
 			activeStoreHolderCount = v
-			if activeStoreHolderCount < requiredHolders {
-				activeStoreHolderCount = requiredHolders
+			minimumSafeFanout := len(old) - cfg.F
+			if activeStoreHolderCount < minimumSafeFanout {
+				activeStoreHolderCount = minimumSafeFanout
 			}
 			if activeStoreHolderCount > len(old) {
 				activeStoreHolderCount = len(old)
@@ -1709,31 +1721,32 @@ func runRecastRecovery(
 			roots := make(map[int][]byte, len(selectedIDs))
 			certs := make(map[int]APDBCertificate, len(selectedIDs))
 			stores := make(map[int]RecoverStoreAttestation, len(selectedIDs))
-			trs := make(map[int]*DXTTranscript)
+			availableDealers := make([]int, 0, len(selectedIDs))
 			sk, ok := nodePriv[holder]
 			if !ok || len(sk) != ed25519.PrivateKeySize {
 				return nil, timing, fmt.Errorf("recast local holder %d signing key unavailable", holder)
 			}
-			directTR := holderPos < directCarrierCount
 			for _, dealer := range selectedIDs {
+				cert, ok := apdbCerts[dealer]
+				if !ok {
+					continue
+				}
+				if _, loadErr := loadNetworkAPDBShard(cfg, old, holder, cert); loadErr != nil {
+					tracef("phase=recover_store_skip_missing_pd_shard holder=%d dealer=%d err=%v", holder, dealer, loadErr)
+					continue
+				}
+				availableDealers = append(availableDealers, dealer)
 				roots[dealer] = append([]byte(nil), transcriptRoots[dealer]...)
-				if cert, ok := apdbCerts[dealer]; ok {
-					certs[dealer] = cert
-					certRoot := cert.Root
-					msg := hashRecoverStore(transcriptRoots[dealer], certRoot, dealer, holder)
-					stores[dealer] = RecoverStoreAttestation{
-						Dealer:    dealer,
-						Holder:    holder,
-						Root:      append([]byte(nil), transcriptRoots[dealer]...),
-						CertRoot:  append([]byte(nil), certRoot...),
-						Signature: append([]byte(nil), ed25519.Sign(sk, msg)...),
-					}
+				certs[dealer] = cert
+				msg := hashRecoverStore(transcriptRoots[dealer], cert.Root, dealer, holder)
+				stores[dealer] = RecoverStoreAttestation{
+					Dealer: dealer, Holder: holder,
+					Root: append([]byte(nil), transcriptRoots[dealer]...), CertRoot: append([]byte(nil), cert.Root...),
+					Signature: append([]byte(nil), ed25519.Sign(sk, msg)...),
 				}
-				if directTR {
-					if tr := transcripts[dealer]; tr != nil {
-						trs[dealer] = tr
-					}
-				}
+			}
+			if len(availableDealers) == 0 {
+				continue
 			}
 			wire := recastWire{
 				Kind:      "store_batch",
@@ -1741,9 +1754,8 @@ func runRecastRecovery(
 				Epoch:     cfg.Epoch,
 				Holder:    holder,
 				Recipient: recipient,
-				Dealers:   append([]int(nil), selectedIDs...),
+				Dealers:   availableDealers,
 				Roots:     roots,
-				TRs:       trs,
 				Stores:    stores,
 				Certs:     certs,
 			}
@@ -2014,6 +2026,18 @@ func runRecastRecovery(
 			if !ok || len(shard.Data) == 0 {
 				continue
 			}
+			cert, ok := apdbCerts[resp.Dealer]
+			if !ok || shard.DataShards != cert.DataShards || shard.TotalShards != cert.TotalShards ||
+				!bytes.Equal(shard.Root, cert.Root) || !bytes.Equal(shard.ValueDigest, cert.ValueDigest) ||
+				!bytes.Equal(shard.MerkleRoot, cert.MerkleRoot) {
+				tracef("phase=recover_pd_shard_metadata_bad dealer=%d recipient=%d holder=%d", resp.Dealer, resp.Recipient, resp.Holder)
+				continue
+			}
+			leaf := apdbShardLeaf(shard.Dealer, shard.Index, shard.Data)
+			if !verifyAPDBMerkleProof(leaf, shard.Index, shard.TotalShards, shard.Proof, shard.MerkleRoot) {
+				tracef("phase=recover_pd_shard_merkle_bad dealer=%d recipient=%d holder=%d", resp.Dealer, resp.Recipient, resp.Holder)
+				continue
+			}
 			att, ok := resp.Attests[resp.Dealer]
 			if !ok {
 				tracef("phase=recover_attestation_missing dealer=%d recipient=%d holder=%d", resp.Dealer, resp.Recipient, resp.Holder)
@@ -2057,9 +2081,9 @@ func runRecastRecovery(
 				tracef("phase=recover_decode_fail dealer=%d recipient=%d err=%v", resp.Dealer, resp.Recipient, err)
 				continue
 			}
-			root := sha256.Sum256(raw)
-			if expect, ok := transcriptRoots[resp.Dealer]; ok && len(expect) > 0 && !bytes.Equal(root[:], expect) {
-				tracef("phase=recover_decode_root_mismatch dealer=%d recipient=%d", resp.Dealer, resp.Recipient)
+			valueDigest := sha256.Sum256(raw)
+			if !bytes.Equal(valueDigest[:], cert.ValueDigest) {
+				tracef("phase=recover_decode_value_digest_mismatch dealer=%d recipient=%d", resp.Dealer, resp.Recipient)
 				continue
 			}
 			var recoveredTR DXTTranscript
@@ -2418,6 +2442,7 @@ func loadOrComputeDistributedDXTCache(
 	dxt.externalReceivers = true
 	defer func() { dxt.externalReceivers = false }()
 	buildStart := time.Now()
+	transcripts := make(map[int]*DXTTranscript, len(localDealers))
 	for _, dealer := range localDealers {
 		tracef("phase=dxt_dealer_begin dealer=%d mode=network", dealer)
 		tr, _, dealErr := dxt.Deal(ctx, dealer, nil)
@@ -2425,23 +2450,13 @@ func loadOrComputeDistributedDXTCache(
 			tracef("phase=dxt_dealer_fail dealer=%d err=%v", dealer, dealErr)
 			return nil, nil, nil, fmt.Errorf("dealer %d DXT+ deal failed: %w", dealer, dealErr)
 		}
-		publishCtx, cancel := context.WithTimeout(ctx, dxtNetworkTimeout())
-		publishErr := service.publishTranscript(publishCtx, dealer, tr)
-		cancel()
-		if publishErr != nil {
-			return nil, nil, nil, publishErr
-		}
+		// Algorithm 2 sends the completed transcript into PD. Other old nodes
+		// receive only their PD shard; the full transcript is not pre-broadcast.
+		transcripts[dealer] = tr
 		tracef("phase=dxt_dealer_end dealer=%d ack_count=%d ciphertext_count=%d mode=network", dealer, len(tr.Signatures), len(tr.Ciphertexts))
 	}
 	cacheTimings["dxt_network_build"] += time.Since(buildStart)
-	waitStart := time.Now()
-	threshold := apdbFinishedSetThreshold(cfg.F, len(old))
-	transcripts, err := service.waitForTranscripts(ctx, threshold)
-	cacheTimings["dxt_network_wait"] += time.Since(waitStart)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	tracef("phase=dxt_network_ready dealers=%d threshold=%d local_state=%s", len(transcripts), threshold, localStateDir)
+	tracef("phase=dxt_network_ready local_dealers=%d mode=pd-direct local_state=%s", len(transcripts), localStateDir)
 	return transcripts, service.shareSnapshot(), cacheTimings, nil
 }
 
@@ -2489,7 +2504,7 @@ func loadOrComputeRecipientPaillierKeys(
 ) (map[int]*PaillierPublicKey, map[int]*PaillierPrivateKey, error) {
 	bits := cfg.PaillierBits
 	if bits <= 0 {
-		bits = 2048
+		bits = 3072
 	}
 	if len(newC) == 0 {
 		return map[int]*PaillierPublicKey{}, map[int]*PaillierPrivateKey{}, nil
@@ -2615,13 +2630,16 @@ func loadOrComputeStrictRecipientPaillierKeys(
 			}
 		}
 	} else {
+		if practicalSetupReadOnly() {
+			return nil, nil, fmt.Errorf("read-only Practical setup is missing Paillier public artifact: %w", err)
+		}
 		lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if lockErr == nil {
 			_, _ = lockFile.WriteString(fmt.Sprintf("pid=%d\n", os.Getpid()))
 			_ = lockFile.Close()
 			bits := cfg.PaillierBits
 			if bits <= 0 {
-				bits = 2048
+				bits = 3072
 			}
 			pub, priv, genErr := generateRecipientPaillierKeys(newC, bits)
 			if genErr == nil {

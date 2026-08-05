@@ -91,7 +91,7 @@ func cvGenerateOldLockKeyMaterial(publicDir, secretDir, sid string, members []in
 				return err
 			}
 		}
-		if coefficients[0].IsZero() {
+		if coefficients[0].IsZero() || (threshold > 1 && coefficients[threshold-1].IsZero()) {
 			continue
 		}
 		shares = make([]fr.Element, len(members))

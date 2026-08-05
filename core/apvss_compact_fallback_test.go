@@ -213,6 +213,136 @@ func BenchmarkAPVSSCompactFallbackVerifyN7F2V1(b *testing.B) {
 	b.ReportMetric(float64(len(wire)), "proof_bytes")
 }
 
+func benchmarkAPVSSFullCompactV1(b *testing.B, receivers, faults int, verify bool) {
+	fixture := apvssFixture(b, receivers, faults)
+	fixture.leaf.context.proofProfile = cvLeafFullCompactProofProfile
+	indices := make([]int, receivers)
+	for i := range indices {
+		indices[i] = i + 1
+	}
+	proof, err := apvssProveCompactFallback(fixture.leaf, &fixture.witness, indices)
+	if err != nil {
+		b.Fatal(err)
+	}
+	wire, err := apvssCompactFallbackProofCanonicalBytes(fixture.leaf, proof)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if verify {
+			err = apvssVerifyCompactFallback(fixture.leaf, proof)
+		} else {
+			_, err = apvssProveCompactFallback(fixture.leaf, &fixture.witness, indices)
+		}
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(len(wire)), "proof_bytes")
+}
+
+func BenchmarkAPVSSFullCompactProveN4F1V1(b *testing.B) {
+	benchmarkAPVSSFullCompactV1(b, 4, 1, false)
+}
+
+func BenchmarkAPVSSFullCompactVerifyN4F1V1(b *testing.B) {
+	benchmarkAPVSSFullCompactV1(b, 4, 1, true)
+}
+
+func BenchmarkAPVSSFullCompactProveN7F2V1(b *testing.B) {
+	benchmarkAPVSSFullCompactV1(b, 7, 2, false)
+}
+
+func BenchmarkAPVSSFullCompactVerifyN7F2V1(b *testing.B) {
+	benchmarkAPVSSFullCompactV1(b, 7, 2, true)
+}
+
+func BenchmarkAPVSSFullCompactProveN16F5V1(b *testing.B) {
+	benchmarkAPVSSFullCompactV1(b, 16, 5, false)
+}
+
+func BenchmarkAPVSSFullCompactVerifyN16F5V1(b *testing.B) {
+	benchmarkAPVSSFullCompactV1(b, 16, 5, true)
+}
+
+func benchmarkAPVSSFullFieldCongruentV1(b *testing.B, receivers, faults int, verify bool) {
+	fixture := apvssFixture(b, receivers, faults)
+	fixture.leaf.context.proofProfile = cvLeafFullFieldProofProfile
+	indices := make([]int, receivers)
+	for i := range indices {
+		indices[i] = i + 1
+	}
+	proof, err := apvssProveCompactFieldCongruent(fixture.leaf, &fixture.witness, indices)
+	if err != nil {
+		b.Fatal(err)
+	}
+	wire, err := apvssCompactFieldProofCanonicalBytes(fixture.leaf, proof)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if verify {
+			err = apvssVerifyCompactFieldCongruent(fixture.leaf, proof)
+		} else {
+			_, err = apvssProveCompactFieldCongruent(fixture.leaf, &fixture.witness, indices)
+		}
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(len(wire)), "proof_bytes")
+}
+
+func BenchmarkAPVSSFullFieldCongruentProveN16F5V1(b *testing.B) {
+	benchmarkAPVSSFullFieldCongruentV1(b, 16, 5, false)
+}
+
+func BenchmarkAPVSSFullFieldCongruentVerifyN16F5V1(b *testing.B) {
+	benchmarkAPVSSFullFieldCongruentV1(b, 16, 5, true)
+}
+
+func TestAPVSSFullFieldCongruentRoundTripV1(t *testing.T) {
+	fixture := apvssFixture(t, 4, 1)
+	fixture.leaf.context.proofProfile = cvLeafFullFieldProofProfile
+	indices := []int{1, 2, 3, 4}
+	proof, err := apvssProveCompactFieldCongruent(fixture.leaf, &fixture.witness, indices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.leaf.compactProof = proof
+	fixture.leaf.hasLeafNIZK = true
+	proofWire, err := cvFullPublicProofCanonicalBytes(fixture.leaf)
+	if err != nil || len(proofWire) == 0 {
+		t.Fatalf("field-congruent epoch proof accounting failed: bytes=%d err=%v", len(proofWire), err)
+	}
+	fixture.leaf.digest = cvLeafDigest(fixture.leaf)
+	wire, err := cvLeafCanonicalBytes(fixture.leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeLeaf(wire, &fixture.leaf.context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cvVerifyLeaf(&fixture.leaf.context, decoded); err != nil {
+		t.Fatal(err)
+	}
+
+	bad := apvssCloneCompactFallbackProofForTest(proof)
+	one := fr.One()
+	bad.digitRange.tHat.Add(&bad.digitRange.tHat, &one)
+	if err := apvssVerifyCompactFieldCongruent(fixture.leaf, bad); err == nil {
+		t.Fatal("field-congruent verifier accepted a mutated digit range")
+	}
+	replayed := cvCloneLeafForTest(fixture.leaf)
+	replayed.context.proofProfile = cvLeafFullCompactProofProfile
+	if err := apvssVerifyCompactFieldCongruent(replayed, replayed.compactProof); err == nil {
+		t.Fatal("field-congruent proof replayed into canonical compact profile")
+	}
+}
+
 func TestAPVSSCompactFallbackRejectsMutationV1(t *testing.T) {
 	fixture := apvssFixture(t, 7, 2)
 	proof, err := apvssProveCompactFallback(fixture.leaf, &fixture.witness, []int{1, 2})

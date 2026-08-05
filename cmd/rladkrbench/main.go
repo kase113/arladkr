@@ -82,6 +82,7 @@ type runStat struct {
 }
 
 type benchResultInput struct {
+	setupBundleDigest        string
 	n                        int
 	fOld                     int
 	fNew                     int
@@ -89,6 +90,9 @@ type benchResultInput struct {
 	runs                     int
 	timeoutMs                int64
 	apvssProvider            string
+	apvssMode                string
+	apvssBackendStatus       string
+	apvssFullProofProfile    string
 	apvssFallbackProfile     string
 	apvssForcedFallbackCount int
 	apvssWaitAllACKs         bool
@@ -122,6 +126,8 @@ func main() {
 		runTimeout               = flag.Duration("timeout", 90*time.Second, "timeout per epoch run")
 		waitSPBCTimeout          = flag.Duration("wait-spbc-timeout", 30*time.Second, "MVBA/SPBC wait timeout")
 		routeSendTimeout         = flag.Duration("route-send-timeout", 2*time.Second, "MVBA route send timeout")
+		apvssMode                = flag.String("apvss-mode", core.APVSSModeACKFallback, "APVSS component validity: full-public-ve|ack-fallback")
+		apvssFullProofProfile    = flag.String("apvss-full-proof-profile", core.APVSSFullProofExact, "full-public-ve proof: exact|compact-batch|field-congruent")
 		apvssFallbackProfile     = flag.String("apvss-fallback-profile", "exact-lane", "APVSS fallback proof: exact-lane|compact-batch")
 		allowExperimentalAPVSS   = flag.Bool("allow-experimental-apvss", false, "allow an APVSS proof profile that has not passed production admission")
 		apvssForcedFallbackCount = flag.Int("apvss-forced-fallback-count", 0, "benchmark-only forced |I| (0 = natural ACK scheduling)")
@@ -136,7 +142,7 @@ func main() {
 		cvLocalSecretDir         = flag.String("cv-local-secret-dir", os.Getenv("RLADKR_CV_LOCAL_SECRET_DIR"), "CV local receiver secret directory")
 		cvLocalReceiverRaw       = flag.String("cv-local-receiver-ids", os.Getenv("RLADKR_LOCAL_RECEIVER_IDS"), "comma-separated local new-committee receiver IDs")
 		cvStateChainDir          = flag.String("cv-state-chain-dir", os.Getenv("RLADKR_STATE_CHAIN_DIR"), "private directory for verified CV epoch output state")
-		cvKeygenOnly             = flag.Bool("cv-keygen-only", false, "generate CV receiver and old-lock keys and exit")
+		cvKeygenOnly             = flag.Bool("cv-keygen-only", false, "generate CV receiver, old-lock, and MVBA coin keys and exit")
 	)
 	flag.Parse()
 	if *fOld < -1 || *fNew < -1 {
@@ -161,6 +167,8 @@ func main() {
 		visited[f.Name] = true
 	})
 	apvssFallbackProfileName := strings.ToLower(strings.TrimSpace(*apvssFallbackProfile))
+	apvssFullProofProfileName := strings.ToLower(strings.TrimSpace(*apvssFullProofProfile))
+	apvssModeName := core.NormalizeConfig(core.Config{APVSSMode: *apvssMode}).APVSSMode
 
 	if *runs <= 0 {
 		fmt.Println("runs must be positive")
@@ -216,11 +224,27 @@ func main() {
 			fmt.Fprintf(os.Stderr, "CV_KEYGEN_ERROR err=%v\n", err)
 			os.Exit(1)
 		}
+		if err := core.GenerateCVMVBACoinKeyMaterial(
+			*cvPublicKeyDir, *cvLocalSecretDir, "rladkr-go-bench", old, oldFaults+1,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "CV_KEYGEN_ERROR err=%v\n", err)
+			os.Exit(1)
+		}
+		setupBundleDigest, err := core.CVSetupBundleDigest(*cvPublicKeyDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CV_KEYGEN_ERROR err=%v\n", err)
+			os.Exit(1)
+		}
 		fmt.Printf(
-			"CV_KEYGEN_OK public_dir=%s secret_dir=%s receivers=%d old_lock_threshold=%d\n",
-			*cvPublicKeyDir, *cvLocalSecretDir, len(newC), len(old)-oldFaults,
+			"CV_KEYGEN_OK public_dir=%s secret_dir=%s receivers=%d old_lock_threshold=%d mvba_coin_threshold=%d setup_bundle_digest=%s\n",
+			*cvPublicKeyDir, *cvLocalSecretDir, len(newC), len(old)-oldFaults, oldFaults+1, setupBundleDigest,
 		)
 		return
+	}
+	setupBundleDigest, err := core.CVSetupBundleDigest(*cvPublicKeyDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "CV_SETUP_VERIFY_ERROR err=%v\n", err)
+		os.Exit(1)
 	}
 	requiredCompleted := requiredCompletedNodes(*n, oldFaults, localNodeIDs)
 	epochBarrierDir := strings.TrimSpace(os.Getenv("RLADKR_EPOCH_BARRIER_DIR"))
@@ -246,6 +270,8 @@ func main() {
 			AgreementBasePort:           *basePort,
 			WaitSPBCTimeout:             waitSPBCValue,
 			RouteSendTimeout:            routeSendValue,
+			APVSSMode:                   apvssModeName,
+			APVSSFullProofProfile:       apvssFullProofProfileName,
 			APVSSFallbackProfile:        apvssFallbackProfileName,
 			AllowExperimentalAPVSS:      *allowExperimentalAPVSS,
 			APVSSBenchmarkFallbackCount: *apvssForcedFallbackCount,
@@ -291,6 +317,8 @@ func main() {
 				AgreementBasePort:           *basePort,
 				WaitSPBCTimeout:             waitSPBCValue,
 				RouteSendTimeout:            routeSendValue,
+				APVSSMode:                   apvssModeName,
+				APVSSFullProofProfile:       apvssFullProofProfileName,
 				APVSSFallbackProfile:        apvssFallbackProfileName,
 				AllowExperimentalAPVSS:      *allowExperimentalAPVSS,
 				APVSSBenchmarkFallbackCount: *apvssForcedFallbackCount,
@@ -459,7 +487,26 @@ func main() {
 	}
 
 	caps := core.CurrentAPVSSCapabilities()
+	resultFallbackProfile := apvssFallbackProfileName
+	resultFullProofProfile := "none"
+	backendStatus := "fallback-backend-profile-gated"
+	securityProfile := caps.SecurityProfile
+	if apvssModeName == core.APVSSModeFullPublicVE {
+		resultFullProofProfile = apvssFullProofProfileName
+		resultFallbackProfile = "none"
+		if apvssFullProofProfileName == core.APVSSFullProofCompactBatch {
+			backendStatus = "experimental-full-compact-independent-review-pending"
+			securityProfile = "static-cv-sapvss-full-compact-experimental-unreviewed"
+		} else if apvssFullProofProfileName == core.APVSSFullProofFieldCongruent {
+			backendStatus = "experimental-field-congruent-proof-obligations-pending"
+			securityProfile = "static-cv-sapvss-field-congruent-experimental-unreviewed"
+		} else {
+			backendStatus = "functional-prototype-backend-gate-pending"
+			securityProfile = "static-cv-sapvss-full-proof-prototype-unreviewed"
+		}
+	}
 	line := formatBenchResult(benchResultInput{
+		setupBundleDigest:        setupBundleDigest,
 		n:                        *n,
 		fOld:                     oldFaults,
 		fNew:                     newFaults,
@@ -467,12 +514,15 @@ func main() {
 		runs:                     *runs,
 		timeoutMs:                runTimeoutValue.Milliseconds(),
 		apvssProvider:            "cv-sapvss",
-		apvssFallbackProfile:     apvssFallbackProfileName,
+		apvssMode:                apvssModeName,
+		apvssBackendStatus:       backendStatus,
+		apvssFullProofProfile:    resultFullProofProfile,
+		apvssFallbackProfile:     resultFallbackProfile,
 		apvssForcedFallbackCount: *apvssForcedFallbackCount,
 		apvssWaitAllACKs:         *apvssWaitAllACKs,
 		experimentalAPVSS:        *allowExperimentalAPVSS,
 		apvssOutput:              string(caps.OutputKind),
-		securityProfile:          caps.SecurityProfile,
+		securityProfile:          securityProfile,
 		deriveMode:               "scalar",
 		arcMode:                  "materialized",
 		successRuns:              successRuns,
@@ -749,9 +799,16 @@ func formatBenchResult(in benchResultInput) string {
 	hashSummary := summarizeConsensusHash(in.stats)
 
 	line := fmt.Sprintf(
-		"E2E_BENCH_RESULT protocol=ARLADKR-GO mode=strict agreement_path=single-mvba arc_mode=%s start_phase=protocol_start end_phase=local_decide apvss_provider=%s apvss_fallback_profile=%s apvss_forced_fallback_count=%d apvss_wait_all_acks=%t experimental_apvss=%t apvss_output=%s security_profile=%s derive_mode=%s n=%d f_old=%d f_new=%d kappa=%d runs=%d timeout_ms=%d ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f mean_setup_ms=%.2f mean_recover_barrier_wait_ms=%.2f mean_recover_service_grace_ms=%.2f mean_online_protocol_ms=%.2f mean_online_phase_wall_ms=%.2f mean_online_active_known_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_aggrlo_ready_ms=%.2f mean_header_obligation_ready_ms=%.2f admitagg_pass_ratio=%.4f recoveragg_success_ratio=%.4f disperse_ms=%.0f disperse_local_build_ms=%.0f disperse_broadcast_ms=%.0f disperse_read_wait_ms=%.0f disperse_trusted_ready_ms=%.0f disperse_aggregate_prewarm_ms=%.0f lockagg_ms=%.0f lockagg_ready_candidates_ms=%.0f lockagg_build_aggregate_ms=%.0f lockagg_arcshare_prepare_ms=%.0f lockagg_arcshare_attach_ms=%.0f lockagg_candidate_count=%.0f lockagg_arcshare_signed_count=%.0f lockagg_share_sign_ms=%.0f lockagg_cert_recover_ms=%.0f lockagg_local_admit_ms=%.0f mvba_only_ms=%.0f mvba_peer_wait_ms=%.0f mvba_active_known_ms=%.0f agreeagg_ms=%.0f recover_ms=%.0f recover_only_ms=%.0f recover_verify_ms=%.0f recover_collect_ms=%.0f recover_verify_only_ms=%.0f recover_materialize_ms=%.0f derive_ms=%.0f mean_total_sent_bytes=%.0f mean_total_recv_bytes=%.0f mean_agree_sent_bytes=%.0f mean_agree_recv_bytes=%.0f mean_recover_sent_bytes=%.0f mean_recover_recv_bytes=%.0f mean_recover_response_sent_bytes=%.0f mean_recover_response_recv_bytes=%.0f mean_derive_sent_bytes=%.0f mean_derive_recv_bytes=%.0f mean_agclock_prebroadcast_sent_bytes=%.0f mean_agclock_prebroadcast_recv_bytes=%.0f mean_arc_header_prebroadcast_sent_bytes=%.0f mean_arc_header_prebroadcast_recv_bytes=%.0f local_node_count=%d required_completed_nodes=%d consensus_hash=%s",
+		"E2E_BENCH_RESULT protocol=ARLADKR-GO mode=strict agreement_path=single-mvba arc_mode=%s cv_candidate_mode=%s cv_primary_grace_ms=%d cv_primary_pool_grace_ms=%d start_phase=epoch_setup_start online_start_phase=post_service_setup end_phase=local_decide offline_keygen_included=false setup_model=trusted-offline-owner-provisioned epoch_setup_included=true online_protocol_excludes_setup=true setup_bundle_digest=%s apvss_provider=%s apvss_mode=%s apvss_backend_status=%s apvss_full_proof_profile=%s apvss_fallback_profile=%s apvss_forced_fallback_count=%d apvss_wait_all_acks=%t experimental_apvss=%t apvss_output=%s security_profile=%s derive_mode=%s n=%d f_old=%d f_new=%d kappa=%d runs=%d timeout_ms=%d ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f mean_setup_ms=%.2f mean_recover_barrier_wait_ms=%.2f mean_recover_service_grace_ms=%.2f mean_online_protocol_ms=%.2f mean_online_phase_wall_ms=%.2f mean_online_active_known_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_aggrlo_ready_ms=%.2f mean_header_obligation_ready_ms=%.2f admitagg_pass_ratio=%.4f recoveragg_success_ratio=%.4f disperse_ms=%.0f disperse_local_build_ms=%.0f disperse_broadcast_ms=%.0f disperse_read_wait_ms=%.0f disperse_trusted_ready_ms=%.0f disperse_aggregate_prewarm_ms=%.0f lockagg_ms=%.0f lockagg_ready_candidates_ms=%.0f lockagg_build_aggregate_ms=%.0f lockagg_arcshare_prepare_ms=%.0f lockagg_arcshare_attach_ms=%.0f lockagg_candidate_count=%.0f lockagg_arcshare_signed_count=%.0f lockagg_share_sign_ms=%.0f lockagg_cert_recover_ms=%.0f lockagg_local_admit_ms=%.0f mvba_only_ms=%.0f mvba_peer_wait_ms=%.0f mvba_active_known_ms=%.0f agreeagg_ms=%.0f recover_ms=%.0f recover_only_ms=%.0f recover_verify_ms=%.0f recover_collect_ms=%.0f recover_verify_only_ms=%.0f recover_materialize_ms=%.0f derive_ms=%.0f mean_total_sent_bytes=%.0f mean_total_recv_bytes=%.0f mean_agree_sent_bytes=%.0f mean_agree_recv_bytes=%.0f mean_recover_sent_bytes=%.0f mean_recover_recv_bytes=%.0f mean_recover_response_sent_bytes=%.0f mean_recover_response_recv_bytes=%.0f mean_derive_sent_bytes=%.0f mean_derive_recv_bytes=%.0f mean_agclock_prebroadcast_sent_bytes=%.0f mean_agclock_prebroadcast_recv_bytes=%.0f mean_arc_header_prebroadcast_sent_bytes=%.0f mean_arc_header_prebroadcast_recv_bytes=%.0f local_node_count=%d required_completed_nodes=%d consensus_hash=%s",
 		arcMode,
+		core.CVAggregateCandidateMode,
+		core.CVAggregatePrimaryGrace().Milliseconds(),
+		core.CVAggregatePrimaryPoolGrace().Milliseconds(),
+		in.setupBundleDigest,
 		in.apvssProvider,
+		in.apvssMode,
+		in.apvssBackendStatus,
+		in.apvssFullProofProfile,
 		in.apvssFallbackProfile,
 		in.apvssForcedFallbackCount,
 		in.apvssWaitAllACKs,

@@ -9,6 +9,17 @@ import (
 
 type cvFailingFreshArtifactStore struct{}
 
+func TestCVPrimaryMaterializerRotatesByEpoch(t *testing.T) {
+	cfg := Config{OldCommittee: []int{7, 3, 11}}
+	want := []int{3, 7, 11, 3}
+	for epoch, expected := range want {
+		cfg.Epoch = epoch + 1
+		if got := cvPrimaryMaterializer(cfg); got != expected {
+			t.Fatalf("epoch %d primary=%d, want %d", cfg.Epoch, got, expected)
+		}
+	}
+}
+
 func (cvFailingFreshArtifactStore) Put(string, int, []byte, int, []byte) error {
 	return errors.New("injected fresh-store failure")
 }

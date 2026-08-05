@@ -88,6 +88,9 @@ func loadOrCreateThresholdCoinKeys(cfg Config, old []int) (*thresholdCoinKeySet,
 	publicPath := thresholdCoinPublicPath(cacheDir, old, cfg.F)
 	lockPath := publicPath + ".lock"
 	if _, _, err := readThresholdCoinPublicArtifact(publicPath); err != nil {
+		if practicalSetupReadOnly() {
+			return nil, fmt.Errorf("read-only Practical setup is missing threshold coin public artifact: %w", err)
+		}
 		lock, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if lockErr == nil {
 			_, _ = lock.WriteString(fmt.Sprintf("pid=%d\n", os.Getpid()))
@@ -149,11 +152,18 @@ func generateThresholdCoinKeys(old []int, f int) (*thresholdCoinKeySet, error) {
 	if threshold <= f || threshold > len(old) {
 		return nil, fmt.Errorf("invalid high-threshold coin threshold=%d", threshold)
 	}
-	coefficients := make([]fr.Element, threshold)
-	for i := range coefficients {
-		if _, err := coefficients[i].SetRandom(); err != nil {
-			return nil, fmt.Errorf("sample threshold coin coefficient: %w", err)
+	var coefficients []fr.Element
+	for {
+		coefficients = make([]fr.Element, threshold)
+		for i := range coefficients {
+			if _, err := coefficients[i].SetRandom(); err != nil {
+				return nil, fmt.Errorf("sample threshold coin coefficient: %w", err)
+			}
 		}
+		if coefficients[0].IsZero() || (threshold > 1 && coefficients[threshold-1].IsZero()) {
+			continue
+		}
+		break
 	}
 	shares := make([]fr.Element, len(old))
 	for i := range old {

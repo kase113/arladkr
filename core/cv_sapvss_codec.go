@@ -179,6 +179,10 @@ func cvLeafWireSize(context *cvLeafContext) (int, error) {
 	if err := cvValidateLeafContext(context); err != nil {
 		return 0, err
 	}
+	if context.proofProfile == cvLeafFullCompactProofProfile ||
+		context.proofProfile == cvLeafFullFieldProofProfile {
+		return 0, fmt.Errorf("CV-sAPVSS full compact Leaf proof has variable canonical size")
+	}
 	contextWire, err := cvLeafContextCanonicalBytes(context)
 	if err != nil {
 		return 0, err
@@ -482,15 +486,25 @@ func cvDecodeLeafProof(wire []byte, expectedContext *cvLeafContext) (*cvLeafProo
 }
 
 func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) {
-	expectedWireSize, err := cvLeafWireSize(expectedContext)
-	if err != nil {
+	if err := cvValidateLeafContext(expectedContext); err != nil {
 		return nil, err
 	}
-	if expectedWireSize > cvMaxLeafWireBytes {
-		return nil, fmt.Errorf("CV-sAPVSS Leaf exceeds the wire safety limit")
-	}
-	if len(wire) != expectedWireSize {
-		return nil, fmt.Errorf("invalid CV-sAPVSS Leaf length: got %d, want %d", len(wire), expectedWireSize)
+	if expectedContext.proofProfile == cvLeafFullCompactProofProfile ||
+		expectedContext.proofProfile == cvLeafFullFieldProofProfile {
+		if len(wire) == 0 || len(wire) > cvMaxLeafWireBytes {
+			return nil, fmt.Errorf("invalid CV-sAPVSS full compact Leaf length")
+		}
+	} else {
+		expectedWireSize, err := cvLeafWireSize(expectedContext)
+		if err != nil {
+			return nil, err
+		}
+		if expectedWireSize > cvMaxLeafWireBytes {
+			return nil, fmt.Errorf("CV-sAPVSS Leaf exceeds the wire safety limit")
+		}
+		if len(wire) != expectedWireSize {
+			return nil, fmt.Errorf("invalid CV-sAPVSS Leaf length: got %d, want %d", len(wire), expectedWireSize)
+		}
 	}
 	expectedContextWire, err := cvLeafContextCanonicalBytes(expectedContext)
 	if err != nil {
@@ -599,6 +613,39 @@ func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) 
 			return nil, proofErr
 		}
 		leaf.hasLeafNIZK = true
+	case cvLeafFullCompactProofProfile:
+		if capability != 2 {
+			return nil, fmt.Errorf("missing CV-sAPVSS full compact proof")
+		}
+		proofWire, proofErr := r.bytes(cvMaxLeafProofWireBytes)
+		if proofErr != nil {
+			return nil, fmt.Errorf("decode CV-sAPVSS full compact proof: %w", proofErr)
+		}
+		if len(proofWire) == 0 {
+			return nil, fmt.Errorf("empty CV-sAPVSS full compact proof")
+		}
+		leaf.hasLeafNIZK = true
+		leaf.compactProof, proofErr = apvssDecodeCompactFallbackProofWithVerify(
+			proofWire, leaf, false,
+		)
+		if proofErr != nil {
+			return nil, proofErr
+		}
+	case cvLeafFullFieldProofProfile:
+		if capability != 3 {
+			return nil, fmt.Errorf("missing CV-sAPVSS field-congruent proof")
+		}
+		proofWire, proofErr := r.bytes(cvMaxLeafProofWireBytes)
+		if proofErr != nil || len(proofWire) == 0 {
+			return nil, fmt.Errorf("decode CV-sAPVSS field-congruent proof: %w", proofErr)
+		}
+		leaf.hasLeafNIZK = true
+		leaf.compactProof, proofErr = apvssDecodeCompactFieldProofWithVerify(
+			proofWire, leaf, false,
+		)
+		if proofErr != nil {
+			return nil, proofErr
+		}
 	default:
 		return nil, fmt.Errorf("unsupported CV-sAPVSS Leaf proof profile")
 	}

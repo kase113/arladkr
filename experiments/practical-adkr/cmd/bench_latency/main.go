@@ -41,17 +41,19 @@ func main() {
 		kappaLifeEpoch = flag.Uint64("kappa-lifetime-epochs", 525600, "maximum reconfigurations used by matched-lifetime and union-bound reporting")
 		runs           = flag.Int("runs", 3, "number of benchmark runs")
 		timeout        = flag.Duration("timeout", 30*time.Second, "timeout per run")
-		paillierBits   = flag.Int("paillier-bits", 2048, "paillier key size")
+		paillierBits   = flag.Int("paillier-bits", 3072, "Paillier modulus bits (3072 for the matched 128-bit security profile; pass 2048 only for compatibility results)")
 		mvbaNetwork    = flag.String("mvba-network", "tcp", "MVBA network mode: tcp")
 		mvbaAddrs      = flag.String("mvba-addrs", "", "MVBA node addresses, e.g. 0=10.0.0.1:9000,1=10.0.0.2:9000")
 		mvbaLocalIDs   = flag.String("mvba-local-ids", "", "local node IDs for tcp mode, e.g. 0,1,2")
-		protoAddrs     = flag.String("proto-addrs", "", "DXT/APDB node addresses, e.g. 0=10.0.0.1:9100,100=10.0.0.2:9101")
-		protoLocalIDs  = flag.String("proto-local-ids", "", "DXT/APDB local node IDs, e.g. 0,1,100,101")
+		protoAddrs     = flag.String("proto-addrs", os.Getenv("PRACTICAL_PROTO_NODE_ADDRS"), "DXT/APDB node addresses, e.g. 0=10.0.0.1:9100,100=10.0.0.2:9101")
+		protoLocalIDs  = flag.String("proto-local-ids", os.Getenv("PRACTICAL_PROTO_LOCAL_NODE_IDS"), "DXT/APDB local node IDs, e.g. 0,1,100,101")
 		coinAddrs      = flag.String("coin-addrs", "", "dedicated threshold Coin.Get addresses for old nodes")
 		fallbackPolicy = flag.String("fallback-policy", "off", "fallback policy for comparable e2e runs: off only")
 		ablationMode   = flag.String("ablation-mode", "none", "ablation mode: none|no-partial-verify")
 		commMetrics    = flag.Bool("comm-metrics", false, "enable protocol-layer communication byte counters")
 		strictNetwork  = flag.Bool("strict-network", envBoolDefault("PRACTICAL_STRICT_NETWORK", true), "fail if benchmark config selects local protocol shortcuts")
+		setupKeygen    = flag.Bool("setup-keygen-only", false, "generate owner-provisioned trusted setup artifacts and exit")
+		setupOutputDir = flag.String("setup-output-dir", os.Getenv("PRACTICAL_SETUP_OUTPUT_DIR"), "output directory for --setup-keygen-only")
 	)
 	flag.Parse()
 
@@ -178,13 +180,29 @@ func main() {
 			cfg.DelayNodeCount = parsed
 		}
 	}
-	if err := core.PrewarmPracticalRecipientKeys(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "prewarm recipient keys failed: %v\n", err)
-		os.Exit(1)
+	if *setupKeygen {
+		digest, err := core.GeneratePracticalSetupProvision(*setupOutputDir, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "PRACTICAL_SETUP_KEYGEN_ERROR err=%v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf(
+			"PRACTICAL_SETUP_KEYGEN_OK output_dir=%s nodes=%d coin_threshold=%d setup_bundle_digest=%s\n",
+			*setupOutputDir, len(oldC), len(oldC)-*f, digest,
+		)
+		return
 	}
-	if err := core.PrewarmPracticalThresholdCoin(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "prewarm threshold coin failed: %v\n", err)
-		os.Exit(1)
+	setupBundleDigest := "unmanifested"
+	setupCacheDir := strings.TrimSpace(os.Getenv("PRACTICAL_ARTIFACT_CACHE_DIR"))
+	if setupCacheDir != "" {
+		_, manifestErr := os.Stat(setupCacheDir + string(os.PathSeparator) + "setup-manifest.json")
+		if manifestErr == nil || envBoolDefault("PRACTICAL_SETUP_READ_ONLY", false) {
+			setupBundleDigest, err = core.VerifyPracticalSetupProvision(setupCacheDir, cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "verify provisioned setup failed: %v\n", err)
+				os.Exit(1)
+			}
+		}
 	}
 	fmt.Printf(
 		"KAPPA_SECURITY n=%d f=%d profile=%s population=%d kappa=%d epoch_failure_prob=%.12g epoch_security_bits=%.6g lifetime_epochs=%d lifetime_union_bound=%.12g lifetime_security_bits=%.6g\n",
@@ -328,8 +346,13 @@ func main() {
 	timeoutRuns := *runs - successRuns
 	consensusHash := summarizePracticalResultDigests(stats)
 
-	fmt.Printf(
-		"E2E_BENCH_RESULT protocol=PRACTICAL-ADKR mode=strict start_phase=protocol_start end_phase=local_decide n=%d committee_size=%d total_logical_participants=%d f=%d kappa=%d kappa_profile=%s kappa_epoch_failure_prob=%.12g kappa_epoch_security_bits=%.6g kappa_lifetime_epochs=%d kappa_lifetime_union_bound=%.12g kappa_lifetime_security_bits=%.6g runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_selected_count=%.2f mean_verified_count=%.2f mean_setup_ms=%.2f mean_online_protocol_ms=%.2f mean_online_active_known_ms=%.2f mean_dxt_dealing_ms=%.2f mean_dxt_network_build_ms=%.2f mean_dxt_network_wait_ms=%.2f mean_dxt_cache_hit_ms=%.2f mean_dxt_cache_build_ms=%.2f mean_dxt_cache_wait_ms=%.2f mean_apdb_dispersal_ms=%.2f mean_mvba_agree_ms=%.2f mean_mvba_peer_wait_ms=%.2f mean_mvba_active_known_ms=%.2f mean_coin_select_ms=%.2f mean_partial_verify_ms=%.2f mean_recover_ms=%.2f mean_recover_ready_ms=%.2f mean_recover_completion_ms=%.2f mean_recover_store_verify_ms=%.2f mean_recover_shard_verify_ms=%.2f mean_recover_verify_ms=%.2f mean_recover_store_seen=%.2f mean_recover_fetch_req_sent=%.2f mean_recover_fetch_resp_recv=%.2f mean_recover_recipient_seen=%.2f mean_derive_ms=%.2f mean_aggregate_derive_ms=%.2f mean_total_phase_ms=%.2f mean_total_sent_bytes=%.2f mean_total_recv_bytes=%.2f mean_dxt_sent_bytes=%.2f mean_dxt_recv_bytes=%.2f mean_apdb_sent_bytes=%.2f mean_apdb_recv_bytes=%.2f mean_recover_sent_bytes=%.2f mean_recover_recv_bytes=%.2f mean_derive_sent_bytes=%.2f mean_derive_recv_bytes=%.2f fallback_runs=%d timeout_runs=%d local_node_count=%d consensus_hash=%s\n",
+	fmt.Printf(strings.Replace(
+		"E2E_BENCH_RESULT protocol=PRACTICAL-ADKR mode=strict start_phase=epoch_setup_start online_start_phase=post_service_setup end_phase=local_decide offline_keygen_included=false setup_bundle_digest=%s n=%d committee_size=%d total_logical_participants=%d f=%d kappa=%d kappa_profile=%s kappa_epoch_failure_prob=%.12g kappa_epoch_security_bits=%.6g kappa_lifetime_epochs=%d kappa_lifetime_union_bound=%.12g kappa_lifetime_security_bits=%.6g runs=%d timeout_ms=%d fallback_policy=%s ablation_mode=%s comm_metrics=%t success_runs=%d success_rate=%.4f mean_latency_ms=%.2f mean_all_latency_ms=%.2f p50_latency_ms=%.2f p95_latency_ms=%.2f mean_completed_nodes=%.2f mean_decided_set=%.2f mean_selected_count=%.2f mean_verified_count=%.2f mean_setup_ms=%.2f mean_online_protocol_ms=%.2f mean_online_active_known_ms=%.2f mean_dxt_dealing_ms=%.2f mean_dxt_network_build_ms=%.2f mean_dxt_network_wait_ms=%.2f mean_dxt_cache_hit_ms=%.2f mean_dxt_cache_build_ms=%.2f mean_dxt_cache_wait_ms=%.2f mean_apdb_dispersal_ms=%.2f mean_mvba_agree_ms=%.2f mean_mvba_peer_wait_ms=%.2f mean_mvba_active_known_ms=%.2f mean_coin_select_ms=%.2f mean_partial_verify_ms=%.2f mean_recover_ms=%.2f mean_recover_ready_ms=%.2f mean_recover_completion_ms=%.2f mean_recover_store_verify_ms=%.2f mean_recover_shard_verify_ms=%.2f mean_recover_verify_ms=%.2f mean_recover_store_seen=%.2f mean_recover_fetch_req_sent=%.2f mean_recover_fetch_resp_recv=%.2f mean_recover_recipient_seen=%.2f mean_derive_ms=%.2f mean_aggregate_derive_ms=%.2f mean_total_phase_ms=%.2f mean_total_sent_bytes=%.2f mean_total_recv_bytes=%.2f mean_dxt_sent_bytes=%.2f mean_dxt_recv_bytes=%.2f mean_apdb_sent_bytes=%.2f mean_apdb_recv_bytes=%.2f mean_recover_sent_bytes=%.2f mean_recover_recv_bytes=%.2f mean_derive_sent_bytes=%.2f mean_derive_recv_bytes=%.2f fallback_runs=%d timeout_runs=%d local_node_count=%d consensus_hash=%s\n",
+		"offline_keygen_included=false",
+		"offline_keygen_included=false setup_model=trusted-offline-owner-provisioned epoch_setup_included=true online_protocol_excludes_setup=true",
+		1,
+	),
+		setupBundleDigest,
 		*n,
 		committeeSize,
 		committeeSize*2,

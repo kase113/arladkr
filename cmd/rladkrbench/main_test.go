@@ -23,6 +23,32 @@ func TestFormatBenchResultIncludesEffectiveKappa(t *testing.T) {
 	}
 }
 
+func TestFormatBenchResultIncludesAPVSSModeAndBackendStatus(t *testing.T) {
+	t.Setenv("RLADKR_CV_PRIMARY_GRACE_MS", "")
+	line := formatBenchResult(benchResultInput{
+		runs:                  1,
+		apvssMode:             core.APVSSModeFullPublicVE,
+		apvssBackendStatus:    "functional-prototype-backend-gate-pending",
+		apvssFullProofProfile: core.APVSSFullProofExact,
+		apvssFallbackProfile:  "none",
+		securityProfile:       "static-cv-sapvss-full-proof-prototype-unreviewed",
+	})
+	for _, field := range []string{
+		"cv_candidate_mode=" + core.CVAggregateCandidateMode,
+		"cv_primary_grace_ms=10000",
+		"cv_primary_pool_grace_ms=250",
+		"apvss_mode=full-public-ve",
+		"apvss_backend_status=functional-prototype-backend-gate-pending",
+		"apvss_full_proof_profile=exact",
+		"apvss_fallback_profile=none",
+		"security_profile=static-cv-sapvss-full-proof-prototype-unreviewed",
+	} {
+		if !strings.Contains(line, field) {
+			t.Fatalf("benchmark result missing %q: %s", field, line)
+		}
+	}
+}
+
 func TestSummarizeConsensusHashBindsEpochSequence(t *testing.T) {
 	first := summarizeConsensusHash([]runStat{{consensusHash: "a"}, {consensusHash: "b"}})
 	second := summarizeConsensusHash([]runStat{{consensusHash: "b"}, {consensusHash: "a"}})

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
@@ -89,7 +88,7 @@ func TestDXTLocalShareStoreIsReceiverScoped(t *testing.T) {
 }
 
 func TestPartialVerifyResultSignatureBindsDigestAndLanes(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,12 +98,15 @@ func TestPartialVerifyResultSignatureBindsDigestAndLanes(t *testing.T) {
 		TranscriptDigest: []byte("digest"),
 		Lanes:            map[int]bool{10: true, 11: false},
 	}
-	wire.Signature = ed25519.Sign(priv, partialVerifyResultMessage(&wire))
-	if !ed25519.Verify(pub, partialVerifyResultMessage(&wire), wire.Signature) {
+	wire.Signature, err = ecdsa.SignASN1(rand.Reader, priv, partialVerifyResultMessage(&wire))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(&priv.PublicKey, partialVerifyResultMessage(&wire), wire.Signature) {
 		t.Fatal("valid partial verification result signature rejected")
 	}
 	wire.Lanes[11] = true
-	if ed25519.Verify(pub, partialVerifyResultMessage(&wire), wire.Signature) {
+	if ecdsa.VerifyASN1(&priv.PublicKey, partialVerifyResultMessage(&wire), wire.Signature) {
 		t.Fatal("lane mutation was accepted")
 	}
 }
@@ -262,9 +264,20 @@ func TestDXTVerificationRejectsProofAndACKMutation(t *testing.T) {
 		ProtocolLocalNodeIDs: buildIDsCSV(protoIDs),
 	}
 	dxt := setupDXTBackend(t, cfg)
+	// Force one receiver onto the VE fallback lane so this mutation test covers
+	// both branches even when local ACK synthesis is available.
+	delete(dxt.recipientSignPriv, 13)
 	transcript, _, err := dxt.Deal(context.Background(), 0, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := len(transcript.Signatures) + len(transcript.Ciphertexts); got != len(cfg.NewCommittee) {
+		t.Fatalf("ACK/VE lanes cover %d receivers, want %d", got, len(cfg.NewCommittee))
+	}
+	for rid := range transcript.Signatures {
+		if _, duplicated := transcript.Ciphertexts[rid]; duplicated {
+			t.Fatalf("receiver %d appears in both ACK and VE lanes", rid)
+		}
 	}
 	if !dxt.VerifyTranscript(10, transcript) {
 		t.Fatal("valid transcript was rejected")

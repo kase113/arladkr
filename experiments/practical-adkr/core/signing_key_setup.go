@@ -128,6 +128,9 @@ func loadOrCreateStrictPracticalSigningKeys(cfg Config, oldCommittee, newCommitt
 	publicPath := practicalSigningPublicPath(cacheDir, old, newC)
 	lockPath := publicPath + ".lock"
 	if _, _, err := readPracticalSigningPublic(publicPath, old, newC); err != nil {
+		if practicalSetupReadOnly() {
+			return nil, fmt.Errorf("read-only Practical setup is missing signing public artifact: %w", err)
+		}
 		lock, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if lockErr == nil {
 			_, _ = lock.WriteString(fmt.Sprintf("pid=%d\n", os.Getpid()))

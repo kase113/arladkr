@@ -643,19 +643,24 @@ func apvssProveCompactInnerProduct(
 		transcript = cvTranscriptBytes(transcript, roundPoints)
 		var xInverse fr.Element
 		xInverse.Inverse(&x)
-		gNext := make([]bls12381.G1Affine, half)
-		hNext := make([]bls12381.G1Affine, half)
+		gNextJacobian := make([]bls12381.G1Jac, half)
+		hNextJacobian := make([]bls12381.G1Jac, half)
 		aNext := make([]fr.Element, half)
 		bNext := make([]fr.Element, half)
+		xBig := x.BigInt(new(big.Int))
+		xInverseBig := xInverse.BigInt(new(big.Int))
+		if err := cvRunParallelChecks(half, func(i int) error {
+			gNextJacobian[i].JointScalarMultiplication(
+				&gWork[i], &gWork[half+i], xInverseBig, xBig,
+			)
+			hNextJacobian[i].JointScalarMultiplication(
+				&hWork[i], &hWork[half+i], xBig, xInverseBig,
+			)
+			return nil
+		}); err != nil {
+			return apvssCompactInnerProductProof{}, err
+		}
 		for i := 0; i < half; i++ {
-			gNext[i] = cvPointSum(
-				pointPtr(cvPointTimes(&gWork[i], &xInverse)),
-				pointPtr(cvPointTimes(&gWork[half+i], &x)),
-			)
-			hNext[i] = cvPointSum(
-				pointPtr(cvPointTimes(&hWork[i], &x)),
-				pointPtr(cvPointTimes(&hWork[half+i], &xInverse)),
-			)
 			var term fr.Element
 			aNext[i].Mul(&x, &aLeft[i])
 			term.Mul(&xInverse, &aRight[i])
@@ -664,6 +669,8 @@ func apvssProveCompactInnerProduct(
 			term.Mul(&x, &bRight[i])
 			bNext[i].Add(&bNext[i], &term)
 		}
+		gNext := bls12381.BatchJacobianToAffineG1(gNextJacobian)
+		hNext := bls12381.BatchJacobianToAffineG1(hNextJacobian)
 		gWork, hWork, aWork, bWork = gNext, hNext, aNext, bNext
 	}
 	proof.a.Set(&aWork[0])
@@ -682,10 +689,11 @@ func apvssVerifyCompactInnerProduct(
 		len(proof.left) != len(proof.right) || 1<<uint(len(proof.left)) != len(g) {
 		return fmt.Errorf("invalid APVSS inner-product proof shape")
 	}
-	gWork := append([]bls12381.G1Affine(nil), g...)
-	hWork := append([]bls12381.G1Affine(nil), h...)
-	pWork := p
 	transcript := append([]byte(nil), prefix...)
+	challenges := make([]fr.Element, len(proof.left))
+	inverseChallenges := make([]fr.Element, len(proof.left))
+	leftCoefficients := make([]fr.Element, len(proof.left))
+	rightCoefficients := make([]fr.Element, len(proof.left))
 	for round := range proof.left {
 		left, right := &proof.left[round], &proof.right[round]
 		if !cvValidG1(left, true) || !cvValidG1(right, true) {
@@ -697,35 +705,55 @@ func apvssVerifyCompactInnerProduct(
 			return err
 		}
 		transcript = cvTranscriptBytes(transcript, roundPoints)
-		var xInverse, xSquared, xInverseSquared fr.Element
-		xInverse.Inverse(&x)
-		xSquared.Mul(&x, &x)
-		xInverseSquared.Mul(&xInverse, &xInverse)
-		pWork.Add(&pWork, pointPtr(cvPointTimes(left, &xSquared)))
-		pWork.Add(&pWork, pointPtr(cvPointTimes(right, &xInverseSquared)))
-		half := len(gWork) / 2
-		gNext := make([]bls12381.G1Affine, half)
-		hNext := make([]bls12381.G1Affine, half)
-		for i := 0; i < half; i++ {
-			gNext[i] = cvPointSum(
-				pointPtr(cvPointTimes(&gWork[i], &xInverse)),
-				pointPtr(cvPointTimes(&gWork[half+i], &x)),
-			)
-			hNext[i] = cvPointSum(
-				pointPtr(cvPointTimes(&hWork[i], &x)),
-				pointPtr(cvPointTimes(&hWork[half+i], &xInverse)),
-			)
-		}
-		gWork, hWork = gNext, hNext
+		challenges[round] = x
+		inverseChallenges[round].Inverse(&x)
+		leftCoefficients[round].Mul(&x, &x)
+		rightCoefficients[round].Mul(
+			&inverseChallenges[round], &inverseChallenges[round],
+		)
 	}
-	right := cvPointSum(
-		pointPtr(cvPointTimes(&gWork[0], &proof.a)),
-		pointPtr(cvPointTimes(&hWork[0], &proof.b)),
-	)
+
+	// Expanding the recursive generator folds gives one coefficient per
+	// original generator. Verify the same final equation with one MSM instead
+	// of O(N log N) curve scalar multiplications.
+	gWeights := make([]fr.Element, len(g))
+	hWeights := make([]fr.Element, len(h))
+	for generator := range g {
+		gWeights[generator].SetOne()
+		hWeights[generator].SetOne()
+		half := len(g) / 2
+		for round := range challenges {
+			if generator&half == 0 {
+				gWeights[generator].Mul(&gWeights[generator], &inverseChallenges[round])
+				hWeights[generator].Mul(&hWeights[generator], &challenges[round])
+			} else {
+				gWeights[generator].Mul(&gWeights[generator], &challenges[round])
+				hWeights[generator].Mul(&hWeights[generator], &inverseChallenges[round])
+			}
+			half >>= 1
+		}
+		gWeights[generator].Mul(&gWeights[generator], &proof.a).Neg(&gWeights[generator])
+		hWeights[generator].Mul(&hWeights[generator], &proof.b).Neg(&hWeights[generator])
+	}
+	points := make([]bls12381.G1Affine, 0, 1+2*len(proof.left)+2*len(g)+1)
+	coefficients := make([]fr.Element, 0, cap(points))
+	points = append(points, p)
+	coefficients = append(coefficients, fr.One())
+	points = append(points, proof.left...)
+	coefficients = append(coefficients, leftCoefficients...)
+	points = append(points, proof.right...)
+	coefficients = append(coefficients, rightCoefficients...)
+	points = append(points, g...)
+	coefficients = append(coefficients, gWeights...)
+	points = append(points, h...)
+	coefficients = append(coefficients, hWeights...)
 	var product fr.Element
 	product.Mul(&proof.a, &proof.b)
-	right.Add(&right, pointPtr(cvPointTimes(&u, &product)))
-	if !pWork.Equal(&right) {
+	product.Neg(&product)
+	points = append(points, u)
+	coefficients = append(coefficients, product)
+	result := apvssCompactPointSum(points, coefficients)
+	if !result.IsInfinity() {
 		return fmt.Errorf("APVSS inner-product equation mismatch")
 	}
 	return nil

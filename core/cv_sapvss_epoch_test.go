@@ -52,6 +52,19 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 	if err := validateCVEpochConfig(waitAll); err != nil {
 		t.Fatalf("explicit experimental wait-all ACK mode rejected: %v", err)
 	}
+	full := base
+	full.APVSSMode = APVSSModeFullPublicVE
+	if err := validateCVEpochConfig(full); err == nil || !strings.Contains(err.Error(), "backend gate") {
+		t.Fatalf("full proof prototype crossed backend gate without opt-in: %v", err)
+	}
+	full.AllowExperimentalAPVSS = true
+	if err := validateCVEpochConfig(full); err != nil {
+		t.Fatalf("explicit experimental full proof mode rejected: %v", err)
+	}
+	full.APVSSBenchmarkWaitAllACKs = true
+	if err := validateCVEpochConfig(full); err == nil || !strings.Contains(err.Error(), "does not use ACK/fallback") {
+		t.Fatalf("full proof mode accepted ACK controls: %v", err)
+	}
 
 	tests := []struct {
 		name string
@@ -79,9 +92,33 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 
 func TestNormalizeConfigDefaultsToExactLaneFallback(t *testing.T) {
 	cfg := NormalizeConfig(Config{FOld: 1, FNew: 1})
-	if cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfile || cfg.AllowExperimentalAPVSS {
-		t.Fatalf("default APVSS fallback profile = %q experimental=%t",
-			cfg.APVSSFallbackProfile, cfg.AllowExperimentalAPVSS)
+	if cfg.APVSSMode != APVSSModeACKFallback ||
+		cfg.APVSSFullProofProfile != APVSSFullProofExact ||
+		cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfile || cfg.AllowExperimentalAPVSS {
+		t.Fatalf("default APVSS mode/full/fallback = %q/%q/%q experimental=%t",
+			cfg.APVSSMode, cfg.APVSSFullProofProfile, cfg.APVSSFallbackProfile, cfg.AllowExperimentalAPVSS)
+	}
+}
+
+func TestValidateConfigRejectsUnknownFullProofProfile(t *testing.T) {
+	cfg := NormalizeConfig(Config{
+		SID: "invalid-full-proof-profile", OldCommittee: []int{0, 1, 2, 3},
+		NewCommittee: []int{4, 5, 6, 7}, FOld: 1, FNew: 1,
+		APVSSMode: APVSSModeFullPublicVE, APVSSFullProofProfile: "unknown",
+	})
+	if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "full-public-ve proof profile") {
+		t.Fatalf("unknown full proof profile validation error = %v", err)
+	}
+}
+
+func TestValidateConfigRejectsUnknownAPVSSMode(t *testing.T) {
+	cfg := NormalizeConfig(Config{
+		SID: "invalid-apvss-mode", OldCommittee: []int{0, 1, 2, 3},
+		NewCommittee: []int{4, 5, 6, 7}, FOld: 1, FNew: 1,
+		APVSSMode: "unknown",
+	})
+	if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "invalid APVSS mode") {
+		t.Fatalf("unknown APVSS mode validation error = %v", err)
 	}
 }
 
@@ -227,6 +264,260 @@ func TestCVBuildEpochContextAndRandomDealerLeaf(t *testing.T) {
 	}
 	if err := cvVerifyLeaf(&leafContext, leaf); err != nil {
 		t.Fatalf("random CV dealer leaf rejected: %v", err)
+	}
+}
+
+func TestCVBuildEpochFullPublicVEPrototype(t *testing.T) {
+	cfg, _, _, _ := cvM4Fixture(t)
+	cfg.APVSSMode = APVSSModeFullPublicVE
+	dirs := generateCVReceiverKeysForTest(t, cfg.SID, cfg.NewCommittee)
+	material, err := cvLoadReceiverKeyMaterial(
+		dirs.public, dirs.secret, cfg.SID, cfg.NewCommittee, []int{cfg.NewCommittee[0]},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafContext, err := cvBuildEpochLeafContext(cfg, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leafContext.proofProfile != cvLeafGrothProofProfile {
+		t.Fatalf("full mode proof profile = %q", leafContext.proofProfile)
+	}
+	leaf, _, err := cvRandomDealerLeafWithWitness(leafContext, cfg.LocalNodeIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !leaf.hasLeafNIZK || leaf.proof == nil {
+		t.Fatal("full mode generated no public proof")
+	}
+	proofWire, err := cvLeafProofCanonicalBytes(leaf.proof)
+	if err != nil || len(proofWire) == 0 {
+		t.Fatalf("full mode proof bytes = %d, err=%v", len(proofWire), err)
+	}
+	wire, err := cvLeafCanonicalBytes(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeLeaf(wire, &leafContext)
+	if err != nil {
+		t.Fatalf("holder rejected full proof leaf: %v", err)
+	}
+	if err := cvVerifyLeaf(&leafContext, decoded); err != nil {
+		t.Fatalf("full proof leaf verification failed: %v", err)
+	}
+	structuralContext := leafContext
+	structuralContext.proofProfile = cvLeafStructuralProofProfile
+	if _, err := cvDecodeLeaf(wire, &structuralContext); err == nil {
+		t.Fatal("full proof leaf replayed into ACK/fallback context")
+	}
+}
+
+func TestCVBuildEpochFullCompactPublicVEPrototype(t *testing.T) {
+	cfg, _, _, _ := cvM4Fixture(t)
+	cfg.APVSSMode = APVSSModeFullPublicVE
+	cfg.APVSSFullProofProfile = APVSSFullProofCompactBatch
+	cfg.AllowExperimentalAPVSS = true
+	dirs := generateCVReceiverKeysForTest(t, cfg.SID, cfg.NewCommittee)
+	material, err := cvLoadReceiverKeyMaterial(
+		dirs.public, dirs.secret, cfg.SID, cfg.NewCommittee, []int{cfg.NewCommittee[0]},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafContext, err := cvBuildEpochLeafContext(cfg, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leafContext.proofProfile != cvLeafFullCompactProofProfile {
+		t.Fatalf("full compact mode proof profile = %q", leafContext.proofProfile)
+	}
+	leaf, witness, err := cvRandomDealerLeafWithWitness(leafContext, cfg.LocalNodeIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !leaf.hasLeafNIZK || leaf.proof != nil || leaf.compactProof == nil {
+		t.Fatal("full compact mode generated the wrong proof capability")
+	}
+	if got := apvssCompactLinkReceiverIndices(leaf.compactProof.link); len(got) != len(cfg.NewCommittee) {
+		t.Fatalf("full compact proof covers %d receivers, want %d", len(got), len(cfg.NewCommittee))
+	} else {
+		for i, receiver := range got {
+			if receiver != i+1 {
+				t.Fatalf("full compact receiver order[%d]=%d", i, receiver)
+			}
+		}
+	}
+	if len(witness.scalarCoins) < 2 || witness.scalarCoins[0][0].Equal(&witness.scalarCoins[1][0]) ||
+		witness.blindingCoins[0].Equal(&witness.blindingCoins[1]) {
+		t.Fatal("full compact dealer reused receiver encryption randomness")
+	}
+	wire, err := cvLeafCanonicalBytes(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeLeaf(wire, &leafContext)
+	if err != nil {
+		t.Fatalf("holder rejected full compact leaf: %v", err)
+	}
+	if err := cvVerifyLeaf(&leafContext, decoded); err != nil {
+		t.Fatalf("full compact leaf verification failed: %v", err)
+	}
+
+	t.Run("ciphertext mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		bad.receivers[0].encryptedShare.scalarChunks[0].c.Add(
+			&bad.receivers[0].encryptedShare.scalarChunks[0].c, &genG1,
+		)
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&leafContext, bad); err == nil {
+			t.Fatal("accepted full compact proof for a mutated ciphertext")
+		}
+	})
+	t.Run("coefficient commitment mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		bad.coefficientCommitments[0].Add(&bad.coefficientCommitments[0], &genG1)
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&leafContext, bad); err == nil {
+			t.Fatal("accepted full compact proof for a mutated coefficient commitment")
+		}
+	})
+	t.Run("receiver order mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		bad.compactProof.link.lanes[0], bad.compactProof.link.lanes[1] =
+			bad.compactProof.link.lanes[1], bad.compactProof.link.lanes[0]
+		if err := apvssVerifyCompactFallback(bad, bad.compactProof); err == nil {
+			t.Fatal("accepted reordered full compact receiver proof")
+		}
+	})
+	t.Run("missing receiver", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		bad.compactProof.link.lanes = bad.compactProof.link.lanes[:len(bad.compactProof.link.lanes)-1]
+		if err := apvssVerifyCompactFallback(bad, bad.compactProof); err == nil {
+			t.Fatal("accepted full compact proof that omitted a receiver")
+		}
+	})
+	t.Run("context mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		bad.context.sessionID = []byte("other-full-compact-session")
+		if err := apvssVerifyCompactFallback(bad, bad.compactProof); err == nil {
+			t.Fatal("accepted full compact proof under another context")
+		}
+	})
+	t.Run("fallback scope replay", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		bad.context.proofProfile = cvLeafStructuralProofProfile
+		if err := apvssVerifyCompactFallback(bad, bad.compactProof); err == nil {
+			t.Fatal("full compact proof replayed into fallback scope")
+		}
+	})
+	t.Run("comparator mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		one := fr.One()
+		bad.compactProof.comparator.zRelation.Add(
+			&bad.compactProof.comparator.zRelation, &one,
+		)
+		if err := apvssVerifyCompactFallback(bad, bad.compactProof); err == nil {
+			t.Fatal("accepted mutated full compact comparator")
+		}
+	})
+	t.Run("proof mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		one := fr.One()
+		bad.compactProof.digitRange.tHat.Add(&bad.compactProof.digitRange.tHat, &one)
+		bad.digest = cvLeafDigest(bad)
+		if err := cvVerifyLeaf(&leafContext, bad); err == nil {
+			t.Fatal("accepted mutated full compact range proof")
+		}
+	})
+}
+
+func TestCVFullExactAndCompactPreserveScalarOutput(t *testing.T) {
+	secret := cvTestScalar(101)
+	key, err := cvReceiverPublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseContext := cvLeafContext{
+		sessionID:          []byte("full-backend-output-equivalence"),
+		epoch:              1,
+		sharingDegree:      0,
+		profile:            cvChunkProfile{chunkBits: 8, maxComponents: 1},
+		receiverPublicKeys: []bls12381.G1Affine{key},
+		dealerSetPolicy:    []byte("first-f-plus-one"),
+	}
+	chunks, err := cvChunkCount(baseContext.profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scalarCoefficients := []fr.Element{cvTestScalar(12345)}
+	blindingCoefficients := []fr.Element{cvTestScalar(67890)}
+	scalarCoins := [][]fr.Element{cvTestCoins(chunks, 1000)}
+	blindingCoins := []fr.Element{cvTestScalar(2000)}
+
+	exactContext := baseContext
+	exactContext.proofProfile = cvLeafGrothProofProfile
+	exactLeaf, err := cvReferenceDeal(
+		exactContext, 7, scalarCoefficients, blindingCoefficients, scalarCoins, blindingCoins,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactContext := baseContext
+	compactContext.proofProfile = cvLeafFullCompactProofProfile
+	compactLeaf, err := cvReferenceDeal(
+		compactContext, 7, scalarCoefficients, blindingCoefficients, scalarCoins, blindingCoins,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactAggregate, err := cvAgg(&exactContext, []*cvLeaf{exactLeaf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactAggregate, err := cvAgg(&compactContext, []*cvLeaf{compactLeaf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactShare, _, err := cvDecShare(exactAggregate, secret, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactShare, _, err := cvDecShare(compactAggregate, secret, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exactShare.scalar.Equal(&compactShare.scalar) ||
+		!exactShare.publicScalar.Equal(&compactShare.publicScalar) ||
+		!exactShare.blindingOpening.Equal(&compactShare.blindingOpening) {
+		t.Fatal("full proof backend changed scalar-output semantics")
+	}
+}
+
+func TestACKFallbackDealerUsesIndependentReceiverCoins(t *testing.T) {
+	cfg, _, _, _ := cvM4Fixture(t)
+	cfg.APVSSMode = APVSSModeACKFallback
+	dirs := generateCVReceiverKeysForTest(t, cfg.SID, cfg.NewCommittee)
+	material, err := cvLoadReceiverKeyMaterial(
+		dirs.public, dirs.secret, cfg.SID, cfg.NewCommittee, []int{cfg.NewCommittee[0]},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafContext, err := cvBuildEpochLeafContext(cfg, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, witness, err := cvRandomDealerLeafWithWitness(leafContext, cfg.LocalNodeIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(witness.scalarCoins) < 2 || len(witness.scalarCoins[0]) == 0 {
+		t.Fatal("missing per-receiver encryption coins")
+	}
+	if witness.scalarCoins[0][0].Equal(&witness.scalarCoins[1][0]) ||
+		witness.blindingCoins[0].Equal(&witness.blindingCoins[1]) {
+		t.Fatal("ACK/fallback dealer reused receiver encryption randomness")
 	}
 }
 

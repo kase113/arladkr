@@ -172,6 +172,9 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 			t.Fatal("concurrent materializers produced different aggregate headers")
 		}
 	}
+	if got, want := transport.sentCount(cvTagAggregateManifest), len(nodes)-1; got != want {
+		t.Fatalf("optimistic primary sent %d aggregate offers, want %d", got, want)
+	}
 	if materialized.rlo.Lock.Threshold != len(nodes)-cfg.FOld || len(materialized.rlo.Lock.Certificate) == 0 {
 		t.Fatal("network ARC did not produce a compact recovered certificate")
 	}
@@ -179,8 +182,12 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		service.mu.Lock()
 		cachedOffers := len(service.verifiedAggregates)
 		cachedDispersals := len(service.verifiedDispersals)
+		cachedLeaves := len(service.verifiedLeaves)
 		persistedFresh := len(service.persistedFreshArtifacts)
 		service.mu.Unlock()
+		if cachedLeaves != cfg.FOld+1 {
+			t.Fatalf("node %d verified %d leaves, want K=%d", service.localNode, cachedLeaves, cfg.FOld+1)
+		}
 		if cachedOffers != 1 {
 			t.Fatalf("node %d cached %d verified aggregate offers, want one", service.localNode, cachedOffers)
 		}
@@ -322,6 +329,69 @@ func TestCVARCCertificateWakesPendingCollectorAndRejectsMutation(t *testing.T) {
 	if service.aggregateCertificates[badKey] != nil {
 		t.Fatal("mutated ARC certificate entered the verified cache")
 	}
+}
+
+func TestCVCertifiedAggregatePublishesInEitherArrivalOrder(t *testing.T) {
+	cfg, leafContext, _, leaves := cvM4Fixture(t)
+	if err := ensureRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := cvMaterializeAndLockAggregate(cfg, &leafContext, leaves[:cfg.FOld+1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerDigest := digestAggHeaderForLock(materialized.rlo.Header)
+	certificateWire, err := cvARCCertificateCanonicalBytes(headerDigest, materialized.rlo.Lock.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newService := func() (*cvComponentService, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		return &cvComponentService{
+			ctx: ctx, cfg: cfg,
+			aggregateCertificates:        make(map[string][]byte),
+			verifiedAggregateCandidates:  make(map[string]*cvVerifiedAggregateCandidate),
+			publishedCertifiedCandidates: make(map[string]struct{}),
+			certifiedCandidates:          make(chan *cvMaterializedAggregate, 1),
+		}, cancel
+	}
+	assertPublished := func(t *testing.T, service *cvComponentService) {
+		t.Helper()
+		select {
+		case got := <-service.certifiedCandidates:
+			if !bytes.Equal(got.rlo.Digest, materialized.rlo.Digest) ||
+				!bytes.Equal(got.aggregate.digest, materialized.aggregate.digest) {
+				t.Fatal("published certified aggregate changed its AggRLO binding")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("certified aggregate was not published")
+		}
+	}
+
+	t.Run("candidate before certificate", func(t *testing.T) {
+		service, cancel := newService()
+		defer cancel()
+		if err := service.rememberVerifiedAggregateCandidate(
+			materialized.rlo.Header, materialized.aggregate, materialized.dispersal,
+		); err != nil {
+			t.Fatal(err)
+		}
+		service.handleARCCertificate(Message{From: cfg.OldCommittee[0], Body: certificateWire})
+		assertPublished(t, service)
+	})
+
+	t.Run("certificate before candidate", func(t *testing.T) {
+		service, cancel := newService()
+		defer cancel()
+		service.handleARCCertificate(Message{From: cfg.OldCommittee[0], Body: certificateWire})
+		if err := service.rememberVerifiedAggregateCandidate(
+			materialized.rlo.Header, materialized.aggregate, materialized.dispersal,
+		); err != nil {
+			t.Fatal(err)
+		}
+		assertPublished(t, service)
+	})
 }
 
 func TestCVAggregateManifestOfferRejectsMutation(t *testing.T) {
@@ -540,6 +610,220 @@ func TestCVComponentReadyCertificateReselectsAfterLowerDealerArrives(t *testing.
 	}
 	if got := materialized.rlo.Header.Dealers; len(got) != cfg.FOld+1 || got[0] != 0 || got[1] != 1 {
 		t.Fatalf("materializer did not adopt the later certified prefix: %v", got)
+	}
+}
+
+func TestCVComponentMaterializationKeepsOneCandidateInFlight(t *testing.T) {
+	t.Setenv("RLADKR_CV_PRIMARY_POOL_GRACE_MS", "0")
+	cfg, leafContext, _, leaves := cvM4Fixture(t)
+	if err := ensureRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	nodes := sortedUnique(cfg.OldCommittee)
+	transport := newCVRouterTestTransport(nodes, 256)
+	router, err := newCVSAPVSSRouter(context.Background(), transport, cfg.SID, cfg.Epoch, nodes, nodes, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = router.Close() })
+	services := make([]*cvComponentService, len(nodes))
+	for i, node := range nodes {
+		store, storeErr := newCVComponentLeafStore(t.TempDir())
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		services[i], err = newCVComponentService(context.Background(), cfg, &leafContext, node, transport, router, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, service := range services {
+			_ = service.Close()
+		}
+	})
+	dealerLeaves := make([]*cvLeaf, len(nodes))
+	dealerLeaves[0], dealerLeaves[1] = leaves[0], leaves[1]
+	for dealer := 2; dealer < len(nodes); dealer++ {
+		dealerLeaves[dealer], err = cvRandomDealerLeaf(leafContext, dealer)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	for _, dealer := range []int{1, 2, 3} {
+		if _, err := services[dealer].Disperse(ctx, dealerLeaves[dealer]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var first []*cvComponentDescriptor
+	select {
+	case first = <-services[0].readyCandidates:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if _, err := services[0].Disperse(ctx, dealerLeaves[0]); err != nil {
+		t.Fatal(err)
+	}
+	var second []*cvComponentDescriptor
+	select {
+	case second = <-services[0].readyCandidates:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	type materializeResult struct {
+		value *cvMaterializedAggregate
+		err   error
+	}
+	started := make(chan []*cvComponentDescriptor, 2)
+	releaseFirst := make(chan struct{})
+	want := &cvMaterializedAggregate{}
+	results := make(chan materializeResult, 1)
+	go func() {
+		value, materializeErr := services[0].materializeFirstCertified(
+			ctx,
+			first,
+			func(_ context.Context, descriptors []*cvComponentDescriptor) (*cvMaterializedAggregate, error) {
+				started <- append([]*cvComponentDescriptor(nil), descriptors...)
+				if descriptors[0].dealer == 1 {
+					<-releaseFirst
+					return nil, fmt.Errorf("stale candidate")
+				}
+				return want, nil
+			},
+		)
+		results <- materializeResult{value: value, err: materializeErr}
+	}()
+
+	select {
+	case descriptors := <-started:
+		if descriptors[0].dealer != 1 {
+			t.Fatalf("first in-flight candidate starts with dealer %d, want 1", descriptors[0].dealer)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	services[0].readyCandidates <- second
+	select {
+	case descriptors := <-started:
+		t.Fatalf("started concurrent candidate at dealer %d", descriptors[0].dealer)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	select {
+	case descriptors := <-started:
+		if descriptors[0].dealer != 0 {
+			t.Fatalf("retry candidate starts with dealer %d, want latest dealer 0", descriptors[0].dealer)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case result := <-results:
+		if result.err != nil || result.value != want {
+			t.Fatalf("single-in-flight materializer result = %p, %v", result.value, result.err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
+func TestCVComponentPrimaryGraceFallsBackWhenPrimaryDoesNotMaterialize(t *testing.T) {
+	t.Setenv("RLADKR_CV_PRIMARY_GRACE_MS", "1")
+	cfg, leafContext, _, leaves := cvM4Fixture(t)
+	if err := ensureRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	nodes := sortedUnique(cfg.OldCommittee)
+	transport := newCVRouterTestTransport(nodes, 256)
+	router, err := newCVSAPVSSRouter(context.Background(), transport, cfg.SID, cfg.Epoch, nodes, nodes, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = router.Close() })
+	services := make([]*cvComponentService, len(nodes))
+	for i, node := range nodes {
+		store, storeErr := newCVComponentLeafStore(t.TempDir())
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		services[i], err = newCVComponentService(context.Background(), cfg, &leafContext, node, transport, router, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, service := range services {
+			_ = service.Close()
+		}
+	})
+
+	third, err := cvRandomDealerLeaf(leafContext, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	for dealer, leaf := range []*cvLeaf{leaves[0], leaves[1], third} {
+		if _, err := services[dealer].Disperse(ctx, leaf); err != nil {
+			t.Fatalf("availability-lock dealer %d: %v", dealer, err)
+		}
+	}
+	nonPrimary := 1
+	if services[nonPrimary].localNode == cvPrimaryMaterializer(cfg) {
+		t.Fatal("test selected the epoch primary as fallback materializer")
+	}
+	candidates, err := services[nonPrimary].CollectComponentCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := services[nonPrimary].MaterializeFirstCertified(ctx, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if materialized.rlo.Lock.Threshold != len(nodes)-cfg.FOld ||
+		len(materialized.rlo.Lock.Certificate) == 0 {
+		t.Fatal("non-primary fallback did not recover an ARC certificate")
+	}
+	if got, want := transport.sentCount(cvTagAggregateManifest), len(nodes)-1; got != want {
+		t.Fatalf("fallback materializer sent %d aggregate offers, want %d", got, want)
+	}
+}
+
+func TestCVAggregateOfferFromSenderInFlight(t *testing.T) {
+	processing := map[string]struct{}{
+		"header-a/3": {},
+		"header-b/7": {},
+	}
+	if !cvAggregateOfferFromSenderInFlight(processing, 3) {
+		t.Fatal("missed in-flight offer from deterministic primary")
+	}
+	if cvAggregateOfferFromSenderInFlight(processing, 1) {
+		t.Fatal("unrelated sender delayed primary fallback")
+	}
+	delete(processing, "header-a/3")
+	if cvAggregateOfferFromSenderInFlight(processing, 3) {
+		t.Fatal("completed primary offer remained in flight")
+	}
+}
+
+func TestCVPrimaryOfferGraceExtendsAtMostOnce(t *testing.T) {
+	if !cvShouldExtendPrimaryOfferGrace(false, false, false, true) {
+		t.Fatal("first in-flight primary offer did not extend fallback grace")
+	}
+	if cvShouldExtendPrimaryOfferGrace(false, false, true, true) {
+		t.Fatal("primary offer extended fallback grace more than once")
+	}
+	if cvShouldExtendPrimaryOfferGrace(true, false, false, true) {
+		t.Fatal("deterministic primary delayed its own materialization")
+	}
+	if cvShouldExtendPrimaryOfferGrace(false, true, false, true) {
+		t.Fatal("active fallback materializer renewed primary grace")
+	}
+	if cvShouldExtendPrimaryOfferGrace(false, false, false, false) {
+		t.Fatal("missing primary offer renewed fallback grace")
 	}
 }
 

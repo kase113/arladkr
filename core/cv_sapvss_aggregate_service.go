@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,6 +20,7 @@ const (
 	cvARCCertificateDomain     = "ARL-CV-sAPVSS/arc-certificate"
 	cvRecoverGetDomain         = "ARL-CV-sAPVSS/recover-get"
 	cvMaxAggregateShards       = 1 << 16
+	CVAggregateCandidateMode   = "optimistic-primary-readycert-with-reselection-fallback"
 )
 
 type cvFreshShardArtifact struct {
@@ -366,16 +369,209 @@ type cvMaterializeAttempt struct {
 	err   error
 }
 
-// MaterializeFirstCertified tracks canonical-prefix reselections and returns
-// the first aggregate that obtains a recovered ARC certificate. A slow first
-// candidate must not prevent a later converged ReadyCert root from driving the
-// epoch into MVBA.
+type cvVerifiedAggregateCandidate struct {
+	header    AggHeader
+	aggregate *cvAggregateTranscript
+	dispersal *cvAggregateDispersal
+}
+
+func cvCloneAggHeader(header AggHeader) AggHeader {
+	return AggHeader{
+		SID: header.SID, Epoch: header.Epoch,
+		Dealers:         append([]int(nil), header.Dealers...),
+		AggregateDigest: append([]byte(nil), header.AggregateDigest...),
+		PayloadDigest:   append([]byte(nil), header.PayloadDigest...),
+		FreshShardRoot:  append([]byte(nil), header.FreshShardRoot...),
+		MetadataHash:    append([]byte(nil), header.MetadataHash...),
+	}
+}
+
+func cvPrimaryMaterializer(cfg Config) int {
+	oldOrder := sortedUnique(cfg.OldCommittee)
+	if len(oldOrder) == 0 {
+		return -1
+	}
+	epoch := cfg.Epoch
+	if epoch <= 0 {
+		epoch = 1
+	}
+	return oldOrder[(epoch-1)%len(oldOrder)]
+}
+
+func cvAggregatePrimaryGrace() time.Duration {
+	const defaultGrace = 10 * time.Second
+	raw := strings.TrimSpace(os.Getenv("RLADKR_CV_PRIMARY_GRACE_MS"))
+	if raw == "" {
+		return defaultGrace
+	}
+	milliseconds, err := strconv.Atoi(raw)
+	if err != nil || milliseconds < 0 {
+		return defaultGrace
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
+func CVAggregatePrimaryGrace() time.Duration {
+	return cvAggregatePrimaryGrace()
+}
+
+func cvAggregatePrimaryPoolGrace() time.Duration {
+	const defaultGrace = 250 * time.Millisecond
+	raw := strings.TrimSpace(os.Getenv("RLADKR_CV_PRIMARY_POOL_GRACE_MS"))
+	if raw == "" {
+		return defaultGrace
+	}
+	milliseconds, err := strconv.Atoi(raw)
+	if err != nil || milliseconds < 0 {
+		return defaultGrace
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
+func CVAggregatePrimaryPoolGrace() time.Duration {
+	return cvAggregatePrimaryPoolGrace()
+}
+
+func cvCertifiedMaterializedAggregate(
+	cfg Config,
+	candidate *cvVerifiedAggregateCandidate,
+	certificate []byte,
+) (*cvMaterializedAggregate, error) {
+	if candidate == nil || candidate.aggregate == nil || candidate.dispersal == nil || len(certificate) == 0 {
+		return nil, fmt.Errorf("incomplete certified CV-sAPVSS aggregate candidate")
+	}
+	header := cvCloneAggHeader(candidate.header)
+	rlo := &AggRLO{
+		Header: header,
+		Lock: AggLock{
+			Threshold:   len(cfg.OldCommittee) - cfg.FOld,
+			Certificate: append([]byte(nil), certificate...),
+		},
+		Aggregate: APVSSAggregate{
+			Provider:        "cv-sapvss",
+			Dealers:         append([]int(nil), header.Dealers...),
+			AggregateDigest: append([]byte(nil), header.AggregateDigest...),
+		},
+	}
+	rlo.Digest = digestAggRLO(*rlo)
+	if _, err := validateAggRLOShape(cfg, rlo); err != nil {
+		return nil, err
+	}
+	if err := validateAggRLOLock(cfg, rlo); err != nil {
+		return nil, err
+	}
+	return &cvMaterializedAggregate{
+		rlo: rlo, aggregate: candidate.aggregate, dispersal: candidate.dispersal,
+	}, nil
+}
+
+func (s *cvComponentService) rememberVerifiedAggregateCandidate(
+	header AggHeader,
+	aggregate *cvAggregateTranscript,
+	dispersal *cvAggregateDispersal,
+) error {
+	if aggregate == nil || dispersal == nil ||
+		!bytes.Equal(header.AggregateDigest, aggregate.digest) ||
+		!bytes.Equal(header.PayloadDigest, dispersal.payloadDigest) ||
+		!bytes.Equal(header.FreshShardRoot, dispersal.root) {
+		return fmt.Errorf("invalid verified CV-sAPVSS aggregate candidate")
+	}
+	key := fmt.Sprintf("%x", digestAggHeaderForLock(header))
+	s.mu.Lock()
+	if existing := s.verifiedAggregateCandidates[key]; existing != nil {
+		if !bytes.Equal(existing.aggregate.digest, aggregate.digest) ||
+			!bytes.Equal(existing.dispersal.root, dispersal.root) {
+			s.mu.Unlock()
+			return fmt.Errorf("conflicting verified CV-sAPVSS aggregate candidate")
+		}
+	} else {
+		s.verifiedAggregateCandidates[key] = &cvVerifiedAggregateCandidate{
+			header: cvCloneAggHeader(header), aggregate: aggregate, dispersal: dispersal,
+		}
+	}
+	s.mu.Unlock()
+	s.publishCertifiedAggregateCandidate(key)
+	return nil
+}
+
+func (s *cvComponentService) publishCertifiedAggregateCandidate(key string) {
+	s.mu.Lock()
+	if _, published := s.publishedCertifiedCandidates[key]; published {
+		s.mu.Unlock()
+		return
+	}
+	candidate := s.verifiedAggregateCandidates[key]
+	certificate := append([]byte(nil), s.aggregateCertificates[key]...)
+	s.mu.Unlock()
+	if candidate == nil || len(certificate) == 0 || s.certifiedCandidates == nil {
+		return
+	}
+	materialized, err := cvCertifiedMaterializedAggregate(s.cfg, candidate, certificate)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	if _, published := s.publishedCertifiedCandidates[key]; published {
+		s.mu.Unlock()
+		return
+	}
+	s.publishedCertifiedCandidates[key] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case s.certifiedCandidates <- materialized:
+	case <-s.ctx.Done():
+	}
+}
+
+func (s *cvComponentService) prewarmFirstKValid(
+	ctx context.Context,
+	descriptors []*cvComponentDescriptor,
+) {
+	want := s.cfg.FOld + 1
+	if ctx == nil || len(descriptors) != len(s.cfg.OldCommittee)-s.cfg.FOld {
+		return
+	}
+	valid := 0
+	for cursor := 0; valid < want && cursor < len(descriptors); {
+		batchSize := want - valid
+		end := cursor + batchSize
+		if end > len(descriptors) {
+			end = len(descriptors)
+		}
+		loaded, _ := cvLoadVerifiedLeavesOrdered(ctx, descriptors[cursor:end], s.loadOrRetrieveComponent)
+		for _, leaf := range loaded {
+			if leaf != nil {
+				valid++
+			}
+		}
+		cursor = end
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// MaterializeFirstCertified lets one deterministic primary materialize the
+// optimistic candidate. Other nodes reuse its certified AggRLO, but activate
+// the existing ReadyCert-reselection path after a bounded grace so a faulty
+// primary cannot prevent progress.
 func (s *cvComponentService) MaterializeFirstCertified(
 	ctx context.Context,
 	initial []*cvComponentDescriptor,
 ) (*cvMaterializedAggregate, error) {
+	return s.materializeFirstCertified(ctx, initial, s.MaterializeAndCollectARC)
+}
+
+func (s *cvComponentService) materializeFirstCertified(
+	ctx context.Context,
+	initial []*cvComponentDescriptor,
+	materialize func(context.Context, []*cvComponentDescriptor) (*cvMaterializedAggregate, error),
+) (*cvMaterializedAggregate, error) {
 	if ctx == nil || len(initial) != len(s.cfg.OldCommittee)-s.cfg.FOld {
 		return nil, fmt.Errorf("invalid CV-sAPVSS initial materialization candidate")
+	}
+	if materialize == nil {
+		return nil, fmt.Errorf("missing CV-sAPVSS materializer")
 	}
 	candidateCtx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
@@ -385,28 +581,101 @@ func (s *cvComponentService) MaterializeFirstCertified(
 	}()
 	results := make(chan cvMaterializeAttempt, len(s.cfg.OldCommittee)+2)
 	seen := make(map[string]struct{}, len(s.cfg.OldCommittee)+1)
-	launch := func(descriptors []*cvComponentDescriptor) {
+	launch := func(descriptors []*cvComponentDescriptor) bool {
 		certificate, err := cvBuildComponentReadyCertificate(s.localNode, descriptors)
 		if err != nil {
-			return
+			return false
 		}
 		key := fmt.Sprintf("%x", certificate.root)
 		if _, exists := seen[key]; exists {
-			return
+			return false
 		}
 		seen[key] = struct{}{}
 		candidate := append([]*cvComponentDescriptor(nil), descriptors...)
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			value, materializeErr := s.MaterializeAndCollectARC(candidateCtx, candidate)
+			value, materializeErr := materialize(candidateCtx, candidate)
 			select {
 			case results <- cvMaterializeAttempt{value: value, err: materializeErr}:
 			case <-candidateCtx.Done():
 			}
 		}()
+		return true
 	}
-	launch(initial)
+	latest := append([]*cvComponentDescriptor(nil), initial...)
+	isPrimary := s.localNode == cvPrimaryMaterializer(s.cfg)
+	hasAllDescriptors := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.componentDescriptors) == len(s.cfg.OldCommittee)
+	}
+	drainLatest := func() {
+	drain:
+		for {
+			select {
+			case newer := <-s.readyCandidates:
+				latest = append([]*cvComponentDescriptor(nil), newer...)
+			default:
+				break drain
+			}
+		}
+	}
+	materializationEnabled := false
+	materializationInFlight := false
+	activate := func() {
+		drainLatest()
+		materializationEnabled = true
+		if !materializationInFlight {
+			materializationInFlight = launch(latest)
+		}
+	}
+	prewarmActive := false
+	prewarmDone := make(chan struct{}, 1)
+	activatePrewarm := func() {
+		if isPrimary || prewarmActive {
+			return
+		}
+		drainLatest()
+		prewarmActive = true
+		candidate := append([]*cvComponentDescriptor(nil), latest...)
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			s.prewarmFirstKValid(candidateCtx, candidate)
+			select {
+			case prewarmDone <- struct{}{}:
+			case <-candidateCtx.Done():
+			}
+		}()
+	}
+	var activationTimer *time.Timer
+	var activation <-chan time.Time
+	primaryOfferGraceExtended := false
+	if isPrimary {
+		if grace := cvAggregatePrimaryPoolGrace(); grace == 0 || hasAllDescriptors() {
+			activate()
+		} else {
+			activationTimer = time.NewTimer(grace)
+			activation = activationTimer.C
+		}
+	}
+	defer func() {
+		if activationTimer != nil {
+			activationTimer.Stop()
+		}
+	}()
+	var prewarmTimer *time.Timer
+	var prewarm <-chan time.Time
+	if !isPrimary {
+		if cvAggregatePrimaryPoolGrace() == 0 || hasAllDescriptors() {
+			activatePrewarm()
+		} else {
+			prewarmTimer = time.NewTimer(cvAggregatePrimaryPoolGrace())
+			prewarm = prewarmTimer.C
+			defer prewarmTimer.Stop()
+		}
+	}
 
 	for {
 		select {
@@ -415,8 +684,54 @@ func (s *cvComponentService) MaterializeFirstCertified(
 		case <-s.ctx.Done():
 			return nil, s.ctx.Err()
 		case result := <-results:
+			materializationInFlight = false
 			if result.err == nil && result.value != nil {
 				return result.value, nil
+			}
+			// A newer canonical ReadyCert may have arrived while the previous
+			// attempt was doing expensive leaf verification. Retry only after the
+			// in-flight attempt has failed, and only for an unseen root.
+			if materializationEnabled {
+				drainLatest()
+				materializationInFlight = launch(latest)
+			}
+		case materialized := <-s.certifiedCandidates:
+			if materialized != nil {
+				return materialized, nil
+			}
+		case <-activation:
+			activation = nil
+			// Do not start a competing materializer while this node is already
+			// spending the same cryptographic work on the deterministic primary's
+			// ReadyCert-bound offer. Once that verification finishes, one further
+			// bounded grace lets the collector broadcast its recovered ARC. An
+			// absent or failed primary still reaches activate below.
+			if cvShouldExtendPrimaryOfferGrace(
+				isPrimary,
+				materializationEnabled,
+				primaryOfferGraceExtended,
+				s.primaryAggregateOfferInFlight(),
+			) {
+				grace := cvAggregatePrimaryGrace()
+				if grace > 0 {
+					primaryOfferGraceExtended = true
+					activationTimer = time.NewTimer(grace)
+					activation = activationTimer.C
+					continue
+				}
+			}
+			activate()
+		case <-prewarm:
+			prewarm = nil
+			activatePrewarm()
+		case <-prewarmDone:
+			if !isPrimary && !materializationEnabled {
+				if grace := cvAggregatePrimaryGrace(); grace == 0 {
+					activate()
+				} else {
+					activationTimer = time.NewTimer(grace)
+					activation = activationTimer.C
+				}
 			}
 		case descriptors := <-s.readyCandidates:
 			// Coalesce roots already queued before spending another aggregate
@@ -430,7 +745,23 @@ func (s *cvComponentService) MaterializeFirstCertified(
 					break drain
 				}
 			}
-			launch(descriptors)
+			latest = append([]*cvComponentDescriptor(nil), descriptors...)
+			if !prewarmActive && !isPrimary && hasAllDescriptors() {
+				if prewarmTimer != nil {
+					prewarmTimer.Stop()
+				}
+				prewarm = nil
+				activatePrewarm()
+			}
+			if !materializationEnabled && isPrimary && hasAllDescriptors() {
+				if activationTimer != nil {
+					activationTimer.Stop()
+				}
+				activation = nil
+				activate()
+			} else if materializationEnabled && !materializationInFlight {
+				materializationInFlight = launch(latest)
+			}
 		}
 	}
 }
@@ -493,36 +824,13 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 			cachedAggregate = nil
 		}
 	}
-	type loadResult struct {
-		index int
-		leaf  *cvVerifiedLeaf
-	}
 	for cursor := 0; cachedAggregate == nil && len(leaves) < want && cursor < len(descriptors); {
 		batchSize := want - len(leaves)
 		end := cursor + batchSize
 		if end > len(descriptors) {
 			end = len(descriptors)
 		}
-		results := make(chan loadResult, end-cursor)
-		jobs := make(chan int)
-		workers := cvComponentLoadWorkers(end - cursor)
-		for worker := 0; worker < workers; worker++ {
-			go func() {
-				for index := range jobs {
-					leaf, _ := s.loadOrRetrieveComponent(ctx, descriptors[index])
-					results <- loadResult{index: index, leaf: leaf}
-				}
-			}()
-		}
-		for index := cursor; index < end; index++ {
-			jobs <- index
-		}
-		close(jobs)
-		loaded := make([]*cvVerifiedLeaf, end-cursor)
-		for range loaded {
-			result := <-results
-			loaded[result.index-cursor] = result.leaf
-		}
+		loaded, _ := cvLoadVerifiedLeavesOrdered(ctx, descriptors[cursor:end], s.loadOrRetrieveComponent)
 		for offset, leaf := range loaded {
 			if leaf == nil {
 				continue
@@ -553,6 +861,11 @@ func (s *cvComponentService) MaterializeAndCollectARC(ctx context.Context, descr
 		}
 	}
 	metrics.aggregate = time.Since(phaseStart)
+	// Do not disperse an aggregate for an intermediate local prefix that was
+	// superseded while its expensive leaf verification was running.
+	if !s.isCanonicalReadyPool(descriptors) {
+		return nil, fmt.Errorf("stale CV-sAPVSS canonical ReadyCert pool")
+	}
 	manifestRoot, err := cvComponentManifestRoot(selectedDescriptors)
 	if err != nil {
 		return nil, err
@@ -797,6 +1110,9 @@ func (s *cvComponentService) handleAggregateManifestOffer(msg Message, offer *cv
 	if err != nil || s.persistFreshArtifact(artifact.headerDigest, shardWire) != nil {
 		return
 	}
+	if err := s.rememberVerifiedAggregateCandidate(offer.header, agg, dispersal); err != nil {
+		return
+	}
 	_ = agg // aggregate verification is included in verifyAggregateManifestForARC.
 	sig, err := s.localARCShare(artifact.headerDigest)
 	if err != nil {
@@ -829,14 +1145,20 @@ func (s *cvComponentService) resolveAggregateManifestDescriptors(offer *cvAggreg
 		return fmt.Errorf("missing accepted CV-sAPVSS ReadyCert pool")
 	}
 	descriptors := make([]*cvComponentDescriptor, 0, s.cfg.FOld+1)
-	for _, descriptor := range readyPool {
-		if _, err := s.loadOrRetrieveComponent(s.ctx, descriptor); err != nil {
-			continue
+	for cursor := 0; len(descriptors) < s.cfg.FOld+1 && cursor < len(readyPool); {
+		batchSize := s.cfg.FOld + 1 - len(descriptors)
+		end := cursor + batchSize
+		if end > len(readyPool) {
+			end = len(readyPool)
 		}
-		descriptors = append(descriptors, descriptor)
-		if len(descriptors) == s.cfg.FOld+1 {
-			break
+		loaded, _ := cvLoadVerifiedLeavesOrdered(s.ctx, readyPool[cursor:end], s.loadOrRetrieveComponent)
+		for offset, leaf := range loaded {
+			if leaf == nil {
+				continue
+			}
+			descriptors = append(descriptors, readyPool[cursor+offset])
 		}
+		cursor = end
 	}
 	if len(descriptors) != s.cfg.FOld+1 {
 		return fmt.Errorf("ReadyCert pool has insufficient valid CV-sAPVSS components")
@@ -880,6 +1202,32 @@ func cvAggregateMatchesDescriptors(agg *cvAggregateTranscript, descriptors []*cv
 	return true
 }
 
+func cvAggregateOfferFromSenderInFlight(processing map[string]struct{}, sender int) bool {
+	suffix := fmt.Sprintf("/%d", sender)
+	for key := range processing {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *cvComponentService) primaryAggregateOfferInFlight() bool {
+	primary := cvPrimaryMaterializer(s.cfg)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cvAggregateOfferFromSenderInFlight(s.processingOffers, primary)
+}
+
+func cvShouldExtendPrimaryOfferGrace(
+	isPrimary bool,
+	materializationEnabled bool,
+	alreadyExtended bool,
+	primaryOfferInFlight bool,
+) bool {
+	return !isPrimary && !materializationEnabled && !alreadyExtended && primaryOfferInFlight
+}
+
 func (s *cvComponentService) verifyNetworkAggregateManifestForARC(
 	offer *cvAggregateManifestOffer,
 ) (*cvAggregateTranscript, *cvAggregateDispersal, error) {
@@ -914,13 +1262,9 @@ func (s *cvComponentService) verifyAggregateManifestForARCLocked(offer *cvAggreg
 	}
 	s.mu.Unlock()
 	if agg == nil {
-		leaves := make([]*cvVerifiedLeaf, len(offer.descriptors))
-		for i, descriptor := range offer.descriptors {
-			leaf, loadErr := s.loadOrRetrieveComponent(s.ctx, descriptor)
-			if loadErr != nil {
-				return nil, nil, loadErr
-			}
-			leaves[i] = leaf
+		leaves, loadErrs := cvLoadVerifiedLeavesOrdered(s.ctx, offer.descriptors, s.loadOrRetrieveComponent)
+		if loadErr := cvFirstOrderedError(loadErrs); loadErr != nil {
+			return nil, nil, loadErr
 		}
 		var buildErr error
 		agg, buildErr = cvAggServiceVerified(s.leafCtx, leaves)
@@ -997,6 +1341,7 @@ func (s *cvComponentService) handleARCCertificate(msg Message) {
 		default:
 		}
 	}
+	s.publishCertifiedAggregateCandidate(key)
 }
 
 func (s *cvComponentService) loadOrRetrieveComponent(ctx context.Context, descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {

@@ -741,16 +741,15 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 		proofs[rid] = proofBytes
 	}
 
-	// Select first 2f+1 acks (sorted for determinism)
+	// Preserve every verified ACK. Truncating this set would leave a responsive
+	// receiver without either an ACK or a VE lane because ciphertext generation
+	// above is intentionally limited to non-responsive receivers.
 	sort.Ints(responsive)
-	selectedAcks := make(map[int][]byte, threshold)
-	count := 0
+	selectedAcks := make(map[int][]byte, len(acks))
 	for _, rid := range responsive {
-		if count >= threshold {
-			break
+		if sig, ok := acks[rid]; ok {
+			selectedAcks[rid] = sig
 		}
-		selectedAcks[rid] = acks[rid]
-		count++
 	}
 
 	transcript := &DXTTranscript{
@@ -798,9 +797,8 @@ func (b *DXTBackend) PartialVerify(nodeID int, transcript *DXTTranscript) bool {
 }
 
 // partialLaneIDs returns the deterministic 2f+1-lane responsibility window
-// for a verifier.  Old IDs are preferred because the result multicast is an
-// old-committee protocol stage; new IDs remain supported for compatibility
-// with the direct PartialVerify tests and callers.
+// for a verifier. New-committee IDs are the protocol actors after RC; old IDs
+// remain accepted for legacy direct PartialVerify tests.
 func (b *DXTBackend) partialLaneIDs(nodeID int) ([]int, bool) {
 	n := len(b.newCommittee)
 	nodeIdx, ok := b.oldIndex[nodeID]
@@ -846,7 +844,8 @@ func (b *DXTBackend) validateTranscriptShape(transcript *DXTTranscript) bool {
 	n := len(b.newCommittee)
 	threshold := 2*b.f + 1
 	if threshold <= 0 || threshold > n || len(transcript.Commitments) != n ||
-		len(transcript.Signatures) != threshold || len(transcript.Ciphertexts) != n-threshold ||
+		len(transcript.Signatures) < threshold || len(transcript.Signatures) > n ||
+		len(transcript.Signatures)+len(transcript.Ciphertexts) != n ||
 		len(transcript.BlindingCiphertexts) != len(transcript.Ciphertexts) ||
 		len(transcript.Proofs) != len(transcript.Ciphertexts) {
 		return false
@@ -1260,25 +1259,22 @@ func commitSharePair(curve elliptic.Curve, s, r *big.Int) []byte {
 }
 
 func hashToPoint(curve elliptic.Curve) (*big.Int, *big.Int) {
-	// Deterministic second generator: hash-and-try
-	for i := 0; i < 256; i++ {
+	// Deterministic public-input hash-and-try. There is deliberately no
+	// known-discrete-log fallback: returning g^x for a public x would violate
+	// the independent-generator assumption used by the Pedersen commitments.
+	for i := uint64(0); ; i++ {
 		h := sha256.New()
 		h.Write([]byte("PADKR-PEDERSEN-H"))
-		h.Write([]byte{byte(i)})
+		var counter [8]byte
+		binary.BigEndian.PutUint64(counter[:], i)
+		h.Write(counter[:])
 		hash := h.Sum(nil)
 		x := new(big.Int).SetBytes(hash)
 		x.Mod(x, curve.Params().P)
-		// Try to find y
 		if px, py := tryDecompress(curve, x); px != nil {
 			return px, py
 		}
 	}
-	// Fallback: use base point * known scalar (less ideal but deterministic)
-	fallback := sha256.Sum256([]byte("PADKR-H-FALLBACK"))
-	scalar := new(big.Int).SetBytes(fallback[:])
-	scalar.Mod(scalar, curve.Params().N)
-	px, py := curve.ScalarBaseMult(scalar.Bytes())
-	return px, py
 }
 
 func tryDecompress(curve elliptic.Curve, x *big.Int) (*big.Int, *big.Int) {

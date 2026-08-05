@@ -127,6 +127,11 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 	); err != nil {
 		t.Fatalf("generate multiprocess old-lock keys: %v", err)
 	}
+	if err := core.GenerateCVMVBACoinKeyMaterial(
+		publicKeyDir, secretKeyDir, "rladkr-go-bench", oldMembers, topo.f+1,
+	); err != nil {
+		t.Fatalf("generate multiprocess MVBA coin keys: %v", err)
+	}
 	args := []string{
 		"run", "./cmd/rladkrbench",
 		"-n", fmt.Sprintf("%d", topo.n),

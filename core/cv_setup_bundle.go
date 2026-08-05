@@ -1,0 +1,38 @@
+package core
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// CVSetupBundleDigest identifies the public trusted-setup bundle shared by
+// every process. Owner-local secret contents are deliberately not included.
+func CVSetupBundleDigest(publicDir string) (string, error) {
+	if publicDir == "" {
+		return "", fmt.Errorf("CV setup public directory is empty")
+	}
+	h := sha256.New()
+	_, _ = h.Write([]byte("ARL-ADKR/CV-SETUP-BUNDLE/v1\x00"))
+	for _, name := range []string{cvReceiverRegistryFilename, cvOldLockRegistryFilename, cvMVBACoinRegistryFilename} {
+		path := filepath.Join(publicDir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", fmt.Errorf("inspect CV setup registry %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("CV setup registry is not a regular file: %s", name)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read CV setup registry %s: %w", name, err)
+		}
+		_, _ = h.Write([]byte(name))
+		_, _ = h.Write([]byte{0})
+		fileDigest := sha256.Sum256(raw)
+		_, _ = h.Write(fileDigest[:])
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}

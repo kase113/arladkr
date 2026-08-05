@@ -115,32 +115,35 @@ type cvComponentService struct {
 	receiverIndex        map[int]int
 	localReceiverSecrets map[int]fr.Element
 
-	mu                         sync.Mutex
-	aggregateBuildMu           sync.Mutex
-	freshPersistMu             sync.Mutex
-	pendingACKs                map[string]chan cvComponentAck
-	pendingComponentStatements map[string][]byte
-	pendingLeaves              map[string]*cvPendingComponentLeaf
-	componentRetrievals        map[string]*cvComponentRetrievalCall
-	pendingARCs                map[string]*cvPendingARCShare
-	pendingRecoveries          map[string]*cvPendingRecovery
-	pendingReceipts            *cvPendingReceiptExchange
-	receiptPreparations        map[string]*cvReceiptPreparationCall
-	pendingLaneACKs            map[string]*apvssPendingLaneACKs
-	processingOffers           map[string]struct{}
-	processingLaneOffers       map[string]struct{}
-	componentStatementByDealer map[int][]byte
-	localARCShareByHeader      map[string][]byte
-	publishedReadyRoots        map[string]struct{}
-	acceptedReadyRoots         map[string]struct{}
-	readyDescriptorsByRoot     map[string][]*cvComponentDescriptor
-	pendingReadyCertificates   map[string]*cvComponentReadyCertificate
-	pendingReadyOffers         map[string][]Message
-	readyCandidates            chan []*cvComponentDescriptor
-	verifiedLeaves             map[string]*cvVerifiedLeaf
-	aggregateCertificates      map[string][]byte
-	verifiedAggregates         map[string]*cvAggregateTranscript
-	verifiedAggregatesByRoot   map[string]*cvAggregateTranscript
+	mu                           sync.Mutex
+	aggregateBuildMu             sync.Mutex
+	freshPersistMu               sync.Mutex
+	pendingACKs                  map[string]chan cvComponentAck
+	pendingComponentStatements   map[string][]byte
+	pendingLeaves                map[string]*cvPendingComponentLeaf
+	componentRetrievals          map[string]*cvComponentRetrievalCall
+	pendingARCs                  map[string]*cvPendingARCShare
+	pendingRecoveries            map[string]*cvPendingRecovery
+	pendingReceipts              *cvPendingReceiptExchange
+	receiptPreparations          map[string]*cvReceiptPreparationCall
+	pendingLaneACKs              map[string]*apvssPendingLaneACKs
+	processingOffers             map[string]struct{}
+	processingLaneOffers         map[string]struct{}
+	componentStatementByDealer   map[int][]byte
+	localARCShareByHeader        map[string][]byte
+	publishedReadyRoots          map[string]struct{}
+	acceptedReadyRoots           map[string]struct{}
+	readyDescriptorsByRoot       map[string][]*cvComponentDescriptor
+	pendingReadyCertificates     map[string]*cvComponentReadyCertificate
+	pendingReadyOffers           map[string][]Message
+	readyCandidates              chan []*cvComponentDescriptor
+	verifiedLeaves               map[string]*cvVerifiedLeaf
+	aggregateCertificates        map[string][]byte
+	verifiedAggregateCandidates  map[string]*cvVerifiedAggregateCandidate
+	publishedCertifiedCandidates map[string]struct{}
+	certifiedCandidates          chan *cvMaterializedAggregate
+	verifiedAggregates           map[string]*cvAggregateTranscript
+	verifiedAggregatesByRoot     map[string]*cvAggregateTranscript
 	// verifiedDispersals is keyed by aggregate digest so candidates with
 	// different ReadyCert roots but identical FirstKValid outputs share RS work.
 	verifiedDispersals         map[string]*cvAggregateDispersal
@@ -247,50 +250,53 @@ func newCVComponentServiceWithReceivers(
 		laneQueueSize = 1
 	}
 	service := &cvComponentService{
-		ctx:                        serviceCtx,
-		cancel:                     cancel,
-		cfg:                        c,
-		leafCtx:                    leafContext,
-		leafContextDigest:          append([]byte(nil), cvLeafContextDigest(leafContext)...),
-		localNode:                  localNode,
-		transport:                  transport,
-		networkAuth:                networkAuth,
-		store:                      store,
-		shardStore:                 shardStore,
-		freshStore:                 freshStore,
-		inbox:                      mergedInbox,
-		receiverOrder:              append([]int(nil), receiverOrder...),
-		receiverIndex:              receiverIndex,
-		localReceiverSecrets:       localSecrets,
-		pendingACKs:                make(map[string]chan cvComponentAck),
-		pendingComponentStatements: make(map[string][]byte),
-		pendingLeaves:              make(map[string]*cvPendingComponentLeaf),
-		componentRetrievals:        make(map[string]*cvComponentRetrievalCall),
-		pendingARCs:                make(map[string]*cvPendingARCShare),
-		pendingRecoveries:          make(map[string]*cvPendingRecovery),
-		receiptPreparations:        make(map[string]*cvReceiptPreparationCall),
-		pendingLaneACKs:            make(map[string]*apvssPendingLaneACKs),
-		processingOffers:           make(map[string]struct{}),
-		processingLaneOffers:       make(map[string]struct{}),
-		componentStatementByDealer: make(map[int][]byte),
-		localARCShareByHeader:      make(map[string][]byte),
-		publishedReadyRoots:        make(map[string]struct{}),
-		acceptedReadyRoots:         make(map[string]struct{}),
-		readyDescriptorsByRoot:     make(map[string][]*cvComponentDescriptor),
-		pendingReadyCertificates:   make(map[string]*cvComponentReadyCertificate),
-		pendingReadyOffers:         make(map[string][]Message),
-		readyCandidates:            make(chan []*cvComponentDescriptor, len(c.OldCommittee)+1),
-		verifiedLeaves:             make(map[string]*cvVerifiedLeaf),
-		aggregateCertificates:      make(map[string][]byte),
-		verifiedAggregates:         make(map[string]*cvAggregateTranscript),
-		verifiedAggregatesByRoot:   make(map[string]*cvAggregateTranscript),
-		verifiedDispersals:         make(map[string]*cvAggregateDispersal),
-		resolvedAggregateManifests: make(map[string][]*cvComponentDescriptor),
-		persistedFreshArtifacts:    make(map[string]struct{}),
-		componentDescriptors:       make(map[int]*cvComponentDescriptor),
-		laneOfferQueue:             make(chan Message, laneQueueSize),
-		reconstructedCacheMode:     cvReconstructedLeafCacheMode(),
-		done:                       make(chan struct{}),
+		ctx:                          serviceCtx,
+		cancel:                       cancel,
+		cfg:                          c,
+		leafCtx:                      leafContext,
+		leafContextDigest:            append([]byte(nil), cvLeafContextDigest(leafContext)...),
+		localNode:                    localNode,
+		transport:                    transport,
+		networkAuth:                  networkAuth,
+		store:                        store,
+		shardStore:                   shardStore,
+		freshStore:                   freshStore,
+		inbox:                        mergedInbox,
+		receiverOrder:                append([]int(nil), receiverOrder...),
+		receiverIndex:                receiverIndex,
+		localReceiverSecrets:         localSecrets,
+		pendingACKs:                  make(map[string]chan cvComponentAck),
+		pendingComponentStatements:   make(map[string][]byte),
+		pendingLeaves:                make(map[string]*cvPendingComponentLeaf),
+		componentRetrievals:          make(map[string]*cvComponentRetrievalCall),
+		pendingARCs:                  make(map[string]*cvPendingARCShare),
+		pendingRecoveries:            make(map[string]*cvPendingRecovery),
+		receiptPreparations:          make(map[string]*cvReceiptPreparationCall),
+		pendingLaneACKs:              make(map[string]*apvssPendingLaneACKs),
+		processingOffers:             make(map[string]struct{}),
+		processingLaneOffers:         make(map[string]struct{}),
+		componentStatementByDealer:   make(map[int][]byte),
+		localARCShareByHeader:        make(map[string][]byte),
+		publishedReadyRoots:          make(map[string]struct{}),
+		acceptedReadyRoots:           make(map[string]struct{}),
+		readyDescriptorsByRoot:       make(map[string][]*cvComponentDescriptor),
+		pendingReadyCertificates:     make(map[string]*cvComponentReadyCertificate),
+		pendingReadyOffers:           make(map[string][]Message),
+		readyCandidates:              make(chan []*cvComponentDescriptor, len(c.OldCommittee)+1),
+		verifiedLeaves:               make(map[string]*cvVerifiedLeaf),
+		aggregateCertificates:        make(map[string][]byte),
+		verifiedAggregateCandidates:  make(map[string]*cvVerifiedAggregateCandidate),
+		publishedCertifiedCandidates: make(map[string]struct{}),
+		certifiedCandidates:          make(chan *cvMaterializedAggregate, len(c.OldCommittee)+1),
+		verifiedAggregates:           make(map[string]*cvAggregateTranscript),
+		verifiedAggregatesByRoot:     make(map[string]*cvAggregateTranscript),
+		verifiedDispersals:           make(map[string]*cvAggregateDispersal),
+		resolvedAggregateManifests:   make(map[string][]*cvComponentDescriptor),
+		persistedFreshArtifacts:      make(map[string]struct{}),
+		componentDescriptors:         make(map[int]*cvComponentDescriptor),
+		laneOfferQueue:               make(chan Message, laneQueueSize),
+		reconstructedCacheMode:       cvReconstructedLeafCacheMode(),
+		done:                         make(chan struct{}),
 	}
 	if service.reconstructedCacheMode == "async" {
 		service.reconstructedCacheQueue = make(

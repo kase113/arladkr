@@ -17,6 +17,7 @@ type runtimeCrypto struct {
 	oldOrder    []int
 	oldIndex    map[int]int
 	lockSigner  *tblsThresholdSigner
+	coinSigner  *tblsThresholdSigner
 	commMetrics bool
 
 	commMu         sync.Mutex
@@ -47,11 +48,12 @@ func ensureRuntime(cfg *Config) error {
 	if lockThreshold <= 0 {
 		lockThreshold = 1
 	}
-	var lockSigner *tblsThresholdSigner
+	coinThreshold := cfg.FOld + 1
+	var lockSigner, coinSigner *tblsThresholdSigner
 	hasCVKeyDir := strings.TrimSpace(cfg.CVPublicKeyDir) != "" || strings.TrimSpace(cfg.CVLocalSecretDir) != ""
 	if hasCVKeyDir {
 		if strings.TrimSpace(cfg.CVPublicKeyDir) == "" || strings.TrimSpace(cfg.CVLocalSecretDir) == "" {
-			return fmt.Errorf("CV old-lock runtime requires both public and local secret key directories")
+			return fmt.Errorf("CV runtime requires both public and local secret key directories")
 		}
 		material, err := cvLoadOldLockKeyMaterial(
 			cfg.CVPublicKeyDir, cfg.CVLocalSecretDir, cfg.SID,
@@ -64,9 +66,20 @@ func ensureRuntime(cfg *Config) error {
 		if err != nil {
 			return err
 		}
+		coinMaterial, err := cvLoadMVBACoinKeyMaterial(
+			cfg.CVPublicKeyDir, cfg.CVLocalSecretDir, cfg.SID,
+			oldOrder, coinThreshold, localOldNodes(*cfg),
+		)
+		if err != nil {
+			return fmt.Errorf("load CV MVBA coin key material: %w", err)
+		}
+		coinSigner, err = newTBLSThresholdSignerFromCoinMaterial(coinMaterial)
+		if err != nil {
+			return err
+		}
 	} else {
 		if cfg.StrictNetwork {
-			return fmt.Errorf("strict CV runtime requires materialized old-lock key directories")
+			return fmt.Errorf("strict CV runtime requires materialized receiver, old-lock, and MVBA coin key directories")
 		}
 		var err error
 		lockSigner, err = newTBLSThresholdSigner(
@@ -82,10 +95,22 @@ func ensureRuntime(cfg *Config) error {
 		if err != nil {
 			return err
 		}
+		coinSigner, err = newTBLSThresholdSigner(
+			oldOrder,
+			coinThreshold,
+			deterministicStream(
+				"rladkr-test-only-mvba-coin-signer",
+				[]byte(cfg.SID),
+				encodeInts(oldOrder),
+			),
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	cfg.runtime = &runtimeCrypto{
-		oldOrder: oldOrder, oldIndex: oldIndex, lockSigner: lockSigner,
+		oldOrder: oldOrder, oldIndex: oldIndex, lockSigner: lockSigner, coinSigner: coinSigner,
 		commMetrics:    cfg.CommMetrics,
 		phaseSentBytes: make(map[string]uint64), phaseRecvBytes: make(map[string]uint64),
 	}
@@ -260,6 +285,52 @@ func newTBLSThresholdSignerFromMaterial(material *cvOldLockKeyMaterial) (*tblsTh
 		memberOrder:           append([]int(nil), material.members...), memberIndex: memberIndex,
 		signingMembers: nodeSet(materialMemberIDs(material.localShares)),
 	}, nil
+}
+
+func newTBLSThresholdSignerFromCoinMaterial(material *cvMVBACoinKeyMaterial) (*tblsThresholdSigner, error) {
+	if material == nil || material.threshold <= 0 || material.threshold > len(material.members) ||
+		len(material.publicShares) != len(material.members) || len(material.localShares) == 0 {
+		return nil, fmt.Errorf("invalid CV MVBA coin signer material")
+	}
+	memberIndex := make(map[int]int, len(material.members))
+	shares := make([]fr.Element, len(material.members))
+	for i, member := range material.members {
+		memberIndex[member] = i
+		if share, ok := material.localShares[member]; ok {
+			shares[i] = share
+		}
+	}
+	return &tblsThresholdSigner{
+		t: material.threshold, n: len(material.members), pubKey: material.groupPublic,
+		pubKeyShares: append([]bls12381.G2Affine(nil), material.publicShares...), shares: shares,
+		memberOrder: append([]int(nil), material.members...), memberIndex: memberIndex,
+		signingMembers: nodeSet(materialMemberIDs(material.localShares)),
+	}, nil
+}
+
+type mvbaCoinSigner struct {
+	member int
+	signer *tblsThresholdSigner
+}
+
+func (s *mvbaCoinSigner) ID() int { return s.member }
+
+func (s *mvbaCoinSigner) Sign(domain string, digest []byte) ([]byte, error) {
+	return s.signer.SignShare(s.member, domain, digest)
+}
+
+func (s *mvbaCoinSigner) Verify(from int, domain string, digest, signature []byte) bool {
+	return s.signer.VerifyShare(from, domain, digest, signature)
+}
+
+func (s *mvbaCoinSigner) Threshold(string) int { return s.signer.Threshold() }
+
+func (s *mvbaCoinSigner) Recover(domain string, digest []byte, shares map[int][]byte) ([]byte, error) {
+	return s.signer.Recover(domain, digest, shares)
+}
+
+func (s *mvbaCoinSigner) VerifyRecovered(domain string, digest, signature []byte) bool {
+	return s.signer.VerifyRecovered(domain, digest, signature)
 }
 
 func materialMemberIDs(shares map[int]fr.Element) []int {

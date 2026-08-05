@@ -363,6 +363,169 @@ func TestCVOldLockKeyMaterialLoadsOnlyLocalSigningShare(t *testing.T) {
 	}
 }
 
+func TestCVMVBACoinKeyMaterialLocalOnlyAndThresholdRecovery(t *testing.T) {
+	root := t.TempDir()
+	publicDir := filepath.Join(root, "public")
+	secretDir := filepath.Join(root, "private")
+	members := []int{0, 1, 2, 3}
+	const sid = "cv-mvba-coin"
+	if err := cvGenerateMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2); err != nil {
+		t.Fatal(err)
+	}
+	assertCVKeyFileMode(t, filepath.Join(publicDir, cvMVBACoinRegistryFilename), 0o644)
+	for _, member := range members {
+		assertCVKeyFileMode(t, cvMVBACoinSecretPath(secretDir, member), 0o600)
+	}
+
+	localOne, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(localOne.localShares) != 1 {
+		t.Fatalf("loaded MVBA coin secrets = %d, want 1", len(localOne.localShares))
+	}
+	signerOne, err := newTBLSThresholdSignerFromCoinMaterial(localOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := hashBytes([]byte("coin-recovery-test"))
+	shareOne, err := signerOne.SignShare(1, "CV_MVBA_COIN_TEST", digest)
+	if err != nil || !signerOne.VerifyShare(1, "CV_MVBA_COIN_TEST", digest, shareOne) {
+		t.Fatalf("local MVBA coin share failed: %v", err)
+	}
+	if _, err := signerOne.SignShare(0, "CV_MVBA_COIN_TEST", digest); err == nil {
+		t.Fatal("MVBA coin signer retained a non-local share")
+	}
+
+	localZero, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signerZero, err := newTBLSThresholdSignerFromCoinMaterial(localZero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shareZero, err := signerZero.SignShare(0, "CV_MVBA_COIN_TEST", digest)
+	if err != nil || !signerOne.VerifyShare(0, "CV_MVBA_COIN_TEST", digest, shareZero) {
+		t.Fatalf("peer MVBA coin share failed: %v", err)
+	}
+	recovered, err := signerOne.Recover("CV_MVBA_COIN_TEST", digest, map[int][]byte{0: shareZero, 1: shareOne})
+	if err != nil || !signerOne.VerifyRecovered("CV_MVBA_COIN_TEST", digest, recovered) {
+		t.Fatalf("recover MVBA threshold coin signature: %v", err)
+	}
+	if _, err := signerOne.Recover("CV_MVBA_COIN_TEST", digest, map[int][]byte{1: shareOne}); err == nil {
+		t.Fatal("MVBA coin recovered below f+1 threshold")
+	}
+
+	for _, member := range []int{0, 2, 3} {
+		if err := os.Remove(cvMVBACoinSecretPath(secretDir, member)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{1}); err != nil {
+		t.Fatalf("loader required non-local MVBA coin secrets: %v", err)
+	}
+}
+
+func TestCVMVBACoinKeyMaterialRejectsInvalidArtifacts(t *testing.T) {
+	members := []int{0, 1, 2, 3}
+	const sid = "cv-mvba-coin-invalid"
+
+	t.Run("context mismatch", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, "wrong-sid", members, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted wrong SID")
+		}
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 3, []int{0}); err == nil {
+			t.Fatal("loader accepted wrong threshold")
+		}
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, []int{1, 0, 2, 3}, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted wrong member order")
+		}
+	})
+
+	t.Run("mutated public polynomial", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		path := filepath.Join(publicDir, cvMVBACoinRegistryFilename)
+		registry := readCVMVBACoinRegistryForTest(t, path)
+		registry.Members[0].PublicKey = registry.Members[1].PublicKey
+		writeJSONForTest(t, path, registry, 0o644)
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted inconsistent public polynomial")
+		}
+	})
+
+	t.Run("registry digest binding", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		path := filepath.Join(publicDir, cvMVBACoinRegistryFilename)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(raw, ' '), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted private share bound to a different registry encoding")
+		}
+	})
+
+	t.Run("mutated private share", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		path := cvMVBACoinSecretPath(secretDir, 0)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var artifact cvMVBACoinPrivateArtifact
+		if err := json.Unmarshal(raw, &artifact); err != nil {
+			t.Fatal(err)
+		}
+		artifact.Share = hex.EncodeToString(make([]byte, fr.Bytes))
+		writeJSONForTest(t, path, artifact, 0o600)
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted mutated private share")
+		}
+	})
+
+	t.Run("insecure private permissions", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		path := cvMVBACoinSecretPath(secretDir, 0)
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted insecure private permissions")
+		}
+	})
+
+	t.Run("private symlink", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		path := cvMVBACoinSecretPath(secretDir, 0)
+		target := filepath.Join(secretDir, "coin-target")
+		if err := os.Rename(path, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0}); err == nil {
+			t.Fatal("loader followed a private key symlink")
+		}
+	})
+
+	t.Run("oversized private artifact", func(t *testing.T) {
+		publicDir, secretDir := generateCVMVBACoinKeysForTest(t, sid, members, 2)
+		path := cvMVBACoinSecretPath(secretDir, 0)
+		if err := os.WriteFile(path, make([]byte, cvMaxReceiverRegistryBytes+1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cvLoadMVBACoinKeyMaterial(publicDir, secretDir, sid, members, 2, []int{0}); err == nil {
+			t.Fatal("loader accepted oversized private artifact")
+		}
+	})
+}
+
 func TestCVRuntimeUsesRegistryBoundOldLockSigner(t *testing.T) {
 	root := t.TempDir()
 	publicDir := filepath.Join(root, "public")
@@ -373,6 +536,9 @@ func TestCVRuntimeUsesRegistryBoundOldLockSigner(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := cvGenerateOldLockKeyMaterial(publicDir, secretDir, "cv-runtime-lock", oldMembers, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := cvGenerateMVBACoinKeyMaterial(publicDir, secretDir, "cv-runtime-lock", oldMembers, 2); err != nil {
 		t.Fatal(err)
 	}
 	cfg := NormalizeConfig(Config{
@@ -389,6 +555,48 @@ func TestCVRuntimeUsesRegistryBoundOldLockSigner(t *testing.T) {
 	}
 	if _, err := cfg.runtime.lockSigner.SignShare(0, "CV_RUNTIME_TEST", digest); err == nil {
 		t.Fatal("CV runtime fell back to a signer containing non-local old-node shares")
+	}
+	if _, err := cfg.runtime.coinSigner.SignShare(2, "CV_RUNTIME_COIN_TEST", digest); err != nil {
+		t.Fatalf("local registry coin share rejected: %v", err)
+	}
+	if _, err := cfg.runtime.coinSigner.SignShare(0, "CV_RUNTIME_COIN_TEST", digest); err == nil {
+		t.Fatal("CV runtime retained a non-local MVBA coin share")
+	}
+}
+
+func TestCVSetupBundleDigestBindsAllPublicRegistries(t *testing.T) {
+	root := t.TempDir()
+	publicDir := filepath.Join(root, "public")
+	secretDir := filepath.Join(root, "private")
+	oldMembers := []int{0, 1, 2, 3}
+	newMembers := []int{4, 5, 6, 7}
+	if err := cvGenerateReceiverKeyMaterial(publicDir, secretDir, "cv-setup-digest", newMembers); err != nil {
+		t.Fatal(err)
+	}
+	if err := cvGenerateOldLockKeyMaterial(publicDir, secretDir, "cv-setup-digest", oldMembers, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := cvGenerateMVBACoinKeyMaterial(publicDir, secretDir, "cv-setup-digest", oldMembers, 2); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := CVSetupBundleDigest(publicDir)
+	if err != nil || digest == "" {
+		t.Fatalf("setup digest failed: digest=%q err=%v", digest, err)
+	}
+	path := filepath.Join(publicDir, cvMVBACoinRegistryFilename)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mutated, err := CVSetupBundleDigest(publicDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutated == digest {
+		t.Fatal("setup digest did not bind MVBA coin registry")
 	}
 }
 
@@ -408,6 +616,41 @@ func generateCVReceiverKeysForTest(t testing.TB, sid string, receiverIDs []int) 
 		t.Fatal(err)
 	}
 	return dirs
+}
+
+func generateCVMVBACoinKeysForTest(t testing.TB, sid string, members []int, threshold int) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	publicDir := filepath.Join(root, "public")
+	secretDir := filepath.Join(root, "private")
+	if err := cvGenerateMVBACoinKeyMaterial(publicDir, secretDir, sid, members, threshold); err != nil {
+		t.Fatal(err)
+	}
+	return publicDir, secretDir
+}
+
+func readCVMVBACoinRegistryForTest(t testing.TB, path string) cvMVBACoinRegistry {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registry cvMVBACoinRegistry
+	if err := json.Unmarshal(raw, &registry); err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
+func writeJSONForTest(t testing.TB, path string, value any, mode os.FileMode) {
+	t.Helper()
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readCVReceiverRegistryForTest(t testing.TB, dir string) cvReceiverRegistry {

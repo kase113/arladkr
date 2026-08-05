@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+const (
+	APVSSModeFullPublicVE        = "full-public-ve"
+	APVSSModeACKFallback         = "ack-fallback"
+	APVSSFullProofExact          = "exact"
+	APVSSFullProofCompactBatch   = "compact-batch"
+	APVSSFullProofFieldCongruent = "field-congruent"
+)
+
 type Config struct {
 	SID   string
 	Epoch int
@@ -43,6 +51,13 @@ type Config struct {
 	// Empty means all old-committee nodes are local.
 	LocalNodeIDs []int
 
+	// APVSSMode selects component validity construction only. Aggregation,
+	// ARC, MVBA, recovery, and scalar receipts are shared by both modes.
+	APVSSMode string
+	// APVSSFullProofProfile selects the all-receiver proof used by
+	// full-public-ve. It is independent of the ACK/fallback proof profile.
+	APVSSFullProofProfile string
+
 	// APVSSFallbackProfile selects the proof carried for receivers outside the
 	// ACK set. compact-batch additionally requires AllowExperimentalAPVSS.
 	APVSSFallbackProfile string
@@ -67,9 +82,9 @@ type Config struct {
 	// StrictNetwork makes benchmark runs fail fast if a local/cache shortcut is
 	// selected for phases that should use the simulated network.
 	StrictNetwork bool
-	// CVPublicKeyDir contains the public receiver registry shared by all nodes.
+	// CVPublicKeyDir contains the public receiver, old-lock, and MVBA coin registries.
 	CVPublicKeyDir string
-	// CVLocalSecretDir contains only this process's receiver secret material.
+	// CVLocalSecretDir contains only this process's receiver and old-node shares.
 	CVLocalSecretDir string
 	// CVLocalReceiverIDs identifies the new-committee receiver hosted here.
 	CVLocalReceiverIDs []int
@@ -104,7 +119,10 @@ func validateCVEpochConfig(cfg Config) error {
 	if strings.TrimSpace(c.ArtifactCacheDir) == "" {
 		return errors.New("CV epoch requires a local artifact store")
 	}
-	if c.APVSSFallbackProfile == apvssFallbackCompactBatchProfile && !c.AllowExperimentalAPVSS {
+	if c.APVSSMode == APVSSModeFullPublicVE && !c.AllowExperimentalAPVSS {
+		return errors.New("full-public-ve is a functional prototype pending the cryptographic backend gate; explicit experimental admission is required")
+	}
+	if c.APVSSMode == APVSSModeACKFallback && c.APVSSFallbackProfile == apvssFallbackCompactBatchProfile && !c.AllowExperimentalAPVSS {
 		return apvssRequireProductionFallbackBackend(c.APVSSFallbackProfile)
 	}
 	if c.APVSSBenchmarkFallbackCount > 0 && !c.AllowExperimentalAPVSS {
@@ -115,6 +133,10 @@ func validateCVEpochConfig(cfg Config) error {
 	}
 	if c.APVSSBenchmarkWaitAllACKs && c.APVSSBenchmarkFallbackCount > 0 {
 		return errors.New("APVSS wait-all and forced fallback modes are mutually exclusive")
+	}
+	if c.APVSSMode == APVSSModeFullPublicVE &&
+		(c.APVSSBenchmarkWaitAllACKs || c.APVSSBenchmarkFallbackCount != 0) {
+		return errors.New("full-public-ve does not use ACK/fallback benchmark controls")
 	}
 	return nil
 }
@@ -153,6 +175,14 @@ func NormalizeConfig(cfg Config) Config {
 	if len(out.LocalNodeIDs) == 0 {
 		out.LocalNodeIDs = sortedUnique(out.OldCommittee)
 	}
+	if out.APVSSMode == "" {
+		out.APVSSMode = APVSSModeACKFallback
+	}
+	out.APVSSMode = strings.ToLower(strings.TrimSpace(out.APVSSMode))
+	if out.APVSSFullProofProfile == "" {
+		out.APVSSFullProofProfile = APVSSFullProofExact
+	}
+	out.APVSSFullProofProfile = strings.ToLower(strings.TrimSpace(out.APVSSFullProofProfile))
 	if out.APVSSFallbackProfile == "" {
 		out.APVSSFallbackProfile = apvssFallbackExactLaneProfile
 	}
@@ -204,8 +234,22 @@ func ValidateConfig(cfg Config) error {
 	if cfg.SendRetryMax <= 0 {
 		return errors.New("invalid send retry max")
 	}
-	if err := apvssRequireFallbackBackend(cfg.APVSSFallbackProfile); err != nil {
-		return err
+	switch cfg.APVSSMode {
+	case APVSSModeFullPublicVE:
+		switch cfg.APVSSFullProofProfile {
+		case APVSSFullProofExact, APVSSFullProofCompactBatch, APVSSFullProofFieldCongruent:
+		default:
+			return errors.New("invalid full-public-ve proof profile")
+		}
+		if cfg.APVSSBenchmarkWaitAllACKs || cfg.APVSSBenchmarkFallbackCount != 0 {
+			return errors.New("full-public-ve does not use ACK/fallback benchmark controls")
+		}
+	case APVSSModeACKFallback:
+		if err := apvssRequireFallbackBackend(cfg.APVSSFallbackProfile); err != nil {
+			return err
+		}
+	default:
+		return errors.New("invalid APVSS mode")
 	}
 	if cfg.APVSSBenchmarkFallbackCount < 0 || cfg.APVSSBenchmarkFallbackCount > cfg.FNew {
 		return errors.New("APVSS benchmark fallback count must be in [0,f_n]")

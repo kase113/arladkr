@@ -12,6 +12,8 @@ base_port="${4:-20000}"
 epoch_timeout="${RLADKR_CV_EPOCH_TIMEOUT:-90s}"
 wait_spbc_timeout="${RLADKR_CV_WAIT_SPBC_TIMEOUT:-}"
 route_send_timeout="${RLADKR_CV_ROUTE_SEND_TIMEOUT:-}"
+apvss_mode="${RLADKR_APVSS_MODE:-ack-fallback}"
+apvss_full_proof_profile="${RLADKR_APVSS_FULL_PROOF_PROFILE:-exact}"
 apvss_fallback_profile="${RLADKR_APVSS_FALLBACK_PROFILE:-exact-lane}"
 allow_experimental_apvss="${RLADKR_ALLOW_EXPERIMENTAL_APVSS:-false}"
 apvss_forced_fallback_count="${RLADKR_APVSS_FORCED_FALLBACK_COUNT:-0}"
@@ -25,6 +27,18 @@ crypto_workers="${RLADKR_CRYPTO_WORKERS:-1}"
 # ACK decryption has its own bounded queue. Two workers per process use the
 # 32 logical CPUs of the n=16 local harness without widening proof workers.
 lane_workers="${RLADKR_LANE_WORKERS:-2}"
+# Divide a shared host's logical CPUs across its n node processes. The n=16
+# harness benefits measurably from its second SMT worker for curve-heavy leaf
+# verification. On a real one-process-per-host deployment the runtime default
+# instead reserves one scheduler slot and caps leaf verification at four.
+if [[ -n "${RLADKR_LEAF_VERIFY_WORKERS:-}" ]]; then
+  leaf_verify_workers="$RLADKR_LEAF_VERIFY_WORKERS"
+else
+  host_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
+  leaf_verify_workers=$((host_cpus / n))
+  (( leaf_verify_workers < 1 )) && leaf_verify_workers=1
+  (( leaf_verify_workers > 4 )) && leaf_verify_workers=4
+fi
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$repo_dir/bin/rladkrbench"
 summary_awk="$repo_dir/scripts/summarize_cluster_bench.awk"
@@ -77,6 +91,7 @@ for ((i=0; i<n; i++)); do
   mkdir -p "$node_secret_dir"
   chmod 700 "$node_secret_dir"
   mv "$generated_secret_dir/old-node-$i-lock.scalar" "$node_secret_dir/"
+  mv "$generated_secret_dir/old-node-$i-coin.scalar" "$node_secret_dir/"
   mv "$generated_secret_dir/receiver-$((n+i)).scalar" "$node_secret_dir/"
 done
 rmdir "$generated_secret_dir"
@@ -114,10 +129,13 @@ for ((i=0; i<n; i++)); do
     export RLADKR_CV_PERF_COUNTERS="${RLADKR_CV_PERF_COUNTERS:-1}"
     export RLADKR_CRYPTO_WORKERS="$crypto_workers"
     export RLADKR_LANE_WORKERS="$lane_workers"
+    export RLADKR_LEAF_VERIFY_WORKERS="$leaf_verify_workers"
     "$binary" -n "$n" -f "$f" -runs "$runs" -epochs "$epochs" \
       -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \
 			"${bench_timeout_args[@]}" \
+		-apvss-mode "$apvss_mode" \
+      -apvss-full-proof-profile "$apvss_full_proof_profile" \
       -apvss-fallback-profile "$apvss_fallback_profile" \
       -allow-experimental-apvss="$allow_experimental_apvss" \
       -apvss-forced-fallback-count "$apvss_forced_fallback_count" \

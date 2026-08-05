@@ -1,6 +1,12 @@
 package core
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestCVCryptoWorkerBudget(t *testing.T) {
 	t.Setenv("RLADKR_CRYPTO_WORKERS", "3")
@@ -17,13 +23,66 @@ func TestCVCryptoWorkerBudget(t *testing.T) {
 	if got := cvNestedMSMWorkers(64); got != 1 {
 		t.Fatalf("nested MSM workers=%d, want 1", got)
 	}
-	t.Setenv("RLADKR_COMPONENT_LOAD_WORKERS", "5")
-	if got := cvComponentLoadWorkers(10); got != 5 {
-		t.Fatalf("configured component load workers=%d, want 5", got)
-	}
 	t.Setenv("RLADKR_RS_WORKERS", "2")
 	if got := cvRSWorkers(10); got != 2 {
 		t.Fatalf("configured RS workers=%d, want 2", got)
+	}
+}
+
+func TestCVLeafVerifyWorkerBudget(t *testing.T) {
+	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "3")
+	if got := cvLeafVerifyWorkers(10); got != 3 {
+		t.Fatalf("configured leaf verification workers=%d, want 3", got)
+	}
+	if got := cvLeafVerifyWorkers(2); got != 2 {
+		t.Fatalf("job-limited leaf verification workers=%d, want 2", got)
+	}
+	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "99")
+	if got := cvLeafVerifyWorkers(10); got != 4 {
+		t.Fatalf("capped leaf verification workers=%d, want 4", got)
+	}
+}
+
+func TestCVLoadVerifiedLeavesOrderedAndBounded(t *testing.T) {
+	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "2")
+	descriptors := make([]*cvComponentDescriptor, 6)
+	for index := range descriptors {
+		descriptors[index] = &cvComponentDescriptor{dealer: index}
+	}
+	var active atomic.Int32
+	var peak atomic.Int32
+	loaded, errs := cvLoadVerifiedLeavesOrdered(context.Background(), descriptors,
+		func(_ context.Context, descriptor *cvComponentDescriptor) (*cvVerifiedLeaf, error) {
+			current := active.Add(1)
+			for {
+				old := peak.Load()
+				if current <= old || peak.CompareAndSwap(old, current) {
+					break
+				}
+			}
+			defer active.Add(-1)
+			time.Sleep(time.Duration(len(descriptors)-descriptor.dealer) * time.Millisecond)
+			if descriptor.dealer == 1 || descriptor.dealer == 4 {
+				return nil, fmt.Errorf("dealer %d", descriptor.dealer)
+			}
+			return &cvVerifiedLeaf{leafDigest: []byte{byte(descriptor.dealer)}}, nil
+		})
+	if got := peak.Load(); got != 2 {
+		t.Fatalf("peak concurrent leaf loads=%d, want 2", got)
+	}
+	for index := range descriptors {
+		if index == 1 || index == 4 {
+			if errs[index] == nil || loaded[index] != nil {
+				t.Fatalf("missing ordered failure at index %d", index)
+			}
+			continue
+		}
+		if errs[index] != nil || loaded[index] == nil || len(loaded[index].leafDigest) != 1 || int(loaded[index].leafDigest[0]) != index {
+			t.Fatalf("ordered result %d does not match descriptor", index)
+		}
+	}
+	if got := cvFirstOrderedError(errs); got == nil || got.Error() != "dealer 1" {
+		t.Fatalf("first deterministic error=%v, want dealer 1", got)
 	}
 }
 

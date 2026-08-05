@@ -8,9 +8,6 @@ package core
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
 	"errors"
@@ -717,10 +714,8 @@ func runArladkrMVBATCPInstance(
 		)
 	}
 
-	// BLS12-381 threshold keys for common coin (~5-10x faster than BN256).
-	blsShares, blsPKs, blsPubKey, blsThreshold, blsErr := dmvba.GenerateBLS12381TBLSBundle(n, f, arlCoinStream([]byte(cfg.SID+"-coin")))
-	if blsErr != nil {
-		return nil, 0, fmt.Errorf("arladkr mvba bls: %w", blsErr)
+	if cfg.runtime == nil || cfg.runtime.coinSigner == nil {
+		return nil, 0, fmt.Errorf("arladkr MVBA coin runtime is unavailable")
 	}
 
 	recv := make([]chan dmvba.ReceivedMessage, n)
@@ -808,7 +803,7 @@ func runArladkrMVBATCPInstance(
 		i := i
 		go func() {
 			defer wg.Done()
-			signer := dmvba.NewBLS12381Signer(i, blsShares[i], blsPubKey, blsPKs, n, blsThreshold)
+			signer := &mvbaCoinSigner{member: i, signer: cfg.runtime.coinSigner}
 			neti := &arladkrTCPNet{id: i, hub: hub}
 			var mvbaPredicate func(int, dmvba.ProposalValue) bool
 			if predicate != nil {
@@ -973,10 +968,4 @@ func arlIntFromEnv(name string, def int) int {
 		return def
 	}
 	return n
-}
-
-func arlCoinStream(seed []byte) cipher.Stream {
-	key := sha256.Sum256(seed)
-	block, _ := aes.NewCipher(key[:])
-	return cipher.NewCTR(block, make([]byte, aes.BlockSize))
 }

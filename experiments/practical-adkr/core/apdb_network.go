@@ -385,7 +385,7 @@ func serveNetworkAPDB(
 	}
 }
 
-func acceptNetworkAPDBShard(cfg Config, old []int, localID int, wire apdbNetworkWire, transcripts map[int]*DXTTranscript, private ed25519.PrivateKey, dxt *DXTBackend) (APDBReceipt, error) {
+func acceptNetworkAPDBShard(cfg Config, old []int, localID int, wire apdbNetworkWire, _ map[int]*DXTTranscript, private ed25519.PrivateKey, _ *DXTBackend) (APDBReceipt, error) {
 	_, dealerPresent := apdbNodeIndex(old, wire.Dealer)
 	expectedDataShards := len(old) - 2*cfg.F
 	if wire.Holder != localID || wire.TotalShards != len(old) || wire.ShardIndex < 0 || wire.ShardIndex >= len(old) ||
@@ -397,18 +397,6 @@ func acceptNetworkAPDBShard(cfg Config, old []int, localID int, wire apdbNetwork
 	leaf := apdbShardLeaf(wire.Dealer, wire.ShardIndex, wire.Shard)
 	if !bytes.Equal(root, wire.Root) || !verifyAPDBMerkleProof(leaf, wire.ShardIndex, wire.TotalShards, wire.Proof, wire.MerkleRoot) {
 		return APDBReceipt{}, errors.New("invalid network APDB commitment/proof")
-	}
-	transcript := transcripts[wire.Dealer]
-	if transcript == nil || transcript.Dealer != wire.Dealer || !dxt.VerifyTranscript(localID, transcript) {
-		return APDBReceipt{}, errors.New("network APDB transcript unavailable or invalid")
-	}
-	raw, err := json.Marshal(transcript)
-	if err != nil {
-		return APDBReceipt{}, err
-	}
-	digest := sha256.Sum256(raw)
-	if !bytes.Equal(digest[:], wire.ValueDigest) {
-		return APDBReceipt{}, errors.New("network APDB value digest mismatch")
 	}
 	if err := persistNetworkAPDBShard(cfg, old, localID, wire); err != nil {
 		return APDBReceipt{}, err
@@ -576,8 +564,7 @@ func persistNetworkAPDBShard(cfg Config, old []int, holder int, wire apdbNetwork
 	if base == "" {
 		return errors.New("network APDB shard store requires PRACTICAL_ARTIFACT_CACHE_DIR")
 	}
-	path := filepath.Join(base, "apdb-network-shards", practicalRunID(cfg, old, cfg.NewCommittee),
-		fmt.Sprintf("node-%06d", holder), fmt.Sprintf("dealer-%06d-%x.shard", wire.Dealer, wire.Root))
+	path := networkAPDBShardStorePath(base, cfg, old, holder, wire.Dealer, wire.Root)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -607,4 +594,55 @@ func persistNetworkAPDBShard(cfg Config, old []int, holder int, wire apdbNetwork
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+func networkAPDBShardStorePath(base string, cfg Config, old []int, holder, dealer int, root []byte) string {
+	return filepath.Join(base, "apdb-network-shards", practicalRunID(cfg, old, cfg.NewCommittee),
+		fmt.Sprintf("node-%06d", holder), fmt.Sprintf("dealer-%06d-%x.shard", dealer, root))
+}
+
+// loadNetworkAPDBShard is the RC-side read of the exact shard persisted by PD.
+// It never regenerates a codeword from a process-local full transcript.
+func loadNetworkAPDBShard(cfg Config, old []int, holder int, cert APDBCertificate) (apdbNetworkWire, error) {
+	base := strings.TrimSpace(os.Getenv("PRACTICAL_ARTIFACT_CACHE_DIR"))
+	if base == "" {
+		return apdbNetworkWire{}, errors.New("network APDB shard load requires PRACTICAL_ARTIFACT_CACHE_DIR")
+	}
+	if len(cert.Root) != sha256.Size || len(cert.ValueDigest) != sha256.Size ||
+		len(cert.MerkleRoot) != sha256.Size || cert.TotalShards != len(old) ||
+		cert.DataShards != len(old)-2*cfg.F {
+		return apdbNetworkWire{}, errors.New("RC requires a complete RS/Merkle APDB certificate")
+	}
+	holderIndex, ok := apdbNodeIndex(old, holder)
+	if !ok {
+		return apdbNetworkWire{}, fmt.Errorf("holder %d is outside the old committee", holder)
+	}
+	path := networkAPDBShardStorePath(base, cfg, old, holder, cert.Sender, cert.Root)
+	info, err := os.Stat(path)
+	if err != nil {
+		return apdbNetworkWire{}, err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<20 {
+		return apdbNetworkWire{}, errors.New("invalid persisted network APDB shard file")
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return apdbNetworkWire{}, err
+	}
+	var wire apdbNetworkWire
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		return apdbNetworkWire{}, err
+	}
+	if wire.Kind != "shard" || wire.SID != cfg.SID || wire.Epoch != cfg.Epoch ||
+		wire.Dealer != cert.Sender || wire.Holder != holder || wire.ShardIndex != holderIndex ||
+		wire.DataShards != cert.DataShards || wire.TotalShards != cert.TotalShards ||
+		!bytes.Equal(wire.Root, cert.Root) || !bytes.Equal(wire.ValueDigest, cert.ValueDigest) ||
+		!bytes.Equal(wire.MerkleRoot, cert.MerkleRoot) {
+		return apdbNetworkWire{}, errors.New("persisted APDB shard does not match its certificate")
+	}
+	leaf := apdbShardLeaf(wire.Dealer, wire.ShardIndex, wire.Shard)
+	if !verifyAPDBMerkleProof(leaf, wire.ShardIndex, wire.TotalShards, wire.Proof, wire.MerkleRoot) {
+		return apdbNetworkWire{}, errors.New("persisted APDB shard has an invalid Merkle proof")
+	}
+	return wire, nil
 }

@@ -10,17 +10,20 @@ import (
 )
 
 const (
-	apvssLaneStatementDomain = "ARL-APVSS/lane-statement"
-	apvssACKChallengeDomain  = "ARL-APVSS/receiver-ack"
-	apvssFallbackDomain      = "ARL-APVSS/exact-lane-fallback"
-	apvssLeafDigestDomain    = "ARL-APVSS/leaf"
-	apvssLeafWireDomain      = "ARL-APVSS/leaf-wire"
-	apvssLaneOfferDomain     = "ARL-APVSS/lane-offer"
-	apvssACKMessageDomain    = "ARL-APVSS/ack-message"
-	apvssFallbackSetDomain   = "ARL-APVSS/fallback-set"
+	apvssLaneStatementDomain  = "ARL-APVSS/lane-statement"
+	apvssACKChallengeDomain   = "ARL-APVSS/receiver-ack"
+	apvssFallbackDomain       = "ARL-APVSS/exact-lane-fallback"
+	apvssLeafDigestDomain     = "ARL-APVSS/leaf"
+	apvssLeafWireDomain       = "ARL-APVSS/leaf-wire"
+	apvssLaneOfferDomain      = "ARL-APVSS/lane-offer"
+	apvssACKMessageDomain     = "ARL-APVSS/ack-message"
+	apvssFallbackSetDomain    = "ARL-APVSS/fallback-set"
+	apvssFullCompactSetDomain = "ARL-APVSS/full-compact-set"
 
 	apvssFallbackExactLaneProfile    = "exact-lane"
 	apvssFallbackCompactBatchProfile = "compact-batch"
+	apvssFullCompactBatchProfile     = "full-compact-batch"
+	apvssFullFieldBatchProfile       = "full-field-congruent"
 	apvssFallbackProfileMarker       = 0x41505631
 )
 
@@ -202,16 +205,16 @@ func apvssFallbackSetStatementDigest(
 	if leaf == nil || len(receiverIndices) > leaf.context.sharingDegree {
 		return nil, fmt.Errorf("invalid APVSS fallback statement")
 	}
+	contextDigest, chunks, err := apvssPrepareLaneStatement(leaf)
+	if err != nil {
+		return nil, err
+	}
 	var wire bytes.Buffer
 	if err := cvWriteBytes(&wire, []byte(apvssFallbackSetDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, []byte(normalizedProfile)); err != nil {
 		return nil, err
-	}
-	contextDigest := cvLeafContextDigest(&leaf.context)
-	if len(contextDigest) == 0 {
-		return nil, fmt.Errorf("encode APVSS fallback context")
 	}
 	if err := cvWriteBytes(&wire, contextDigest); err != nil {
 		return nil, err
@@ -225,7 +228,9 @@ func apvssFallbackSetStatementDigest(
 		if receiverIndex <= previous || receiverIndex <= 0 || receiverIndex > len(leaf.receivers) {
 			return nil, fmt.Errorf("APVSS fallback indices must be strictly ordered and in range")
 		}
-		statementDigest, err := apvssLaneStatementDigest(leaf, receiverIndex)
+		statementDigest, err := apvssLaneStatementDigestPrepared(
+			leaf, receiverIndex, contextDigest, chunks,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -238,6 +243,76 @@ func apvssFallbackSetStatementDigest(
 		previous = receiverIndex
 	}
 	return hashBytes([]byte(apvssFallbackSetDomain), wire.Bytes()), nil
+}
+
+// apvssCompactSetStatementDigest separates the ACK/fallback statement from
+// the full-public statement. A full compact proof must cover every receiver
+// in canonical roster order; it cannot be replayed as an |I| fallback proof.
+func apvssCompactSetStatementDigest(leaf *cvLeaf, receiverIndices []int) ([]byte, error) {
+	if leaf == nil {
+		return nil, fmt.Errorf("invalid APVSS compact statement")
+	}
+	if leaf.context.proofProfile == cvLeafStructuralProofProfile {
+		return apvssFallbackSetStatementDigest(
+			leaf, receiverIndices, apvssFallbackCompactBatchProfile,
+		)
+	}
+	if (leaf.context.proofProfile != cvLeafFullCompactProofProfile &&
+		leaf.context.proofProfile != cvLeafFullFieldProofProfile) ||
+		len(receiverIndices) != len(leaf.receivers) {
+		return nil, fmt.Errorf("invalid APVSS full compact statement")
+	}
+	profile := apvssFullCompactBatchProfile
+	if leaf.context.proofProfile == cvLeafFullFieldProofProfile {
+		profile = apvssFullFieldBatchProfile
+	}
+	contextDigest, chunks, err := apvssPrepareLaneStatement(leaf)
+	if err != nil {
+		return nil, err
+	}
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, []byte(apvssFullCompactSetDomain)); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, []byte(profile)); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, contextDigest); err != nil {
+		return nil, err
+	}
+	cvWriteUint64(&wire, leaf.dealerID)
+	if err := cvWriteUint32(&wire, len(receiverIndices)); err != nil {
+		return nil, err
+	}
+	for i, receiverIndex := range receiverIndices {
+		if receiverIndex != i+1 {
+			return nil, fmt.Errorf("APVSS full compact proof must cover the canonical receiver roster")
+		}
+		statementDigest, err := apvssLaneStatementDigestPrepared(
+			leaf, receiverIndex, contextDigest, chunks,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := cvWriteUint32(&wire, receiverIndex); err != nil {
+			return nil, err
+		}
+		if err := cvWriteBytes(&wire, statementDigest); err != nil {
+			return nil, err
+		}
+	}
+	return hashBytes([]byte(apvssFullCompactSetDomain), wire.Bytes()), nil
+}
+
+func apvssCompactLaneLimit(leaf *cvLeaf) int {
+	if leaf == nil {
+		return 0
+	}
+	if leaf.context.proofProfile == cvLeafFullCompactProofProfile ||
+		leaf.context.proofProfile == cvLeafFullFieldProofProfile {
+		return len(leaf.receivers)
+	}
+	return leaf.context.sharingDegree
 }
 
 func apvssValidateStructuralLeaf(context *cvLeafContext, leaf *cvLeaf) error {
@@ -319,22 +394,54 @@ func apvssDecryptLaneStrict(
 }
 
 func apvssLaneStatementBytes(leaf *cvLeaf, receiverIndex int) ([]byte, error) {
-	lane, err := apvssLane(leaf, receiverIndex)
+	contextDigest, chunks, err := apvssPrepareLaneStatement(leaf)
 	if err != nil {
 		return nil, err
 	}
+	return apvssLaneStatementBytesPrepared(leaf, receiverIndex, contextDigest, chunks)
+}
+
+func apvssPrepareLaneStatement(leaf *cvLeaf) ([]byte, int, error) {
+	if leaf == nil {
+		return nil, 0, fmt.Errorf("invalid APVSS lane statement")
+	}
 	if err := cvValidateLeafContext(&leaf.context); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(leaf.receivers) != len(leaf.context.receiverPublicKeys) {
-		return nil, fmt.Errorf("APVSS receiver registry length mismatch")
+		return nil, 0, fmt.Errorf("APVSS receiver registry length mismatch")
 	}
 	_, _, chunks, err := cvProfile(leaf.context.profile)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(leaf.coefficientCommitments) != leaf.context.sharingDegree+1 {
-		return nil, fmt.Errorf("APVSS coefficient commitment count mismatch")
+		return nil, 0, fmt.Errorf("APVSS coefficient commitment count mismatch")
+	}
+	for i := range leaf.coefficientCommitments {
+		if !cvValidG1(&leaf.coefficientCommitments[i], true) {
+			return nil, 0, fmt.Errorf("invalid APVSS coefficient commitment %d", i)
+		}
+	}
+	contextDigest := cvLeafContextDigest(&leaf.context)
+	if len(contextDigest) == 0 {
+		return nil, 0, fmt.Errorf("encode APVSS context")
+	}
+	return contextDigest, chunks, nil
+}
+
+func apvssLaneStatementBytesPrepared(
+	leaf *cvLeaf,
+	receiverIndex int,
+	contextDigest []byte,
+	chunks int,
+) ([]byte, error) {
+	if leaf == nil || len(contextDigest) != 32 || chunks <= 0 {
+		return nil, fmt.Errorf("invalid prepared APVSS lane statement")
+	}
+	lane, err := apvssLane(leaf, receiverIndex)
+	if err != nil {
+		return nil, err
 	}
 	if err := cvValidateShare(lane.encryptedShare, chunks); err != nil {
 		return nil, err
@@ -347,11 +454,6 @@ func apvssLaneStatementBytes(leaf *cvLeaf, receiverIndex int) ([]byte, error) {
 	if !lane.encryptedShare.commitment.Equal(&expectedCommitment) {
 		return nil, fmt.Errorf("APVSS lane commitment is not the polynomial evaluation")
 	}
-	contextDigest := cvLeafContextDigest(&leaf.context)
-	if len(contextDigest) == 0 {
-		return nil, fmt.Errorf("encode APVSS context")
-	}
-
 	var wire bytes.Buffer
 	if err := cvWriteBytes(&wire, []byte(apvssLaneStatementDomain)); err != nil {
 		return nil, err
@@ -368,9 +470,6 @@ func apvssLaneStatementBytes(leaf *cvLeaf, receiverIndex int) ([]byte, error) {
 		return nil, err
 	}
 	for i := range leaf.coefficientCommitments {
-		if !cvValidG1(&leaf.coefficientCommitments[i], true) {
-			return nil, fmt.Errorf("invalid APVSS coefficient commitment %d", i)
-		}
 		cvWritePoint(&wire, &leaf.coefficientCommitments[i])
 	}
 	cvWritePoint(&wire, &lane.encryptedShare.receiverPublicKey)
@@ -387,6 +486,21 @@ func apvssLaneStatementBytes(leaf *cvLeaf, receiverIndex int) ([]byte, error) {
 
 func apvssLaneStatementDigest(leaf *cvLeaf, receiverIndex int) ([]byte, error) {
 	wire, err := apvssLaneStatementBytes(leaf, receiverIndex)
+	if err != nil {
+		return nil, err
+	}
+	return hashBytes([]byte(apvssLaneStatementDomain), wire), nil
+}
+
+func apvssLaneStatementDigestPrepared(
+	leaf *cvLeaf,
+	receiverIndex int,
+	contextDigest []byte,
+	chunks int,
+) ([]byte, error) {
+	wire, err := apvssLaneStatementBytesPrepared(
+		leaf, receiverIndex, contextDigest, chunks,
+	)
 	if err != nil {
 		return nil, err
 	}
