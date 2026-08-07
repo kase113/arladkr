@@ -99,7 +99,7 @@ type EpochResult struct {
 	CVVerifiedReceiptCount          int
 	CVLeafBuildLatency              time.Duration
 	CVComponentDisperseLatency      time.Duration
-	CVCommonCandidateLatency        time.Duration
+	CVComponentCollectionLatency    time.Duration
 	CVAggregateDisperseLatency      time.Duration
 	CVAggregateAgreementLatency     time.Duration
 	CVRecoverShardLatency           time.Duration

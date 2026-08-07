@@ -44,10 +44,15 @@ func TestCVReceiverKeyMaterialGenerateAndLoadLocalOnly(t *testing.T) {
 		if err != nil || len(encoded) != 48 {
 			t.Fatalf("registry entry %d has invalid compressed G1: %q", i, entry.PublicKey)
 		}
+		signingEncoded, err := hex.DecodeString(entry.SigningPublicKey)
+		if err != nil || len(signingEncoded) != 48 || bytes.Equal(encoded, signingEncoded) {
+			t.Fatalf("registry entry %d has invalid or reused signing key", i)
+		}
 	}
 	assertCVKeyFileMode(t, registryPath, 0o644)
 	for _, id := range receiverIDs {
 		assertCVKeyFileMode(t, cvReceiverSecretPath(secretDir, id), 0o600)
+		assertCVKeyFileMode(t, cvReceiverSigningSecretPath(secretDir, id), 0o600)
 	}
 
 	// A corrupt non-local secret must not affect this process: strict loading
@@ -59,8 +64,9 @@ func TestCVReceiverKeyMaterialGenerateAndLoadLocalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load local receiver keys: %v", err)
 	}
-	if len(keys.receiverPublicKeys) != len(receiverIDs) || len(keys.localReceiverSecrets) != 2 {
-		t.Fatalf("loaded public/local key counts = %d/%d", len(keys.receiverPublicKeys), len(keys.localReceiverSecrets))
+	if len(keys.receiverPublicKeys) != len(receiverIDs) || len(keys.receiverSigningPublicKeys) != len(receiverIDs) ||
+		len(keys.localReceiverSecrets) != 2 || len(keys.localReceiverSigningSecrets) != 2 {
+		t.Fatalf("loaded public/signing/local key counts = %d/%d/%d/%d", len(keys.receiverPublicKeys), len(keys.receiverSigningPublicKeys), len(keys.localReceiverSecrets), len(keys.localReceiverSigningSecrets))
 	}
 	if _, ok := keys.localReceiverSecrets[12]; ok {
 		t.Fatal("strict loader retained a non-local receiver secret")
@@ -76,6 +82,14 @@ func TestCVReceiverKeyMaterialGenerateAndLoadLocalOnly(t *testing.T) {
 		}
 		if !publicKey.Equal(&keys.receiverPublicKeys[keys.receiverIndex[id]-1]) {
 			t.Fatalf("receiver %d secret/public registry mismatch", id)
+		}
+		signingSecret, ok := keys.localReceiverSigningSecrets[id]
+		if !ok || signingSecret.Equal(&secret) {
+			t.Fatalf("receiver %d signing secret missing or reused", id)
+		}
+		signingPublicKey, err := cvReceiverPublicKey(signingSecret)
+		if err != nil || !signingPublicKey.Equal(&keys.receiverSigningPublicKeys[keys.receiverIndex[id]-1]) {
+			t.Fatalf("receiver %d signing secret/public registry mismatch", id)
 		}
 	}
 
@@ -177,6 +191,35 @@ func TestCVReceiverKeyMaterialRejectsMismatchedRegistryAndSecrets(t *testing.T) 
 			t.Fatal("accepted a noncanonical compressed public key")
 		}
 	})
+
+	t.Run("reused signing public key", func(t *testing.T) {
+		dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
+		registry := readCVReceiverRegistryForTest(t, dirs.public)
+		registry.Receivers[0].SigningPublicKey = registry.Receivers[0].PublicKey
+		writeCVReceiverRegistryForTest(t, dirs.public, registry)
+		if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
+			t.Fatal("accepted a receiver registry that reused the encryption key for signing")
+		}
+	})
+
+	for _, tc := range []struct {
+		name         string
+		signingIndex int
+		publicIndex  int
+	}{
+		{name: "signing key reuses later encryption key", signingIndex: 0, publicIndex: 1},
+		{name: "signing key reuses earlier encryption key", signingIndex: 1, publicIndex: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dirs := generateCVReceiverKeysForTest(t, sid, receiverIDs)
+			registry := readCVReceiverRegistryForTest(t, dirs.public)
+			registry.Receivers[tc.signingIndex].SigningPublicKey = registry.Receivers[tc.publicIndex].PublicKey
+			writeCVReceiverRegistryForTest(t, dirs.public, registry)
+			if _, err := cvLoadReceiverKeyMaterial(dirs.public, dirs.secret, sid, receiverIDs, nil); err == nil {
+				t.Fatal("accepted cross-receiver encryption/signing key reuse")
+			}
+		})
+	}
 }
 
 func TestCVReceiverRegistryDigestBindsReceiverIDs(t *testing.T) {

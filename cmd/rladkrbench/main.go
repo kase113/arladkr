@@ -62,7 +62,7 @@ type runStat struct {
 	cvVerifiedReceiptCount     float64
 	cvLeafBuildMs              float64
 	cvComponentDisperseMs      float64
-	cvCommonCandidateMs        float64
+	cvComponentCollectionMs    float64
 	cvAggregateDisperseMs      float64
 	cvAggregateAgreementMs     float64
 	cvAPVSSACKCount            float64
@@ -128,7 +128,7 @@ func main() {
 		routeSendTimeout         = flag.Duration("route-send-timeout", 2*time.Second, "MVBA route send timeout")
 		apvssMode                = flag.String("apvss-mode", core.APVSSModeACKFallback, "APVSS component validity: full-public-ve|ack-fallback")
 		apvssFullProofProfile    = flag.String("apvss-full-proof-profile", core.APVSSFullProofExact, "full-public-ve proof: exact|compact-batch|field-congruent")
-		apvssFallbackProfile     = flag.String("apvss-fallback-profile", "exact-lane", "APVSS fallback proof: exact-lane|compact-batch")
+		apvssFallbackProfile     = flag.String("apvss-fallback-profile", core.APVSSFallbackFeldmanBatch, "APVSS fallback proof: feldman-batch-v1|exact-lane|compact-batch")
 		allowExperimentalAPVSS   = flag.Bool("allow-experimental-apvss", false, "allow an APVSS proof profile that has not passed production admission")
 		apvssForcedFallbackCount = flag.Int("apvss-forced-fallback-count", 0, "benchmark-only forced |I| (0 = natural ACK scheduling)")
 		apvssWaitAllACKs         = flag.Bool("apvss-wait-all-acks", false, "benchmark-only wait for all receiver ACKs to produce |I|=0")
@@ -461,7 +461,7 @@ func main() {
 				cvVerifiedReceiptCount:     float64(res.CVVerifiedReceiptCount),
 				cvLeafBuildMs:              float64(res.CVLeafBuildLatency.Microseconds()) / 1000.0,
 				cvComponentDisperseMs:      float64(res.CVComponentDisperseLatency.Microseconds()) / 1000.0,
-				cvCommonCandidateMs:        float64(res.CVCommonCandidateLatency.Microseconds()) / 1000.0,
+				cvComponentCollectionMs:    float64(res.CVComponentCollectionLatency.Microseconds()) / 1000.0,
 				cvAggregateDisperseMs:      float64(res.CVAggregateDisperseLatency.Microseconds()) / 1000.0,
 				cvAggregateAgreementMs:     float64(res.CVAggregateAgreementLatency.Microseconds()) / 1000.0,
 				cvAPVSSACKCount:            float64(res.CVAPVSSACKCount),
@@ -894,14 +894,14 @@ func formatBenchResult(in benchResultInput) string {
 		hashSummary,
 	)
 	return line + fmt.Sprintf(
-		" mean_cv_component_count=%.0f mean_cv_arc_holder_count=%.0f mean_cv_recovered_shard_count=%.0f mean_cv_verified_receipt_count=%.0f leaf_build_ms=%.0f component_disperse_ms=%.0f common_candidate_ms=%.0f aggregate_disperse_ms=%.0f aggregate_agreement_ms=%.0f mean_apvss_ack_count=%.2f mean_apvss_fallback_count=%.2f mean_apvss_proof_bytes=%.0f mean_apvss_leaf_wire_bytes=%.0f aggregate_gate_wait_ms=%.2f aggregate_leaf_load_ms=%.2f aggregate_build_ms=%.2f aggregate_rs_ms=%.2f aggregate_header_token_ms=%.2f aggregate_offer_send_ms=%.2f aggregate_arc_wait_ms=%.2f aggregate_certificate_ms=%.2f recover_shard_ms=%.0f receipt_ms=%.0f mean_component_disperse_sent_bytes=%.0f mean_component_disperse_recv_bytes=%.0f mean_common_candidate_sent_bytes=%.0f mean_common_candidate_recv_bytes=%.0f mean_aggregate_disperse_sent_bytes=%.0f mean_aggregate_disperse_recv_bytes=%.0f mean_arc_share_sent_bytes=%.0f mean_arc_share_recv_bytes=%.0f mean_recover_shard_sent_bytes=%.0f mean_recover_shard_recv_bytes=%.0f mean_receipt_sent_bytes=%.0f mean_receipt_recv_bytes=%.0f",
+		" mean_cv_component_count=%.0f mean_cv_arc_holder_count=%.0f mean_cv_recovered_shard_count=%.0f mean_cv_verified_receipt_count=%.0f leaf_build_ms=%.0f component_disperse_ms=%.0f component_collection_ms=%.0f aggregate_disperse_ms=%.0f aggregate_agreement_ms=%.0f mean_apvss_ack_count=%.2f mean_apvss_fallback_count=%.2f mean_apvss_proof_bytes=%.0f mean_apvss_leaf_wire_bytes=%.0f aggregate_gate_wait_ms=%.2f aggregate_leaf_load_ms=%.2f aggregate_build_ms=%.2f aggregate_rs_ms=%.2f aggregate_header_token_ms=%.2f aggregate_offer_send_ms=%.2f aggregate_arc_wait_ms=%.2f aggregate_certificate_ms=%.2f recover_shard_ms=%.0f receipt_ms=%.0f mean_component_disperse_sent_bytes=%.0f mean_component_disperse_recv_bytes=%.0f mean_component_collection_sent_bytes=%.0f mean_component_collection_recv_bytes=%.0f mean_aggregate_disperse_sent_bytes=%.0f mean_aggregate_disperse_recv_bytes=%.0f mean_arc_share_sent_bytes=%.0f mean_arc_share_recv_bytes=%.0f mean_recover_shard_sent_bytes=%.0f mean_recover_shard_recv_bytes=%.0f mean_receipt_sent_bytes=%.0f mean_receipt_recv_bytes=%.0f",
 		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvARCHolderCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvRecoveredShardCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvVerifiedReceiptCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvLeafBuildMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentDisperseMs }),
-		meanOf(in.stats, func(s runStat) float64 { return s.cvCommonCandidateMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentCollectionMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvAggregateDisperseMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvAggregateAgreementMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvAPVSSACKCount }),
@@ -919,7 +919,7 @@ func formatBenchResult(in benchResultInput) string {
 		meanOf(in.stats, func(s runStat) float64 { return s.cvRecoverShardMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvReceiptMs }),
 		meanPhaseBytes(in.stats, "component_disperse", true), meanPhaseBytes(in.stats, "component_disperse", false),
-		meanPhaseBytes(in.stats, "common_candidate", true), meanPhaseBytes(in.stats, "common_candidate", false),
+		meanPhaseBytes(in.stats, "component_collection", true), meanPhaseBytes(in.stats, "component_collection", false),
 		meanPhaseBytes(in.stats, "aggregate_disperse", true), meanPhaseBytes(in.stats, "aggregate_disperse", false),
 		meanPhaseBytes(in.stats, "arc_share", true), meanPhaseBytes(in.stats, "arc_share", false),
 		meanPhaseBytes(in.stats, "recover_shard", true), meanPhaseBytes(in.stats, "recover_shard", false),

@@ -79,6 +79,9 @@ func TestCVSAPVSSRSEncoderCacheRespectsWorkerBudget(t *testing.T) {
 }
 
 func TestCVSAPVSSM4DeterministicFreshDispersalRoot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("M4 dispersal integration test")
+	}
 	_, leafContext, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
@@ -192,6 +195,9 @@ func TestCVSAPVSSPreparedReceiptsReuseVerifiedTokens(t *testing.T) {
 }
 
 func TestCVSAPVSSM4FreshBuilderMatchesCheckedBuilder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("M4 builder integration test")
+	}
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
@@ -226,6 +232,9 @@ func TestCVSAPVSSM4FreshBuilderMatchesCheckedBuilder(t *testing.T) {
 }
 
 func TestCVSAPVSSM4ARCRejectsUnmaterializedAggregate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("M4 ARC integration test")
+	}
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
@@ -237,6 +246,9 @@ func TestCVSAPVSSM4ARCRejectsUnmaterializedAggregate(t *testing.T) {
 }
 
 func TestCVSAPVSSM4ARCRejectsWrongErasureDimensions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("M4 ARC integration test")
+	}
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	agg, err := cvAgg(&leafContext, leaves)
 	if err != nil {
@@ -478,13 +490,14 @@ func TestCVSAPVSSM4DecodeAggregateRejectsDealerCountBeyondRemainingWire(t *testi
 		t.Fatal(err)
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("dealer-count-bound"),
-		epoch:              1,
-		sharingDegree:      0,
-		profile:            cvChunkProfile{chunkBits: 1, maxComponents: 1 << 20},
-		receiverPublicKeys: []bls12381.G1Affine{key},
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafStructuralProofProfile,
+		sessionID:                 []byte("dealer-count-bound"),
+		epoch:                     1,
+		sharingDegree:             0,
+		profile:                   cvChunkProfile{chunkBits: 1, maxComponents: 1 << 20},
+		receiverPublicKeys:        []bls12381.G1Affine{key},
+		receiverSigningPublicKeys: cvTestSigningKeys(t, 1, 25001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafStructuralProofProfile,
 	}
 	contextWire, err := cvLeafContextCanonicalBytes(&context)
 	if err != nil {
@@ -557,13 +570,14 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) 
 	}
 	sid := fmt.Sprintf("cv-m4-%d", time.Now().UnixNano())
 	leafContext := cvLeafContext{
-		sessionID:          []byte(sid),
-		epoch:              1,
-		sharingDegree:      1,
-		profile:            cvChunkProfile{chunkBits: 4, maxComponents: 2},
-		receiverPublicKeys: receiverKeys,
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 []byte(sid),
+		epoch:                     1,
+		sharingDegree:             1,
+		profile:                   cvChunkProfile{chunkBits: 4, maxComponents: 2},
+		receiverPublicKeys:        receiverKeys,
+		receiverSigningPublicKeys: cvTestSigningKeys(t, len(receiverKeys), 26001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	chunks, err := cvChunkCount(leafContext.profile)
 	if err != nil {

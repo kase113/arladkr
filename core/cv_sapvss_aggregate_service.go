@@ -559,12 +559,21 @@ func (s *cvComponentService) MaterializeFirstCertified(
 	ctx context.Context,
 	initial []*cvComponentDescriptor,
 ) (*cvMaterializedAggregate, error) {
-	return s.materializeFirstCertified(ctx, initial, s.MaterializeAndCollectARC)
+	return s.materializeFirstCertified(ctx, initial, nil, s.MaterializeAndCollectARC)
+}
+
+func (s *cvComponentService) MaterializeEligibleCertified(
+	ctx context.Context,
+	initial []*cvComponentDescriptor,
+	eligible []int,
+) (*cvMaterializedAggregate, error) {
+	return s.materializeFirstCertified(ctx, initial, eligible, s.MaterializeAndCollectARC)
 }
 
 func (s *cvComponentService) materializeFirstCertified(
 	ctx context.Context,
 	initial []*cvComponentDescriptor,
+	eligible []int,
 	materialize func(context.Context, []*cvComponentDescriptor) (*cvMaterializedAggregate, error),
 ) (*cvMaterializedAggregate, error) {
 	if ctx == nil || len(initial) != len(s.cfg.OldCommittee)-s.cfg.FOld {
@@ -572,6 +581,18 @@ func (s *cvComponentService) materializeFirstCertified(
 	}
 	if materialize == nil {
 		return nil, fmt.Errorf("missing CV-sAPVSS materializer")
+	}
+	eligibleSet := nodeSet(eligible)
+	if len(eligible) > 0 {
+		if len(eligibleSet) != len(eligible) {
+			return nil, fmt.Errorf("duplicate CV-sAPVSS eligible proposer")
+		}
+		committee := nodeSet(s.cfg.OldCommittee)
+		for _, proposer := range eligible {
+			if _, ok := committee[proposer]; !ok {
+				return nil, fmt.Errorf("eligible proposer %d is outside old committee", proposer)
+			}
+		}
 	}
 	candidateCtx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
@@ -604,7 +625,18 @@ func (s *cvComponentService) materializeFirstCertified(
 		return true
 	}
 	latest := append([]*cvComponentDescriptor(nil), initial...)
-	isPrimary := s.localNode == cvPrimaryMaterializer(s.cfg)
+	isEligible := len(eligible) == 0
+	for _, proposer := range eligible {
+		if proposer == s.localNode {
+			isEligible = true
+			break
+		}
+	}
+	primary := cvPrimaryMaterializer(s.cfg)
+	if len(eligible) > 0 {
+		primary = eligible[0]
+	}
+	isPrimary := isEligible && s.localNode == primary
 	hasAllDescriptors := func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -667,7 +699,7 @@ func (s *cvComponentService) materializeFirstCertified(
 	}()
 	var prewarmTimer *time.Timer
 	var prewarm <-chan time.Time
-	if !isPrimary {
+	if isEligible && !isPrimary {
 		if cvAggregatePrimaryPoolGrace() == 0 || hasAllDescriptors() {
 			activatePrewarm()
 		} else {
@@ -725,7 +757,7 @@ func (s *cvComponentService) materializeFirstCertified(
 			prewarm = nil
 			activatePrewarm()
 		case <-prewarmDone:
-			if !isPrimary && !materializationEnabled {
+			if isEligible && !isPrimary && !materializationEnabled {
 				if grace := cvAggregatePrimaryGrace(); grace == 0 {
 					activate()
 				} else {
@@ -746,7 +778,7 @@ func (s *cvComponentService) materializeFirstCertified(
 				}
 			}
 			latest = append([]*cvComponentDescriptor(nil), descriptors...)
-			if !prewarmActive && !isPrimary && hasAllDescriptors() {
+			if isEligible && !prewarmActive && !isPrimary && hasAllDescriptors() {
 				if prewarmTimer != nil {
 					prewarmTimer.Stop()
 				}

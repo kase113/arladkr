@@ -15,6 +15,19 @@ func cvTestScalar(value uint64) fr.Element {
 	return scalar
 }
 
+func cvTestSigningKeys(tb testing.TB, count int, start uint64) []bls12381.G1Affine {
+	tb.Helper()
+	keys := make([]bls12381.G1Affine, count)
+	for i := range keys {
+		key, err := cvReceiverPublicKey(cvTestScalar(start + uint64(i)))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		keys[i] = key
+	}
+	return keys
+}
+
 func cvTestCoins(count int, start uint64) []fr.Element {
 	coins := make([]fr.Element, count)
 	for i := range coins {
@@ -263,13 +276,14 @@ func TestCVSAPVSSM1AReferenceDealAndLeaf(t *testing.T) {
 		}
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("m1-a-session"),
-		epoch:              9,
-		sharingDegree:      1,
-		profile:            profile,
-		receiverPublicKeys: receiverKeys,
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafStructuralProofProfile,
+		sessionID:                 []byte("m1-a-session"),
+		epoch:                     9,
+		sharingDegree:             1,
+		profile:                   profile,
+		receiverPublicKeys:        receiverKeys,
+		receiverSigningPublicKeys: cvTestSigningKeys(t, len(receiverKeys), 20001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafStructuralProofProfile,
 	}
 	scalarCoins := make([][]fr.Element, len(receiverKeys))
 	for i := range scalarCoins {
@@ -279,9 +293,9 @@ func TestCVSAPVSSM1AReferenceDealAndLeaf(t *testing.T) {
 		context,
 		41,
 		[]fr.Element{cvTestScalar(5), cvTestScalar(7)},
-		[]fr.Element{cvTestScalar(9), cvTestScalar(11)},
+		[]fr.Element{{}, {}},
 		scalarCoins,
-		[]fr.Element{cvTestScalar(2001), cvTestScalar(2002), cvTestScalar(2003)},
+		make([]fr.Element, len(receiverKeys)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -319,6 +333,29 @@ func TestCVSAPVSSM1AReferenceDealAndLeaf(t *testing.T) {
 	if !decrypted.scalar.Equal(&want) || !cvVerifyRelation(leaf.receivers[1].encryptedShare, decrypted) {
 		t.Fatal("reference Deal did not evaluate and encrypt the degree-1 sharing")
 	}
+	for i := range leaf.receivers {
+		if !cvIdentityCiphertext(&leaf.receivers[i].encryptedShare.blinding) {
+			t.Fatalf("structural receiver %d did not carry the public identity blinding ciphertext", i+1)
+		}
+	}
+
+	t.Run("rejects encrypted-zero blinding lane", func(t *testing.T) {
+		bad := cvCloneLeafForTest(leaf)
+		var identity bls12381.G1Affine
+		ciphertext, err := cvEncryptPoint(
+			&bad.receivers[0].receiverPublicKey,
+			&identity,
+			cvTestScalar(2001),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad.receivers[0].encryptedShare.blinding = ciphertext
+		bad.digest = cvLeafDigest(bad)
+		if bad.digest != nil || cvVerifyLeaf(&context, bad) == nil {
+			t.Fatal("accepted a randomized encryption of zero in a structural blinding lane")
+		}
+	})
 
 	t.Run("wrong key", func(t *testing.T) {
 		bad := cvCloneLeafForTest(leaf)
@@ -379,13 +416,14 @@ func TestCVSAPVSSM1BGrothLeafProof(t *testing.T) {
 		}
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("m1-b-session"),
-		epoch:              10,
-		sharingDegree:      1,
-		profile:            profile,
-		receiverPublicKeys: receiverKeys,
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 []byte("m1-b-session"),
+		epoch:                     10,
+		sharingDegree:             1,
+		profile:                   profile,
+		receiverPublicKeys:        receiverKeys,
+		receiverSigningPublicKeys: cvTestSigningKeys(t, len(receiverKeys), 21001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	commonCoins := cvTestCoins(chunks, 3001)
 	scalarCoins := make([][]fr.Element, len(receiverKeys))
@@ -610,6 +648,25 @@ func TestCVSAPVSSM2AggregateReceipt(t *testing.T) {
 			t.Fatal("accepted aggregate ciphertext mutation")
 		}
 	})
+	t.Run("randomized zero blinding ciphertext", func(t *testing.T) {
+		bad := cvCloneAggregateForTest(agg)
+		var identity bls12381.G1Affine
+		ciphertext, err := cvEncryptPoint(
+			&bad.receivers[0].receiverPublicKey,
+			&identity,
+			cvTestScalar(9001),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad.receivers[0].blinding = ciphertext
+		if _, err := cvAggregateCanonicalBytes(bad); err == nil {
+			t.Fatal("encoded a structural aggregate with randomized zero blinding ciphertext")
+		}
+		if err := cvAVer(&context, bad, leaves); err == nil {
+			t.Fatal("accepted a structural aggregate with randomized zero blinding ciphertext")
+		}
+	})
 	t.Run("receipt mutation", func(t *testing.T) {
 		bad := *receipt
 		var one fr.Element
@@ -649,13 +706,14 @@ func cvM2Fixture(t *testing.T) (cvLeafContext, []fr.Element, []*cvLeaf) {
 		}
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("m2-session"),
-		epoch:              12,
-		sharingDegree:      1,
-		profile:            profile,
-		receiverPublicKeys: keys,
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafStructuralProofProfile,
+		sessionID:                 []byte("m2-session"),
+		epoch:                     12,
+		sharingDegree:             1,
+		profile:                   profile,
+		receiverPublicKeys:        keys,
+		receiverSigningPublicKeys: cvTestSigningKeys(t, len(keys), 22001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafStructuralProofProfile,
 	}
 	chunks, err := cvChunkCount(profile)
 	if err != nil {
@@ -670,15 +728,15 @@ func cvM2Fixture(t *testing.T) (cvLeafContext, []fr.Element, []*cvLeaf) {
 	}
 	first, err := cvReferenceDeal(context, 10,
 		[]fr.Element{cvTestScalar(5), cvTestScalar(3)},
-		[]fr.Element{cvTestScalar(7), cvTestScalar(2)},
-		makeCoins(100), []fr.Element{cvTestScalar(201), cvTestScalar(202)})
+		[]fr.Element{{}, {}},
+		makeCoins(100), make([]fr.Element, len(keys)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := cvReferenceDeal(context, 11,
 		[]fr.Element{cvTestScalar(11), cvTestScalar(5)},
-		[]fr.Element{cvTestScalar(13), cvTestScalar(4)},
-		makeCoins(300), []fr.Element{cvTestScalar(401), cvTestScalar(402)})
+		[]fr.Element{{}, {}},
+		makeCoins(300), make([]fr.Element, len(keys)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,13 +774,14 @@ func cvM1BLeafWithCustomPlaintexts(
 		t.Fatal(err)
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("m1-b-forgery"),
-		epoch:              11,
-		sharingDegree:      0,
-		profile:            profile,
-		receiverPublicKeys: []bls12381.G1Affine{pk},
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 []byte("m1-b-forgery"),
+		epoch:                     11,
+		sharingDegree:             0,
+		profile:                   profile,
+		receiverPublicKeys:        []bls12381.G1Affine{pk},
+		receiverSigningPublicKeys: cvTestSigningKeys(t, 1, 23001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	chunks, err := cvChunkCount(profile)
 	if err != nil {
@@ -806,6 +865,7 @@ func cvCloneLeafForTest(in *cvLeaf) *cvLeaf {
 	out := *in
 	out.context.sessionID = append([]byte(nil), in.context.sessionID...)
 	out.context.receiverPublicKeys = append([]bls12381.G1Affine(nil), in.context.receiverPublicKeys...)
+	out.context.receiverSigningPublicKeys = append([]bls12381.G1Affine(nil), in.context.receiverSigningPublicKeys...)
 	out.context.dealerSetPolicy = append([]byte(nil), in.context.dealerSetPolicy...)
 	out.coefficientCommitments = append([]bls12381.G1Affine(nil), in.coefficientCommitments...)
 	out.receivers = append([]cvLeafReceiver(nil), in.receivers...)

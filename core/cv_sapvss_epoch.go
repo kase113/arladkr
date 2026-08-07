@@ -113,7 +113,11 @@ func traceCVEpochPhase(cfg Config, node int, phase string) {
 
 func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLeafContext, error) {
 	c := NormalizeConfig(cfg)
-	if material == nil || len(material.receiverPublicKeys) != len(c.NewCommittee) || len(material.registryDigest) != 32 {
+	if err := validateAPVSSProductionAdmission(c); err != nil {
+		return cvLeafContext{}, err
+	}
+	if material == nil || len(material.receiverPublicKeys) != len(c.NewCommittee) ||
+		len(material.receiverSigningPublicKeys) != len(material.receiverPublicKeys) || len(material.registryDigest) != 32 {
 		return cvLeafContext{}, fmt.Errorf("invalid CV-sAPVSS epoch receiver material")
 	}
 	policy := append([]byte("ARL-CV-sAPVSS/first-f-plus-one|registry="), material.registryDigest...)
@@ -133,14 +137,15 @@ func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLea
 		}
 	}
 	context := cvLeafContext{
-		sessionID:           []byte(c.SID),
-		epoch:               uint64(c.Epoch),
-		previousStateDigest: append([]byte(nil), c.PreviousEpochStateDigest...),
-		sharingDegree:       c.FNew,
-		profile:             cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
-		receiverPublicKeys:  append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
-		dealerSetPolicy:     policy,
-		proofProfile:        proofProfile,
+		sessionID:                 []byte(c.SID),
+		epoch:                     uint64(c.Epoch),
+		previousStateDigest:       append([]byte(nil), c.PreviousEpochStateDigest...),
+		sharingDegree:             c.FNew,
+		profile:                   cvChunkProfile{chunkBits: 8, maxComponents: c.Kappa},
+		receiverPublicKeys:        append([]bls12381.G1Affine(nil), material.receiverPublicKeys...),
+		receiverSigningPublicKeys: append([]bls12381.G1Affine(nil), material.receiverSigningPublicKeys...),
+		dealerSetPolicy:           policy,
+		proofProfile:              proofProfile,
 	}
 	if err := cvValidateLeafContext(&context); err != nil {
 		return cvLeafContext{}, err
@@ -167,8 +172,10 @@ func cvRandomDealerLeafWithWitness(
 		if _, err := scalarCoefficients[i].SetRandom(); err != nil {
 			return nil, nil, fmt.Errorf("sample CV-sAPVSS scalar coefficient: %w", err)
 		}
-		if _, err := blindingCoefficients[i].SetRandom(); err != nil {
-			return nil, nil, fmt.Errorf("sample CV-sAPVSS blinding coefficient: %w", err)
+		if context.proofProfile != cvLeafStructuralProofProfile {
+			if _, err := blindingCoefficients[i].SetRandom(); err != nil {
+				return nil, nil, fmt.Errorf("sample CV-sAPVSS blinding coefficient: %w", err)
+			}
 		}
 	}
 	chunks, err := cvChunkCount(context.profile)
@@ -204,8 +211,10 @@ func cvRandomDealerLeafWithWitness(
 					return nil, nil, fmt.Errorf("sample CV-sAPVSS receiver chunk coin: %w", err)
 				}
 			}
-			if _, err := blindingCoins[receiver].SetRandom(); err != nil {
-				return nil, nil, fmt.Errorf("sample CV-sAPVSS receiver blinding coin: %w", err)
+			if context.proofProfile != cvLeafStructuralProofProfile {
+				if _, err := blindingCoins[receiver].SetRandom(); err != nil {
+					return nil, nil, fmt.Errorf("sample CV-sAPVSS receiver blinding coin: %w", err)
+				}
 			}
 		}
 	}
@@ -309,7 +318,7 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	}
 	service, err := newCVComponentServiceWithReceivers(
 		ctx, cfg, &leafContext, localNode, transport, router, store,
-		material.receiverOrder, material.localReceiverSecrets,
+		material.receiverOrder, material.localReceiverSecrets, material.localReceiverSigningSecrets,
 	)
 	if err != nil {
 		return nil, err
@@ -370,18 +379,32 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 	traceCVEpochPhase(cfg, localNode, "component_certified")
 	componentLatency := time.Since(phaseStart)
 
-	cfg.runtime.setCommPhase("common_candidate")
+	cfg.runtime.setCommPhase("eligibility_coin")
 	phaseStart = time.Now()
-	descriptors, err := service.CollectComponentCandidates(ctx)
+	eligibilityCoin, err := service.CollectEligibilityCoin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	traceCVEpochPhase(cfg, localNode, "component_candidates_collected")
-	commonLatency := time.Since(phaseStart)
+	eligibleProposers, err := cvEligibilityProposerSet(
+		cfg.OldCommittee, cfg.FOld+1, cfg.FOld, eligibilityCoin,
+	)
+	if err != nil {
+		return nil, err
+	}
+	traceCVEpochPhase(cfg, localNode, "eligibility_coin_ready")
+
+	cfg.runtime.setCommPhase("component_collection")
+	phaseStart = time.Now()
+	descriptors, err := service.CollectLocalComponentSet(ctx)
+	if err != nil {
+		return nil, err
+	}
+	traceCVEpochPhase(cfg, localNode, "component_set_collected")
+	collectionLatency := time.Since(phaseStart)
 
 	cfg.runtime.setCommPhase("aggregate_disperse")
 	phaseStart = time.Now()
-	materialized, err := service.MaterializeFirstCertified(ctx, descriptors)
+	materialized, err := service.MaterializeEligibleCertified(ctx, descriptors, eligibleProposers)
 	if err != nil {
 		return nil, err
 	}
@@ -434,19 +457,19 @@ func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
 		AgreementMode: "cv-single-mvba-aggrlo", AblationMode: cfg.AblationMode, CVAPVSSMode: cfg.APVSSMode,
 		LockedSet: dealers, SampledSet: append([]int(nil), dealers...), AggRLODealers: append([]int(nil), dealers...),
 		RecoveredAggregate: recoveredWire, AggRLODigest: append([]byte(nil), decidedRLO.Digest...),
-		AggRLOReadyLatency: componentLatency + commonLatency + aggregateLatency,
+		AggRLOReadyLatency: componentLatency + collectionLatency + aggregateLatency,
 		AdmitAggAttempts:   1, AdmitAggPasses: 1, RecoverAggSuccess: true,
 		SetupLatency: setupLatency, DisperseLatency: componentLatency,
 		LockAggLatency: aggregateLatency, MVBAOnlyLatency: aggregateAgreementLatency,
 		MVBAPeerWaitLatency: aggregatePeerWait,
-		AgreeAggLatency:     commonLatency + aggregateLatency + aggregateAgreementLatency,
+		AgreeAggLatency:     collectionLatency + aggregateLatency + aggregateAgreementLatency,
 		RecoverLatency:      recoverLatency, RecoverOnlyLatency: recoverLatency, DeriveLatency: receiptLatency,
 		TotalSentBytes: totalSent, TotalRecvBytes: totalRecv, PhaseSentBytes: phaseSent, PhaseRecvBytes: phaseRecv,
 		NewShares: shares, NewPublicKey: publicKey, CVReceipts: receipts,
 		CVComponentCount: len(descriptors), CVARCHolderCount: decidedRLO.Lock.Threshold,
 		CVRecoveredShardCount: len(cfg.OldCommittee) - 2*cfg.FOld, CVVerifiedReceiptCount: len(receipts),
 		CVLeafBuildLatency:         leafBuildLatency,
-		CVComponentDisperseLatency: componentLatency, CVCommonCandidateLatency: commonLatency,
+		CVComponentDisperseLatency: componentLatency, CVComponentCollectionLatency: collectionLatency,
 		CVAggregateDisperseLatency: aggregateLatency, CVAggregateAgreementLatency: aggregateAgreementLatency,
 		CVRecoverShardLatency: recoverLatency, CVReceiptLatency: receiptLatency,
 		CVAPVSSACKCount: ackCount, CVAPVSSFallbackCount: fallbackCount,

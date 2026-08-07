@@ -27,13 +27,14 @@ func cvBenchmarkFixture(b *testing.B, receivers, f, k int) (cvLeafContext, []*cv
 		}
 	}
 	context := cvLeafContext{
-		sessionID:          []byte(fmt.Sprintf("cv-benchmark-n%d-f%d", receivers, f)),
-		epoch:              1,
-		sharingDegree:      f,
-		profile:            profile,
-		receiverPublicKeys: receiverKeys,
-		dealerSetPolicy:    []byte("first-f-plus-one"),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 []byte(fmt.Sprintf("cv-benchmark-n%d-f%d", receivers, f)),
+		epoch:                     1,
+		sharingDegree:             f,
+		profile:                   profile,
+		receiverPublicKeys:        receiverKeys,
+		receiverSigningPublicKeys: cvTestSigningKeys(b, len(receiverKeys), 29001),
+		dealerSetPolicy:           []byte("first-f-plus-one"),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	leaves := make([]*cvLeaf, k)
 	for dealer := 0; dealer < k; dealer++ {

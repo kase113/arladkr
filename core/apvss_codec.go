@@ -16,6 +16,9 @@ func apvssHasLeafWireDomain(wire []byte) bool {
 }
 
 func apvssLaneOfferCanonicalBytes(offer *apvssLaneOffer, context *cvLeafContext) ([]byte, error) {
+	if context == nil || context.proofProfile != cvLeafStructuralProofProfile {
+		return nil, fmt.Errorf("APVSS lane offers require the structural proof profile")
+	}
 	leaf, err := apvssLaneOfferLeafView(context, offer)
 	if err != nil {
 		return nil, err
@@ -67,7 +70,6 @@ func apvssLaneOfferCanonicalBytesTrusted(offer *apvssLaneOffer, contextDigest []
 	for i := range share.scalarChunks {
 		cvWriteCiphertext(&wire, &share.scalarChunks[i])
 	}
-	cvWriteCiphertext(&wire, &share.blinding)
 	if wire.Len() > cvMaxNetworkPayloadBytes {
 		return nil, fmt.Errorf("APVSS lane offer exceeds the wire safety limit")
 	}
@@ -79,7 +81,7 @@ func apvssDecodeLaneOffer(
 	expectedContext *cvLeafContext,
 	expectedReceiverIndex int,
 ) (*apvssLaneOffer, error) {
-	if expectedContext == nil || expectedReceiverIndex <= 0 ||
+	if expectedContext == nil || expectedContext.proofProfile != cvLeafStructuralProofProfile || expectedReceiverIndex <= 0 ||
 		expectedReceiverIndex > len(expectedContext.receiverPublicKeys) || len(wire) == 0 ||
 		len(wire) > cvMaxNetworkPayloadBytes {
 		return nil, fmt.Errorf("invalid expected APVSS lane offer context or wire")
@@ -137,7 +139,7 @@ func apvssDecodeLaneOffer(
 	if err := cvReadExactCount(r, chunks, "APVSS lane offer scalar chunks"); err != nil {
 		return nil, err
 	}
-	if err := cvRequireRemaining(r, chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "APVSS lane offer ciphertexts"); err != nil {
+	if err := cvRequireRemaining(r, chunks, 2*bls12381.SizeOfG1AffineCompressed, "APVSS lane offer ciphertexts"); err != nil {
 		return nil, err
 	}
 	share.scalarChunks = make([]cvElGamalCiphertext, chunks)
@@ -147,9 +149,8 @@ func apvssDecodeLaneOffer(
 			return nil, fmt.Errorf("decode APVSS lane offer ciphertext %d: %w", i, err)
 		}
 	}
-	share.blinding, err = r.ciphertext()
-	if err != nil || r.reader.Len() != 0 {
-		return nil, fmt.Errorf("invalid APVSS lane offer blinding or framing")
+	if r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid APVSS lane offer framing")
 	}
 	offer.receiver.encryptedShare = share
 	leaf, err := apvssLaneOfferLeafView(expectedContext, offer)
@@ -257,7 +258,7 @@ func apvssLeafPrototypeCanonicalBytes(prototype *apvssLeafPrototype) ([]byte, er
 	if err := cvWriteUint32(&wire, len(fallbackIndices)); err != nil {
 		return nil, err
 	}
-	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackCompactBatchProfile {
+	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) != apvssFallbackExactLaneProfile {
 		for _, receiverIndex := range fallbackIndices {
 			if err := cvWriteUint32(&wire, receiverIndex); err != nil {
 				return nil, err
@@ -265,8 +266,8 @@ func apvssLeafPrototypeCanonicalBytes(prototype *apvssLeafPrototype) ([]byte, er
 		}
 		var proofWire []byte
 		if prototype.compactFallback != nil {
-			proofWire, err = apvssCompactFallbackProofCanonicalBytes(
-				prototype.leaf, prototype.compactFallback,
+			proofWire, err = apvssBatchFallbackProofCanonicalBytes(
+				prototype.leaf, prototype.compactFallback, prototype.fallbackProfile,
 			)
 			if err != nil {
 				return nil, err
@@ -357,7 +358,7 @@ func apvssDecodeLeafPrototype(
 	if err != nil || fallbackCount < 0 || fallbackCount > expectedContext.sharingDegree {
 		return nil, fmt.Errorf("invalid APVSS fallback proof count")
 	}
-	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackCompactBatchProfile {
+	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) != apvssFallbackExactLaneProfile {
 		prototype.fallbackIndices = make([]int, fallbackCount)
 		for i := range prototype.fallbackIndices {
 			prototype.fallbackIndices[i], err = r.uint32()
@@ -376,9 +377,16 @@ func apvssDecodeLeafPrototype(
 		} else {
 			// Partition verification below checks the proof exactly once after the
 			// outer ordered I set has also been decoded and matched.
-			prototype.compactFallback, err = apvssDecodeCompactFallbackProofWithVerify(
-				proofWire, leaf, false,
-			)
+			switch apvssNormalizeFallbackProfile(prototype.fallbackProfile) {
+			case apvssFallbackCompactBatchProfile:
+				prototype.compactFallback, err = apvssDecodeCompactFallbackProofWithVerify(
+					proofWire, leaf, false,
+				)
+			case apvssFallbackFeldmanBatchProfile:
+				prototype.compactFallback, err = apvssDecodeFeldmanFallbackProofWithVerify(
+					proofWire, leaf, false,
+				)
+			}
 			if err != nil {
 				return nil, err
 			}

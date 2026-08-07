@@ -36,16 +36,24 @@ func TestAPVSSReceiverActorsCollectACKsV1(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = router.Close() })
 	secrets := make(map[int]fr.Element, len(receiverOrder))
+	signingSecrets := make(map[int]fr.Element, len(receiverOrder))
 	for i, receiverID := range receiverOrder {
 		secrets[receiverID] = fixture.receiverSecrets[i]
+		signingSecrets[receiverID] = cvTestScalar(uint64(10001 + i))
+		fixture.context.receiverSigningPublicKeys[i], err = cvReceiverPublicKey(signingSecrets[receiverID])
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
+	fixture.leaf.context = cvCloneLeafContext(fixture.context)
+	fixture.leaf.digest = cvLeafDigest(fixture.leaf)
 	store, err := newCVComponentLeafStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	service, err := newCVComponentServiceWithReceivers(
 		context.Background(), cfg, &fixture.context, 0, transport, router, store,
-		receiverOrder, secrets,
+		receiverOrder, secrets, signingSecrets,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +107,16 @@ func TestAPVSSReceiverActorsFeedAvailabilityAndVerifiedCacheV1(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = router.Close() })
 	services := make([]*cvComponentService, len(oldNodes))
+	signingSecrets := make([]fr.Element, len(receiverOrder))
+	for i := range signingSecrets {
+		signingSecrets[i] = cvTestScalar(uint64(11001 + i))
+		fixture.context.receiverSigningPublicKeys[i], err = cvReceiverPublicKey(signingSecrets[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.leaf.context = cvCloneLeafContext(fixture.context)
+	fixture.leaf.digest = cvLeafDigest(fixture.leaf)
 	for i, node := range oldNodes {
 		store, storeErr := newCVComponentLeafStore(t.TempDir())
 		if storeErr != nil {
@@ -106,7 +124,9 @@ func TestAPVSSReceiverActorsFeedAvailabilityAndVerifiedCacheV1(t *testing.T) {
 		}
 		services[i], err = newCVComponentServiceWithReceivers(
 			context.Background(), cfg, &fixture.context, node, transport, router, store,
-			receiverOrder, map[int]fr.Element{receiverOrder[i]: fixture.receiverSecrets[i]},
+			receiverOrder,
+			map[int]fr.Element{receiverOrder[i]: fixture.receiverSecrets[i]},
+			map[int]fr.Element{receiverOrder[i]: signingSecrets[i]},
 		)
 		if err != nil {
 			t.Fatal(err)

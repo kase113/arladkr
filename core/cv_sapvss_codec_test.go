@@ -21,13 +21,14 @@ func TestCVLeafCodecRoundTripAndRejectsTrailingBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("codec-leaf-session"),
-		epoch:              23,
-		sharingDegree:      0,
-		profile:            profile,
-		receiverPublicKeys: []bls12381.G1Affine{receiverKey},
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 []byte("codec-leaf-session"),
+		epoch:                     23,
+		sharingDegree:             0,
+		profile:                   profile,
+		receiverPublicKeys:        []bls12381.G1Affine{receiverKey},
+		receiverSigningPublicKeys: cvTestSigningKeys(t, 1, 27001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	leaf, err := cvReferenceDeal(
 		context,
@@ -133,13 +134,14 @@ func TestCVLeafCodecSizesAllowLargeValidContext(t *testing.T) {
 		}
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("codec-large-leaf-session"),
-		epoch:              24,
-		sharingDegree:      85,
-		profile:            cvChunkProfile{chunkBits: 8, maxComponents: 86},
-		receiverPublicKeys: keys,
-		dealerSetPolicy:    []byte("first-f_o-plus-one"),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 []byte("codec-large-leaf-session"),
+		epoch:                     24,
+		sharingDegree:             85,
+		profile:                   cvChunkProfile{chunkBits: 8, maxComponents: 86},
+		receiverPublicKeys:        keys,
+		receiverSigningPublicKeys: cvTestSigningKeys(t, len(keys), 28001),
+		dealerSetPolicy:           []byte("first-f_o-plus-one"),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	if err := cvValidateLeafContext(&context); err != nil {
 		t.Fatalf("large context is not valid: %v", err)
@@ -179,6 +181,55 @@ func TestCVLeafCodecRoundTripWithMultipleReceiversAndDegree(t *testing.T) {
 	if !bytes.Equal(decodedWire, wire) {
 		t.Fatal("multi-receiver Leaf roundtrip changed canonical wire")
 	}
+}
+
+func TestCVStructuralV2WireRejectsLegacyBlindingFields(t *testing.T) {
+	fixture := apvssFixture(t, 1, 0)
+
+	t.Run("legacy profile", func(t *testing.T) {
+		legacy := cvCloneLeafContext(fixture.context)
+		legacy.proofProfile = "m1a-structural-no-nizk"
+		if err := cvValidateLeafContext(&legacy); err == nil {
+			t.Fatal("accepted the legacy structural proof profile")
+		}
+	})
+
+	t.Run("leaf", func(t *testing.T) {
+		wire, err := cvLeafCanonicalBytes(fixture.leaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(wire) == 0 || wire[len(wire)-1] != 0 {
+			t.Fatal("unexpected structural leaf capability framing")
+		}
+		var legacy bytes.Buffer
+		_, _ = legacy.Write(wire[:len(wire)-1])
+		cvWriteCiphertext(&legacy, &fixture.leaf.receivers[0].encryptedShare.blinding)
+		_ = legacy.WriteByte(wire[len(wire)-1])
+		if legacy.Len()-len(wire) != 2*bls12381.SizeOfG1AffineCompressed {
+			t.Fatal("legacy leaf fixture did not add exactly one blinding ciphertext")
+		}
+		if _, err := cvDecodeLeaf(legacy.Bytes(), &fixture.context); err == nil {
+			t.Fatal("accepted a structural v1 leaf carrying the legacy blinding ciphertext")
+		}
+	})
+
+	t.Run("aggregate", func(t *testing.T) {
+		agg, err := cvAgg(&fixture.context, []*cvLeaf{fixture.leaf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := cvAggregateCanonicalBytes(agg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var legacy bytes.Buffer
+		_, _ = legacy.Write(wire)
+		cvWriteCiphertext(&legacy, &agg.receivers[0].blinding)
+		if _, err := cvDecodeAggregate(legacy.Bytes()); err == nil {
+			t.Fatal("accepted a structural v1 aggregate carrying the legacy blinding ciphertext")
+		}
+	})
 }
 
 func TestCVReceiptCodecRoundTripAndRejectsTampering(t *testing.T) {
@@ -226,6 +277,14 @@ func TestCVReceiptCodecRoundTripAndRejectsTampering(t *testing.T) {
 		bad[len(bad)-1] ^= 1
 		if _, err := cvDecodeReceipt(bad, &context, agg, 1); err == nil {
 			t.Fatal("accepted receipt with a mutated DLEQ response")
+		}
+	})
+	t.Run("receipt mode", func(t *testing.T) {
+		bad := append([]byte(nil), wire...)
+		modeOffset := 4 + len(cvReceiptDomain) + 4 + 32 + 4
+		bad[modeOffset+3] = 0
+		if _, err := cvDecodeReceipt(bad, &context, agg, 1); err == nil {
+			t.Fatal("accepted a Pedersen receipt mode for a Feldman aggregate")
 		}
 	})
 	t.Run("trailing bytes", func(t *testing.T) {

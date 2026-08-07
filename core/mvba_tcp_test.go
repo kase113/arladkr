@@ -66,14 +66,14 @@ func TestArladkrMVBAWireGobRoundTripWithRealMVBAProposalBody(t *testing.T) {
 
 func TestSelectAgreedPayloadsAppliesPredicateAndPreservesProposerOrder(t *testing.T) {
 	vec := []*dmvba.ProposalValue{
-		{Payload: []byte("bad"), Round: 1, Hint: "cv-component-candidate"},
+		{Payload: []byte("bad"), Round: 1, Hint: "test-component-value"},
 		nil,
-		{Payload: []byte("two"), Round: 1, Hint: "cv-component-candidate"},
-		{Payload: []byte("wrong-round"), Round: 2, Hint: "cv-component-candidate"},
+		{Payload: []byte("two"), Round: 1, Hint: "test-component-value"},
+		{Payload: []byte("wrong-round"), Round: 2, Hint: "test-component-value"},
 		{Payload: []byte("wrong-hint"), Round: 1, Hint: "other-instance"},
-		{Payload: []byte("five"), Round: 1, Hint: "cv-component-candidate"},
+		{Payload: []byte("five"), Round: 1, Hint: "test-component-value"},
 	}
-	got := selectAgreedPayloads(vec, 1, "cv-component-candidate", func(_ int, payload []byte) bool {
+	got := selectAgreedPayloads(vec, 1, "test-component-value", func(_ int, payload []byte) bool {
 		return string(payload) != "bad"
 	})
 	if len(got) != 2 || string(got[0]) != "two" || string(got[1]) != "five" {
@@ -82,7 +82,7 @@ func TestSelectAgreedPayloadsAppliesPredicateAndPreservesProposerOrder(t *testin
 }
 
 func TestArladkrMVBAInstanceDomainsAreDistinct(t *testing.T) {
-	component, err := arlMVBAInstanceSID("sid", "cv-component-candidate")
+	component, err := arlMVBAInstanceSID("sid", "test-component-value")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestArladkrMVBAInstanceDomainsAreDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if component == aggregate || !strings.Contains(component, "cv-component-candidate") ||
+	if component == aggregate || !strings.Contains(component, "test-component-value") ||
 		!strings.Contains(aggregate, "cv-materialized-aggrlo") {
 		t.Fatalf("MVBA instance domains are not distinct: %q / %q", component, aggregate)
 	}
@@ -106,7 +106,7 @@ func TestPredicateBearingMVBATCPRequiresOneLocalOldNode(t *testing.T) {
 		LocalNodeIDs: []int{0, 1},
 	})
 	_, _, err := runArladkrMVBATCPInstance(
-		context.Background(), cfg, "cv-component-candidate", []byte("candidate"),
+		context.Background(), cfg, "test-component-value", []byte("candidate"),
 		func(_ int, _ []byte) bool { return true },
 	)
 	if err == nil || !strings.Contains(err.Error(), "exactly one local old node") {

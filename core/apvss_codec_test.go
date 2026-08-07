@@ -20,6 +20,7 @@ func TestAPVSSLeafPrototypeCodecRoundTripV1(t *testing.T) {
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
+				fixture.signingSecrets,
 				&fixture.witness,
 				profile.fallback,
 			)
@@ -55,6 +56,7 @@ func TestAPVSSLeafPrototypeCodecRejectsUnknownFallbackProfileV1(t *testing.T) {
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
+		fixture.signingSecrets,
 		&fixture.witness,
 		[]int{1},
 	)
@@ -86,6 +88,7 @@ func TestAPVSSLeafPrototypeCodecRejectsMutationV1(t *testing.T) {
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
+		fixture.signingSecrets,
 		&fixture.witness,
 		[]int{1},
 	)
@@ -148,6 +151,7 @@ func TestAPVSSLaneACKMessageCodecV1(t *testing.T) {
 		fixture.leaf,
 		1,
 		fixture.receiverSecrets[0],
+		fixture.signingSecrets[0],
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +220,8 @@ func TestAPVSSLaneOfferProjectionPreservesStatementV1(t *testing.T) {
 		t.Fatal("lane projection changed the signed statement")
 	}
 	ack, err := apvssIssueVerifiedLaneACK(
-		&fixture.context, view, receiverIndex, fixture.receiverSecrets[receiverIndex-1],
+		&fixture.context, view, receiverIndex,
+		fixture.receiverSecrets[receiverIndex-1], fixture.signingSecrets[receiverIndex-1],
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +235,12 @@ func TestAPVSSLaneOfferProjectionPreservesStatementV1(t *testing.T) {
 	}
 	if _, err := apvssDecodeLaneOffer(append(append([]byte(nil), wire...), 0), &fixture.context, receiverIndex); err == nil {
 		t.Fatal("accepted trailing lane offer bytes")
+	}
+	var legacy bytes.Buffer
+	_, _ = legacy.Write(wire)
+	cvWriteCiphertext(&legacy, &offer.receiver.encryptedShare.blinding)
+	if _, err := apvssDecodeLaneOffer(legacy.Bytes(), &fixture.context, receiverIndex); err == nil {
+		t.Fatal("accepted a structural v1 lane offer carrying the legacy blinding ciphertext")
 	}
 	if _, err := apvssDecodeLaneOffer(wire, &fixture.context, receiverIndex-1); err == nil {
 		t.Fatal("accepted lane offer for another receiver")

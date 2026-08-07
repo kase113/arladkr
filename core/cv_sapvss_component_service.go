@@ -99,21 +99,22 @@ type cvReconstructedLeafCacheJob struct {
 }
 
 type cvComponentService struct {
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	cfg                  Config
-	leafCtx              *cvLeafContext
-	leafContextDigest    []byte
-	localNode            int
-	transport            agreementTransport
-	networkAuth          *cvNetworkAuthenticator
-	store                cvComponentLeafCacheStore
-	shardStore           *cvComponentShardStore
-	freshStore           cvFreshArtifactStore
-	inbox                <-chan Message
-	receiverOrder        []int
-	receiverIndex        map[int]int
-	localReceiverSecrets map[int]fr.Element
+	ctx                         context.Context
+	cancel                      context.CancelFunc
+	cfg                         Config
+	leafCtx                     *cvLeafContext
+	leafContextDigest           []byte
+	localNode                   int
+	transport                   agreementTransport
+	networkAuth                 *cvNetworkAuthenticator
+	store                       cvComponentLeafCacheStore
+	shardStore                  *cvComponentShardStore
+	freshStore                  cvFreshArtifactStore
+	inbox                       <-chan Message
+	receiverOrder               []int
+	receiverIndex               map[int]int
+	localReceiverSecrets        map[int]fr.Element
+	localReceiverSigningSecrets map[int]fr.Element
 
 	mu                           sync.Mutex
 	aggregateBuildMu             sync.Mutex
@@ -136,6 +137,8 @@ type cvComponentService struct {
 	readyDescriptorsByRoot       map[string][]*cvComponentDescriptor
 	pendingReadyCertificates     map[string]*cvComponentReadyCertificate
 	pendingReadyOffers           map[string][]Message
+	eligibilityShares            map[string]map[int][]byte
+	eligibilityUpdates           chan struct{}
 	readyCandidates              chan []*cvComponentDescriptor
 	verifiedLeaves               map[string]*cvVerifiedLeaf
 	aggregateCertificates        map[string][]byte
@@ -168,7 +171,7 @@ func newCVComponentService(
 	store *cvComponentLeafStore,
 ) (*cvComponentService, error) {
 	return newCVComponentServiceWithReceivers(
-		ctx, cfg, leafContext, localNode, transport, router, store, nil, nil,
+		ctx, cfg, leafContext, localNode, transport, router, store, nil, nil, nil,
 	)
 }
 
@@ -182,12 +185,23 @@ func newCVComponentServiceWithReceivers(
 	store *cvComponentLeafStore,
 	receiverOrder []int,
 	localReceiverSecrets map[int]fr.Element,
+	localReceiverSigningSecrets ...map[int]fr.Element,
 ) (*cvComponentService, error) {
+	signingSecrets := localReceiverSecrets
+	if len(localReceiverSigningSecrets) > 1 {
+		return nil, fmt.Errorf("multiple local APVSS signing registries")
+	}
+	if len(localReceiverSigningSecrets) == 1 {
+		signingSecrets = localReceiverSigningSecrets[0]
+	}
 	c := NormalizeConfig(cfg)
 	if ctx == nil || leafContext == nil || transport == nil || router == nil || store == nil {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component service configuration")
 	}
 	if err := ValidateConfig(c); err != nil {
+		return nil, err
+	}
+	if err := validateAPVSSProductionAdmission(c); err != nil {
 		return nil, err
 	}
 	if err := ensureRuntime(&c); err != nil {
@@ -223,11 +237,14 @@ func newCVComponentServiceWithReceivers(
 	}
 	actorIDs := []int{localNode}
 	localSecrets := make(map[int]fr.Element, len(localReceiverSecrets))
+	localSigningSecrets := make(map[int]fr.Element, len(signingSecrets))
 	for receiverID, secret := range localReceiverSecrets {
-		if _, ok := receiverIndex[receiverID]; !ok || secret.IsZero() {
+		signingSecret, signingOK := signingSecrets[receiverID]
+		if _, ok := receiverIndex[receiverID]; !ok || secret.IsZero() || !signingOK || signingSecret.IsZero() || signingSecret.Equal(&secret) {
 			return nil, fmt.Errorf("invalid local APVSS receiver %d", receiverID)
 		}
 		localSecrets[receiverID] = secret
+		localSigningSecrets[receiverID] = signingSecret
 		actorIDs = append(actorIDs, receiverID)
 	}
 	actorIDs = sortedUnique(actorIDs)
@@ -265,6 +282,7 @@ func newCVComponentServiceWithReceivers(
 		receiverOrder:                append([]int(nil), receiverOrder...),
 		receiverIndex:                receiverIndex,
 		localReceiverSecrets:         localSecrets,
+		localReceiverSigningSecrets:  localSigningSecrets,
 		pendingACKs:                  make(map[string]chan cvComponentAck),
 		pendingComponentStatements:   make(map[string][]byte),
 		pendingLeaves:                make(map[string]*cvPendingComponentLeaf),
@@ -282,6 +300,8 @@ func newCVComponentServiceWithReceivers(
 		readyDescriptorsByRoot:       make(map[string][]*cvComponentDescriptor),
 		pendingReadyCertificates:     make(map[string]*cvComponentReadyCertificate),
 		pendingReadyOffers:           make(map[string][]Message),
+		eligibilityShares:            make(map[string]map[int][]byte),
+		eligibilityUpdates:           make(chan struct{}, 1),
 		readyCandidates:              make(chan []*cvComponentDescriptor, len(c.OldCommittee)+1),
 		verifiedLeaves:               make(map[string]*cvVerifiedLeaf),
 		aggregateCertificates:        make(map[string][]byte),
@@ -614,16 +634,16 @@ func (s *cvComponentService) disperseComponentWire(
 	return descriptor, nil
 }
 
-func (s *cvComponentService) CollectComponentCandidates(
+func (s *cvComponentService) CollectLocalComponentSet(
 	ctx context.Context,
 ) ([]*cvComponentDescriptor, error) {
 	if ctx == nil {
-		return nil, fmt.Errorf("nil CV-sAPVSS component candidate context")
+		return nil, fmt.Errorf("nil CV-sAPVSS component collection context")
 	}
 	want := s.cfg.FOld + 1
 	ready := len(s.cfg.OldCommittee) - s.cfg.FOld
 	if s.cfg.Kappa != want || ready < want {
-		return nil, fmt.Errorf("CV-sAPVSS component candidate selection requires K=f_o+1")
+		return nil, fmt.Errorf("CV-sAPVSS component collection requires K=f_o+1")
 	}
 	s.maybePublishCanonicalReadyCertificate()
 	select {
@@ -958,6 +978,8 @@ func (s *cvComponentService) handle(msg Message) {
 		_ = s.acceptComponentDescriptorWire(msg.Body)
 	case cvTagComponentReady:
 		s.handleReadyCertificate(msg)
+	case cvTagEligibilityShare:
+		s.handleEligibilityShare(msg)
 	case cvTagComponentGet:
 		s.handleGet(msg)
 	case cvTagComponentLeaf:
@@ -1017,8 +1039,9 @@ func (s *cvComponentService) runLaneOfferWorker() {
 
 func (s *cvComponentService) handleAPVSSLaneOffer(msg Message) {
 	secret, local := s.localReceiverSecrets[msg.To]
+	signingSecret, signingLocal := s.localReceiverSigningSecrets[msg.To]
 	receiverIndex, registered := s.receiverIndex[msg.To]
-	if !local || !registered {
+	if !local || !signingLocal || !registered {
 		return
 	}
 	offer, err := apvssDecodeLaneOffer(msg.Body, s.leafCtx, receiverIndex)
@@ -1029,7 +1052,7 @@ func (s *cvComponentService) handleAPVSSLaneOffer(msg Message) {
 	if err != nil {
 		return
 	}
-	ack, err := apvssIssueVerifiedLaneACK(s.leafCtx, leaf, receiverIndex, secret)
+	ack, err := apvssIssueVerifiedLaneACK(s.leafCtx, leaf, receiverIndex, secret, signingSecret)
 	if err != nil {
 		return
 	}

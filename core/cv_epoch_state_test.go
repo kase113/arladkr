@@ -11,6 +11,9 @@ import (
 )
 
 func TestCVEpochStatePersistLoadAndRejectMutation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("epoch state persistence integration test")
+	}
 	cfg, result := cvEpochStateFixture(t)
 	root := t.TempDir()
 	state, err := PersistCVEpochState(root, cfg, result)
@@ -74,6 +77,9 @@ func TestCVEpochStatePersistLoadAndRejectMutation(t *testing.T) {
 }
 
 func TestCVEpochStateDigestBindsNextLeafContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("epoch state context integration test")
+	}
 	cfg, result := cvEpochStateFixture(t)
 	state, _, err := BuildCVEpochState(cfg, result)
 	if err != nil {

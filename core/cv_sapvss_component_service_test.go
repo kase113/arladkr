@@ -9,6 +9,9 @@ import (
 )
 
 func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("component network integration test")
+	}
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	if err := ensureRuntime(&cfg); err != nil {
 		t.Fatal(err)
@@ -105,7 +108,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 		t.Fatal(err)
 	}
 	insufficientCtx, insufficientCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	if _, collectErr := services[0].CollectComponentCandidates(insufficientCtx); collectErr == nil {
+	if _, collectErr := services[0].CollectLocalComponentSet(insufficientCtx); collectErr == nil {
 		insufficientCancel()
 		t.Fatal("component candidate collection succeeded below n-f certified descriptors")
 	}
@@ -119,7 +122,7 @@ func TestCVComponentServiceDispersesCertifiesAndRetrievesOverNetwork(t *testing.
 	}
 	candidateSets := make(map[int][]*cvComponentDescriptor, len(services))
 	for _, service := range services {
-		candidates, collectErr := service.CollectComponentCandidates(ctx)
+		candidates, collectErr := service.CollectLocalComponentSet(ctx)
 		if collectErr != nil {
 			t.Fatal(collectErr)
 		}
@@ -534,12 +537,15 @@ func TestCVComponentServiceCandidateCollectionRequiresReadyCertifiedDescriptors(
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
-	if _, err := service.CollectComponentCandidates(ctx); err == nil {
+	if _, err := service.CollectLocalComponentSet(ctx); err == nil {
 		t.Fatal("component candidate collection succeeded below n-f certified descriptors")
 	}
 }
 
 func TestCVComponentReadyCertificateReselectsAfterLowerDealerArrives(t *testing.T) {
+	if testing.Short() {
+		t.Skip("component certificate integration test")
+	}
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	if err := ensureRuntime(&cfg); err != nil {
 		t.Fatal(err)
@@ -685,6 +691,7 @@ func TestCVComponentMaterializationKeepsOneCandidateInFlight(t *testing.T) {
 		value, materializeErr := services[0].materializeFirstCertified(
 			ctx,
 			first,
+			nil,
 			func(_ context.Context, descriptors []*cvComponentDescriptor) (*cvMaterializedAggregate, error) {
 				started <- append([]*cvComponentDescriptor(nil), descriptors...)
 				if descriptors[0].dealer == 1 {
@@ -731,6 +738,9 @@ func TestCVComponentMaterializationKeepsOneCandidateInFlight(t *testing.T) {
 }
 
 func TestCVComponentPrimaryGraceFallsBackWhenPrimaryDoesNotMaterialize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("component fallback integration test")
+	}
 	t.Setenv("RLADKR_CV_PRIMARY_GRACE_MS", "1")
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	if err := ensureRuntime(&cfg); err != nil {
@@ -775,7 +785,7 @@ func TestCVComponentPrimaryGraceFallsBackWhenPrimaryDoesNotMaterialize(t *testin
 	if services[nonPrimary].localNode == cvPrimaryMaterializer(cfg) {
 		t.Fatal("test selected the epoch primary as fallback materializer")
 	}
-	candidates, err := services[nonPrimary].CollectComponentCandidates(ctx)
+	candidates, err := services[nonPrimary].CollectLocalComponentSet(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,6 +838,9 @@ func TestCVPrimaryOfferGraceExtendsAtMostOnce(t *testing.T) {
 }
 
 func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("component materializer integration test")
+	}
 	cfg, leafContext, _, leaves := cvM4Fixture(t)
 	if err := ensureRuntime(&cfg); err != nil {
 		t.Fatal(err)
@@ -879,7 +892,7 @@ func TestCVComponentMaterializerSkipsInvalidAvailableLeaf(t *testing.T) {
 			t.Fatalf("availability-lock dealer %d: %v", dealer, err)
 		}
 	}
-	candidates, err := services[3].CollectComponentCandidates(ctx)
+	candidates, err := services[3].CollectLocalComponentSet(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

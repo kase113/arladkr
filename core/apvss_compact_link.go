@@ -11,6 +11,8 @@ import (
 const (
 	apvssCompactLinkChallengeDomain = "ARL-APVSS/compact-link/challenge"
 	apvssCompactLinkProofDomain     = "ARL-APVSS/compact-link/proof"
+	apvssFeldmanLinkChallengeDomain = "ARL-APVSS/feldman-link/challenge/v1"
+	apvssFeldmanLinkProofDomain     = "ARL-APVSS/feldman-link/proof/v1"
 )
 
 type apvssCompactLinkDigitProof struct {
@@ -37,7 +39,8 @@ type apvssCompactLinkLaneProof struct {
 // compact range proof over every digit commitment is still required before
 // compact-batch can be enabled by the APVSS backend gate.
 type apvssCompactLinkProof struct {
-	lanes []apvssCompactLinkLaneProof
+	profile string
+	lanes   []apvssCompactLinkLaneProof
 }
 
 type apvssCompactLinkDigitMask struct {
@@ -69,6 +72,17 @@ func apvssCompactLinkReceiverIndices(proof *apvssCompactLinkProof) []int {
 	return indices
 }
 
+func apvssFeldmanLink(proof *apvssCompactLinkProof) bool {
+	return proof != nil && proof.profile == apvssFallbackFeldmanBatchProfile
+}
+
+func apvssCompactLinkDomains(proof *apvssCompactLinkProof) (string, string) {
+	if apvssFeldmanLink(proof) {
+		return apvssFeldmanLinkProofDomain, apvssFeldmanLinkChallengeDomain
+	}
+	return apvssCompactLinkProofDomain, apvssCompactLinkChallengeDomain
+}
+
 func apvssValidateCompactLinkShape(
 	leaf *cvLeaf,
 	proof *apvssCompactLinkProof,
@@ -76,6 +90,11 @@ func apvssValidateCompactLinkShape(
 	if leaf == nil || proof == nil || len(proof.lanes) == 0 ||
 		len(proof.lanes) > apvssCompactLaneLimit(leaf) {
 		return fmt.Errorf("invalid APVSS compact-link proof shape")
+	}
+	if _, err := apvssCompactSetStatementDigestForProfile(
+		leaf, apvssCompactLinkReceiverIndices(proof), proof.profile,
+	); err != nil {
+		return err
 	}
 	_, _, chunks, err := cvProfile(leaf.context.profile)
 	if err != nil {
@@ -112,11 +131,11 @@ func apvssValidateCompactLinkPoints(proof *apvssCompactLinkProof) error {
 				}
 			}
 		}
-		for _, point := range []*bls12381.G1Affine{
-			&lane.tEvaluation,
-			&lane.tBlindingCoin,
-			&lane.tBlinding,
-		} {
+		points := []*bls12381.G1Affine{&lane.tEvaluation}
+		if !apvssFeldmanLink(proof) {
+			points = append(points, &lane.tBlindingCoin, &lane.tBlinding)
+		}
+		for _, point := range points {
 			if !cvValidG1(point, true) {
 				return fmt.Errorf("invalid APVSS compact-link lane point %d", laneIndex)
 			}
@@ -129,8 +148,8 @@ func apvssCompactLinkFirstMoveBytes(
 	leaf *cvLeaf,
 	proof *apvssCompactLinkProof,
 ) ([]byte, error) {
-	statementDigest, err := apvssCompactSetStatementDigest(
-		leaf, apvssCompactLinkReceiverIndices(proof),
+	statementDigest, err := apvssCompactSetStatementDigestForProfile(
+		leaf, apvssCompactLinkReceiverIndices(proof), proof.profile,
 	)
 	if err != nil {
 		return nil, err
@@ -150,7 +169,8 @@ func apvssCompactLinkFirstMoveBytesWithStatement(
 		return nil, fmt.Errorf("invalid APVSS compact-link statement digest")
 	}
 	var wire bytes.Buffer
-	if err := cvWriteBytes(&wire, []byte(apvssCompactLinkProofDomain)); err != nil {
+	proofDomain, _ := apvssCompactLinkDomains(proof)
+	if err := cvWriteBytes(&wire, []byte(proofDomain)); err != nil {
 		return nil, err
 	}
 	if err := cvWriteBytes(&wire, statementDigest); err != nil {
@@ -179,8 +199,10 @@ func apvssCompactLinkFirstMoveBytesWithStatement(
 			}
 		}
 		cvWritePoint(&wire, &lane.tEvaluation)
-		cvWritePoint(&wire, &lane.tBlindingCoin)
-		cvWritePoint(&wire, &lane.tBlinding)
+		if !apvssFeldmanLink(proof) {
+			cvWritePoint(&wire, &lane.tBlindingCoin)
+			cvWritePoint(&wire, &lane.tBlinding)
+		}
 	}
 	return wire.Bytes(), nil
 }
@@ -189,8 +211,8 @@ func apvssCompactLinkChallenge(
 	leaf *cvLeaf,
 	proof *apvssCompactLinkProof,
 ) (fr.Element, error) {
-	statementDigest, err := apvssCompactSetStatementDigest(
-		leaf, apvssCompactLinkReceiverIndices(proof),
+	statementDigest, err := apvssCompactSetStatementDigestForProfile(
+		leaf, apvssCompactLinkReceiverIndices(proof), proof.profile,
 	)
 	if err != nil {
 		return fr.Element{}, err
@@ -207,7 +229,8 @@ func apvssCompactLinkChallengeWithStatement(
 	if err != nil {
 		return fr.Element{}, err
 	}
-	return cvHashToFr(apvssCompactLinkChallengeDomain, firstMove)
+	_, challengeDomain := apvssCompactLinkDomains(proof)
+	return cvHashToFr(challengeDomain, firstMove)
 }
 
 func apvssCompactLinkProofCanonicalBytes(
@@ -227,8 +250,10 @@ func apvssCompactLinkProofCanonicalBytes(
 			cvWriteScalar(buffer, &digit.zCommitment)
 			cvWriteScalar(buffer, &digit.zCoin)
 		}
-		cvWriteScalar(buffer, &lane.zBlinding)
-		cvWriteScalar(buffer, &lane.zBlindingCoin)
+		if !apvssFeldmanLink(proof) {
+			cvWriteScalar(buffer, &lane.zBlinding)
+			cvWriteScalar(buffer, &lane.zBlindingCoin)
+		}
 	}
 	return buffer.Bytes(), nil
 }
@@ -248,15 +273,40 @@ func apvssProveCompactLinkWithOpenings(
 	digitValues *[]uint64,
 	commitmentBlindings *[]fr.Element,
 ) (*apvssCompactLinkProof, error) {
+	return apvssProveCompactLinkWithOpeningsForProfile(
+		leaf, witness, receiverIndices, digitValues, commitmentBlindings, "",
+	)
+}
+
+func apvssProveCompactLinkWithOpeningsForProfile(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
+	receiverIndices []int,
+	digitValues *[]uint64,
+	commitmentBlindings *[]fr.Element,
+	proofProfile string,
+) (*apvssCompactLinkProof, error) {
 	if leaf == nil || witness == nil || len(receiverIndices) == 0 ||
 		len(witness.scalars) != len(leaf.receivers) ||
-		len(witness.blindings) != len(leaf.receivers) ||
-		len(witness.scalarCoins) != len(leaf.receivers) ||
-		len(witness.blindingCoins) != len(leaf.receivers) {
+		len(witness.scalarCoins) != len(leaf.receivers) {
 		return nil, fmt.Errorf("invalid APVSS compact-link witness shape")
 	}
-	if _, err := apvssCompactSetStatementDigest(leaf, receiverIndices); err != nil {
+	if proofProfile == "" {
+		if leaf.context.proofProfile == cvLeafStructuralProofProfile {
+			proofProfile = apvssFallbackCompactBatchProfile
+		} else if leaf.context.proofProfile == cvLeafFullFieldProofProfile {
+			proofProfile = apvssFullFieldBatchProfile
+		} else {
+			proofProfile = apvssFullCompactBatchProfile
+		}
+	}
+	if _, err := apvssCompactSetStatementDigestForProfile(leaf, receiverIndices, proofProfile); err != nil {
 		return nil, err
+	}
+	feldman := proofProfile == apvssFallbackFeldmanBatchProfile
+	if !feldman && (len(witness.blindings) != len(leaf.receivers) ||
+		len(witness.blindingCoins) != len(leaf.receivers)) {
+		return nil, fmt.Errorf("invalid APVSS compact-link Pedersen witness shape")
 	}
 	base, _, chunks, err := cvProfile(leaf.context.profile)
 	if err != nil {
@@ -266,7 +316,10 @@ func apvssProveCompactLinkWithOpenings(
 	if err != nil {
 		return nil, err
 	}
-	proof := &apvssCompactLinkProof{lanes: make([]apvssCompactLinkLaneProof, len(receiverIndices))}
+	proof := &apvssCompactLinkProof{
+		profile: proofProfile,
+		lanes:   make([]apvssCompactLinkLaneProof, len(receiverIndices)),
+	}
 	if digitValues != nil {
 		*digitValues = (*digitValues)[:0]
 	}
@@ -276,13 +329,14 @@ func apvssProveCompactLinkWithOpenings(
 	masks := make([]apvssCompactLinkLaneMask, len(receiverIndices))
 	for laneIndex, receiverIndex := range receiverIndices {
 		witnessIndex := receiverIndex - 1
+		var blinding, blindingCoin fr.Element
+		if !feldman {
+			blinding = witness.blindings[witnessIndex]
+			blindingCoin = witness.blindingCoins[witnessIndex]
+		}
 		if err := apvssValidateFallbackLaneWitness(
-			leaf,
-			receiverIndex,
-			witness.scalars[witnessIndex],
-			witness.blindings[witnessIndex],
-			witness.scalarCoins[witnessIndex],
-			witness.blindingCoins[witnessIndex],
+			leaf, receiverIndex, witness.scalars[witnessIndex], blinding,
+			witness.scalarCoins[witnessIndex], blindingCoin,
 		); err != nil {
 			return nil, err
 		}
@@ -351,23 +405,26 @@ func apvssProveCompactLinkWithOpenings(
 			evaluationMask.Add(&evaluationMask, &weightedMask)
 			power.Mul(&power, &baseScalar)
 		}
-		maskLane.blinding, err = apvssRandomFr()
-		if err != nil {
-			return nil, err
+		proofLane.tEvaluation = cvPointTimes(&genG1, &evaluationMask)
+		if !feldman {
+			maskLane.blinding, err = apvssRandomFr()
+			if err != nil {
+				return nil, err
+			}
+			maskLane.blindingCoin, err = apvssRandomFr()
+			if err != nil {
+				return nil, err
+			}
+			proofLane.tEvaluation.Add(
+				&proofLane.tEvaluation,
+				pointPtr(cvPointTimes(&h, &maskLane.blinding)),
+			)
+			proofLane.tBlindingCoin = cvPointTimes(&genG1, &maskLane.blindingCoin)
+			proofLane.tBlinding = cvPointSum(
+				pointPtr(cvPointTimes(&h, &maskLane.blinding)),
+				pointPtr(cvPointTimes(&lane.receiverPublicKey, &maskLane.blindingCoin)),
+			)
 		}
-		maskLane.blindingCoin, err = apvssRandomFr()
-		if err != nil {
-			return nil, err
-		}
-		proofLane.tEvaluation = cvPointSum(
-			pointPtr(cvPointTimes(&genG1, &evaluationMask)),
-			pointPtr(cvPointTimes(&h, &maskLane.blinding)),
-		)
-		proofLane.tBlindingCoin = cvPointTimes(&genG1, &maskLane.blindingCoin)
-		proofLane.tBlinding = cvPointSum(
-			pointPtr(cvPointTimes(&h, &maskLane.blinding)),
-			pointPtr(cvPointTimes(&lane.receiverPublicKey, &maskLane.blindingCoin)),
-		)
 	}
 
 	challenge, err := apvssCompactLinkChallenge(leaf, proof)
@@ -394,21 +451,23 @@ func apvssProveCompactLinkWithOpenings(
 				&digitMask.coin,
 			)
 		}
-		proofLane.zBlinding.Mul(&challenge, &witness.blindings[witnessIndex]).Add(
-			&proofLane.zBlinding,
-			&maskLane.blinding,
-		)
-		proofLane.zBlindingCoin.Mul(&challenge, &witness.blindingCoins[witnessIndex]).Add(
-			&proofLane.zBlindingCoin,
-			&maskLane.blindingCoin,
-		)
+		if !feldman {
+			proofLane.zBlinding.Mul(&challenge, &witness.blindings[witnessIndex]).Add(
+				&proofLane.zBlinding,
+				&maskLane.blinding,
+			)
+			proofLane.zBlindingCoin.Mul(&challenge, &witness.blindingCoins[witnessIndex]).Add(
+				&proofLane.zBlindingCoin,
+				&maskLane.blindingCoin,
+			)
+		}
 	}
 	return proof, nil
 }
 
 func apvssVerifyCompactLink(leaf *cvLeaf, proof *apvssCompactLinkProof) error {
-	statementDigest, err := apvssCompactSetStatementDigest(
-		leaf, apvssCompactLinkReceiverIndices(proof),
+	statementDigest, err := apvssCompactSetStatementDigestForProfile(
+		leaf, apvssCompactLinkReceiverIndices(proof), proof.profile,
 	)
 	if err != nil {
 		return err
@@ -491,12 +550,18 @@ func apvssVerifyCompactLinkWithStatement(
 			&proofLane.tEvaluation,
 			pointPtr(cvPointTimes(&lane.encryptedShare.commitment, &challenge)),
 		)
-		rhsEvaluation := cvPointSum(
-			pointPtr(cvPointTimes(&genG1, &evaluationResponse)),
-			pointPtr(cvPointTimes(&h, &proofLane.zBlinding)),
-		)
+		rhsEvaluation := cvPointTimes(&genG1, &evaluationResponse)
+		if !apvssFeldmanLink(proof) {
+			rhsEvaluation.Add(
+				&rhsEvaluation,
+				pointPtr(cvPointTimes(&h, &proofLane.zBlinding)),
+			)
+		}
 		if !lhsEvaluation.Equal(&rhsEvaluation) {
-			return fmt.Errorf("invalid APVSS compact-link Pedersen evaluation %d", laneIndex)
+			return fmt.Errorf("invalid APVSS compact-link evaluation %d", laneIndex)
+		}
+		if apvssFeldmanLink(proof) {
+			continue
 		}
 		lhsBlindingCoin := cvPointSum(
 			&proofLane.tBlindingCoin,
@@ -541,6 +606,15 @@ func apvssDecodeCompactLinkProofWithVerify(
 	leaf *cvLeaf,
 	verify bool,
 ) (*apvssCompactLinkProof, error) {
+	return apvssDecodeCompactLinkProofForProfile(wire, leaf, verify, "")
+}
+
+func apvssDecodeCompactLinkProofForProfile(
+	wire []byte,
+	leaf *cvLeaf,
+	verify bool,
+	proofProfile string,
+) (*apvssCompactLinkProof, error) {
 	if leaf == nil || len(wire) == 0 || len(wire) > cvMaxLeafWireBytes {
 		return nil, fmt.Errorf("invalid APVSS compact-link wire")
 	}
@@ -549,8 +623,19 @@ func apvssDecodeCompactLinkProofWithVerify(
 		return nil, err
 	}
 	r := newCVWireReader(wire)
-	domain, err := r.bytes(len(apvssCompactLinkProofDomain))
-	if err != nil || !bytes.Equal(domain, []byte(apvssCompactLinkProofDomain)) {
+	if proofProfile == "" {
+		if leaf.context.proofProfile == cvLeafStructuralProofProfile {
+			proofProfile = apvssFallbackCompactBatchProfile
+		} else if leaf.context.proofProfile == cvLeafFullFieldProofProfile {
+			proofProfile = apvssFullFieldBatchProfile
+		} else {
+			proofProfile = apvssFullCompactBatchProfile
+		}
+	}
+	proof := &apvssCompactLinkProof{profile: proofProfile}
+	proofDomain, _ := apvssCompactLinkDomains(proof)
+	domain, err := r.bytes(len(proofDomain))
+	if err != nil || !bytes.Equal(domain, []byte(proofDomain)) {
 		return nil, fmt.Errorf("invalid APVSS compact-link domain")
 	}
 	statementDigest, err := r.bytes(32)
@@ -561,7 +646,7 @@ func apvssDecodeCompactLinkProofWithVerify(
 	if err != nil || laneCount <= 0 || laneCount > apvssCompactLaneLimit(leaf) {
 		return nil, fmt.Errorf("invalid APVSS compact-link lane count")
 	}
-	proof := &apvssCompactLinkProof{lanes: make([]apvssCompactLinkLaneProof, laneCount)}
+	proof.lanes = make([]apvssCompactLinkLaneProof, laneCount)
 	for laneIndex := range proof.lanes {
 		lane := &proof.lanes[laneIndex]
 		lane.receiverIndex, err = r.uint32()
@@ -584,9 +669,11 @@ func apvssDecodeCompactLinkProofWithVerify(
 				}
 			}
 		}
-		for _, point := range []*bls12381.G1Affine{
-			&lane.tEvaluation, &lane.tBlindingCoin, &lane.tBlinding,
-		} {
+		points := []*bls12381.G1Affine{&lane.tEvaluation}
+		if !apvssFeldmanLink(proof) {
+			points = append(points, &lane.tBlindingCoin, &lane.tBlinding)
+		}
+		for _, point := range points {
 			*point, err = r.point()
 			if err != nil {
 				return nil, fmt.Errorf("decode APVSS compact-link lane point %d: %w", laneIndex, err)
@@ -604,20 +691,22 @@ func apvssDecodeCompactLinkProofWithVerify(
 				}
 			}
 		}
-		lane.zBlinding, err = r.scalar()
-		if err != nil {
-			return nil, fmt.Errorf("decode APVSS compact-link blinding %d: %w", laneIndex, err)
-		}
-		lane.zBlindingCoin, err = r.scalar()
-		if err != nil {
-			return nil, fmt.Errorf("decode APVSS compact-link blinding coin %d: %w", laneIndex, err)
+		if !apvssFeldmanLink(proof) {
+			lane.zBlinding, err = r.scalar()
+			if err != nil {
+				return nil, fmt.Errorf("decode APVSS compact-link blinding %d: %w", laneIndex, err)
+			}
+			lane.zBlindingCoin, err = r.scalar()
+			if err != nil {
+				return nil, fmt.Errorf("decode APVSS compact-link blinding coin %d: %w", laneIndex, err)
+			}
 		}
 	}
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing APVSS compact-link bytes")
 	}
-	expectedStatement, err := apvssCompactSetStatementDigest(
-		leaf, apvssCompactLinkReceiverIndices(proof),
+	expectedStatement, err := apvssCompactSetStatementDigestForProfile(
+		leaf, apvssCompactLinkReceiverIndices(proof), proof.profile,
 	)
 	if err != nil || !bytes.Equal(statementDigest, expectedStatement) {
 		return nil, fmt.Errorf("APVSS compact-link statement mismatch")

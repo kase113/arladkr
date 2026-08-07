@@ -137,11 +137,13 @@ func cvThresholdPublicKeyFromVerifiedReceipts(
 	sort.Slice(verified, func(i, j int) bool { return verified[i].index < verified[j].index })
 	indicesAtZero := make([]int, len(verified))
 	publicShares := make([]bls12381.G1Affine, len(verified))
-	blindingShares := make([]bls12381.G1Affine, len(verified))
+	allFeldman := true
 	for i := range verified {
 		indicesAtZero[i] = verified[i].index
 		publicShares[i] = verified[i].receipt.publicScalar
-		blindingShares[i] = verified[i].receipt.blindingOpening
+		if !verified[i].receipt.proof.feldman {
+			allFeldman = false
+		}
 	}
 	coefficients, err := cvLagrangeCoefficientsAtZero(indicesAtZero)
 	if err != nil {
@@ -151,12 +153,23 @@ func cvThresholdPublicKeyFromVerifiedReceipts(
 	if err != nil {
 		return nil, err
 	}
-	blindingConstant, err := cvG1LinearCombination(blindingShares, coefficients)
-	if err != nil {
-		return nil, err
-	}
 	var commitment bls12381.G1Affine
-	commitment.Add(&publicKey, &blindingConstant)
+	if allFeldman {
+		commitment = publicKey
+	} else {
+		blindingShares := make([]bls12381.G1Affine, len(verified))
+		for i := range verified {
+			if verified[i].receipt.proof.feldman {
+				return nil, fmt.Errorf("mixed Feldman and Pedersen CV-sAPVSS receipts")
+			}
+			blindingShares[i] = verified[i].receipt.blindingOpening
+		}
+		blindingConstant, err := cvG1LinearCombination(blindingShares, coefficients)
+		if err != nil {
+			return nil, err
+		}
+		commitment.Add(&publicKey, &blindingConstant)
+	}
 	if len(agg.coefficientCommitments) == 0 || !commitment.Equal(&agg.coefficientCommitments[0]) {
 		return nil, fmt.Errorf("CV-sAPVSS receipt interpolation does not match aggregate commitment")
 	}

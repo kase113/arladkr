@@ -38,6 +38,7 @@ func TestAPVSSCompactLinkProofV1(t *testing.T) {
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
+		fixture.signingSecrets,
 		&fixture.witness,
 		[]int{1, 2},
 	)

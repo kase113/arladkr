@@ -60,7 +60,150 @@ func TestAPVSSCompactFallbackRangeLinkComparatorV1(t *testing.T) {
 	}
 }
 
+func TestAPVSSFeldmanBatchFallbackV1(t *testing.T) {
+	fixture := apvssFixture(t, 7, 2)
+	indices := []int{1, 2}
+	proof, err := apvssProveFeldmanFallback(fixture.leaf, &fixture.witness, indices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.comparator != nil || !apvssFeldmanLink(proof.link) {
+		t.Fatal("Feldman fallback retained a comparator or Pedersen link")
+	}
+	for i := range proof.link.lanes {
+		lane := &proof.link.lanes[i]
+		if !lane.tBlinding.IsInfinity() || !lane.tBlindingCoin.IsInfinity() ||
+			!lane.zBlinding.IsZero() || !lane.zBlindingCoin.IsZero() {
+			t.Fatalf("Feldman link lane %d retained auxiliary blinding proof fields", i)
+		}
+	}
+	if err := apvssVerifyFeldmanFallback(fixture.leaf, proof); err != nil {
+		t.Fatalf("valid Feldman fallback rejected: %v", err)
+	}
+	wire, err := apvssFeldmanFallbackProofCanonicalBytes(fixture.leaf, proof)
+	if err != nil || len(wire) == 0 {
+		t.Fatalf("encode Feldman fallback: bytes=%d err=%v", len(wire), err)
+	}
+	decoded, err := apvssDecodeFeldmanFallbackProofWithVerify(wire, fixture.leaf, true)
+	if err != nil {
+		t.Fatalf("decode Feldman fallback: %v", err)
+	}
+	encodedAgain, err := apvssFeldmanFallbackProofCanonicalBytes(fixture.leaf, decoded)
+	if err != nil || !bytes.Equal(encodedAgain, wire) {
+		t.Fatal("Feldman fallback changed across wire round-trip")
+	}
+	if _, err := apvssDecodeCompactFallbackProof(wire, fixture.leaf); err == nil {
+		t.Fatal("Feldman fallback replayed under the experimental compact profile")
+	}
+
+	t.Run("ciphertext binding", func(t *testing.T) {
+		badLeaf := cvCloneLeafForTest(fixture.leaf)
+		badLeaf.receivers[0].encryptedShare.scalarChunks[0].c.Add(
+			&badLeaf.receivers[0].encryptedShare.scalarChunks[0].c, &genG1,
+		)
+		if err := apvssVerifyFeldmanFallback(badLeaf, proof); err == nil {
+			t.Fatal("Feldman fallback survived a ciphertext mutation")
+		}
+	})
+	t.Run("Feldman commitment binding", func(t *testing.T) {
+		badLeaf := cvCloneLeafForTest(fixture.leaf)
+		badLeaf.coefficientCommitments[0].Add(&badLeaf.coefficientCommitments[0], &genG1)
+		for i := range badLeaf.receivers {
+			share := badLeaf.receivers[i].encryptedShare
+			share.commitment.Add(&share.commitment, &genG1)
+		}
+		if err := apvssVerifyFeldmanFallback(badLeaf, proof); err == nil {
+			t.Fatal("Feldman fallback survived a polynomial commitment mutation")
+		}
+	})
+	t.Run("range proof", func(t *testing.T) {
+		bad := apvssCloneCompactFallbackProofForTest(proof)
+		one := fr.One()
+		bad.digitRange.tHat.Add(&bad.digitRange.tHat, &one)
+		if err := apvssVerifyFeldmanFallback(fixture.leaf, bad); err == nil {
+			t.Fatal("Feldman fallback accepted a mutated digit range")
+		}
+	})
+	t.Run("receiver set", func(t *testing.T) {
+		bad := apvssCloneCompactFallbackProofForTest(proof)
+		bad.link.lanes[0].receiverIndex = 3
+		if err := apvssVerifyFeldmanFallback(fixture.leaf, bad); err == nil {
+			t.Fatal("Feldman fallback survived a receiver-set mutation")
+		}
+	})
+}
+
+func TestAPVSSFeldmanBatchPrototypeCodecV1(t *testing.T) {
+	fixture := apvssFixture(t, 7, 2)
+	prototype, err := apvssBuildPrototypeWithFallbackProfile(
+		&fixture.context, fixture.leaf, fixture.receiverSecrets, fixture.signingSecrets,
+		&fixture.witness, []int{1, 2}, apvssFallbackFeldmanBatchProfile,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apvssRequireProductionFallbackBackend(prototype.fallbackProfile); err != nil {
+		t.Fatalf("Feldman fallback did not pass the production gate: %v", err)
+	}
+	if err := apvssVerifyPrototype(&fixture.context, prototype); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := apvssLeafPrototypeCanonicalBytes(prototype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := apvssDecodeLeafPrototype(wire, &fixture.context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.fallbackProfile != apvssFallbackFeldmanBatchProfile ||
+		apvssPrototypeFallbackCount(decoded) != 2 {
+		t.Fatal("decoded Feldman fallback profile or I set mismatch")
+	}
+}
+
+func BenchmarkAPVSSFeldmanBatchFallbackProveN7F2I2V1(b *testing.B) {
+	fixture := apvssFixture(b, 7, 2)
+	proof, err := apvssProveFeldmanFallback(fixture.leaf, &fixture.witness, []int{1, 2})
+	if err != nil {
+		b.Fatal(err)
+	}
+	wire, err := apvssFeldmanFallbackProofCanonicalBytes(fixture.leaf, proof)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := apvssProveFeldmanFallback(fixture.leaf, &fixture.witness, []int{1, 2}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(len(wire)), "proof_bytes")
+}
+
+func BenchmarkAPVSSFeldmanBatchFallbackVerifyN7F2I2V1(b *testing.B) {
+	fixture := apvssFixture(b, 7, 2)
+	proof, err := apvssProveFeldmanFallback(fixture.leaf, &fixture.witness, []int{1, 2})
+	if err != nil {
+		b.Fatal(err)
+	}
+	wire, err := apvssFeldmanFallbackProofCanonicalBytes(fixture.leaf, proof)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := apvssVerifyFeldmanFallback(fixture.leaf, proof); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(len(wire)), "proof_bytes")
+}
+
 func TestAPVSSCompactPrototypeRuntimeAndWireV1(t *testing.T) {
+	if testing.Short() {
+		t.Skip("experimental compact fallback prototype")
+	}
 	fixture := apvssFixture(t, 7, 2)
 	testCases := []struct {
 		name    string
@@ -78,6 +221,7 @@ func TestAPVSSCompactPrototypeRuntimeAndWireV1(t *testing.T) {
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
+				fixture.signingSecrets,
 				&fixture.witness,
 				testCase.indices,
 				apvssFallbackCompactBatchProfile,

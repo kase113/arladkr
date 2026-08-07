@@ -41,6 +41,7 @@ func BenchmarkAPVSSPrototypeBuildV1(b *testing.B) {
 			&fixture.context,
 			fixture.leaf,
 			fixture.receiverSecrets,
+			fixture.signingSecrets,
 			&fixture.witness,
 			fallback,
 		)
@@ -58,6 +59,7 @@ func BenchmarkAPVSSPrototypeBuildV1(b *testing.B) {
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
+				fixture.signingSecrets,
 				&fixture.witness,
 				fallback,
 			); err != nil {
@@ -75,6 +77,7 @@ func BenchmarkAPVSSPrototypeVerifyV1(b *testing.B) {
 			&fixture.context,
 			fixture.leaf,
 			fixture.receiverSecrets,
+			fixture.signingSecrets,
 			&fixture.witness,
 			fallback,
 		)

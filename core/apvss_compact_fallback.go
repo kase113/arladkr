@@ -15,6 +15,7 @@ const (
 	apvssCompactComparatorWeightDomain    = "ARL-APVSS/canonical-comparator/weight"
 	apvssCompactComparatorChallengeDomain = "ARL-APVSS/canonical-comparator/challenge"
 	apvssCompactFieldStatementDomain      = "ARL-APVSS/field-congruent/statement"
+	apvssFeldmanFallbackStatementDomain   = "ARL-APVSS/feldman-fallback/statement/v1"
 )
 
 type apvssCompactComparatorProof struct {
@@ -498,6 +499,215 @@ func apvssVerifyCompactFallback(leaf *cvLeaf, proof *apvssCompactFallbackProof) 
 	return apvssVerifyCompactComparatorWithStatement(
 		leaf, proof.link, proof.comparator, statement,
 	)
+}
+
+func apvssFeldmanFallbackStatement(
+	link *apvssCompactLinkProof,
+	setDigest []byte,
+) ([]byte, error) {
+	if link == nil || !apvssFeldmanLink(link) || len(setDigest) != 32 {
+		return nil, fmt.Errorf("invalid APVSS Feldman fallback statement")
+	}
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, []byte(apvssFeldmanFallbackStatementDomain)); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, setDigest); err != nil {
+		return nil, err
+	}
+	if err := cvWritePointVector(&wire, apvssCompactLinkCommitments(link)); err != nil {
+		return nil, err
+	}
+	return hashBytes([]byte(apvssFeldmanFallbackStatementDomain), wire.Bytes()), nil
+}
+
+func apvssProveFeldmanFallback(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
+	receiverIndices []int,
+) (*apvssCompactFallbackProof, error) {
+	if leaf == nil || leaf.context.proofProfile != cvLeafStructuralProofProfile {
+		return nil, fmt.Errorf("Feldman fallback requires a structural leaf")
+	}
+	var digitValues []uint64
+	var digitBlindings []fr.Element
+	link, err := apvssProveCompactLinkWithOpeningsForProfile(
+		leaf, witness, receiverIndices, &digitValues, &digitBlindings,
+		apvssFallbackFeldmanBatchProfile,
+	)
+	if err != nil {
+		return nil, err
+	}
+	setDigest, err := apvssFallbackSetStatementDigest(
+		leaf, receiverIndices, apvssFallbackFeldmanBatchProfile,
+	)
+	if err != nil {
+		return nil, err
+	}
+	statement, err := apvssFeldmanFallbackStatement(link, setDigest)
+	if err != nil {
+		return nil, err
+	}
+	proof := &apvssCompactFallbackProof{link: link}
+	proof.digitRange, err = apvssProveCompactRange(
+		apvssCompactSubproofStatement(statement, "digit-range-v1"),
+		apvssCompactLinkCommitments(link), digitValues, digitBlindings,
+		int(leaf.context.profile.chunkBits),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return proof, nil
+}
+
+func apvssVerifyFeldmanFallback(leaf *cvLeaf, proof *apvssCompactFallbackProof) error {
+	if leaf == nil || leaf.context.proofProfile != cvLeafStructuralProofProfile ||
+		proof == nil || proof.link == nil || !apvssFeldmanLink(proof.link) ||
+		proof.digitRange == nil || proof.comparator != nil {
+		return fmt.Errorf("invalid APVSS Feldman fallback proof")
+	}
+	indices := apvssCompactLinkReceiverIndices(proof.link)
+	setDigest, err := apvssFallbackSetStatementDigest(
+		leaf, indices, apvssFallbackFeldmanBatchProfile,
+	)
+	if err != nil {
+		return err
+	}
+	if err := apvssVerifyCompactLinkWithStatement(leaf, proof.link, setDigest); err != nil {
+		return err
+	}
+	statement, err := apvssFeldmanFallbackStatement(proof.link, setDigest)
+	if err != nil {
+		return err
+	}
+	if err := apvssVerifyCompactRange(
+		apvssCompactSubproofStatement(statement, "digit-range-v1"),
+		apvssCompactLinkCommitments(proof.link), proof.digitRange,
+		int(leaf.context.profile.chunkBits),
+	); err != nil {
+		return fmt.Errorf("invalid APVSS Feldman fallback digit range: %w", err)
+	}
+	return nil
+}
+
+func apvssFeldmanFallbackProofCanonicalBytes(
+	leaf *cvLeaf,
+	proof *apvssCompactFallbackProof,
+) ([]byte, error) {
+	if leaf == nil || leaf.context.proofProfile != cvLeafStructuralProofProfile ||
+		proof == nil || proof.link == nil || !apvssFeldmanLink(proof.link) ||
+		proof.digitRange == nil || proof.comparator != nil {
+		return nil, fmt.Errorf("invalid APVSS Feldman fallback proof")
+	}
+	linkWire, err := apvssCompactLinkProofCanonicalBytes(leaf, proof.link)
+	if err != nil {
+		return nil, err
+	}
+	rangeWire, err := apvssCompactRangeProofCanonicalBytes(proof.digitRange)
+	if err != nil {
+		return nil, err
+	}
+	var wire bytes.Buffer
+	if err := cvWriteBytes(&wire, linkWire); err != nil {
+		return nil, err
+	}
+	if err := cvWriteBytes(&wire, rangeWire); err != nil {
+		return nil, err
+	}
+	return wire.Bytes(), nil
+}
+
+func apvssDecodeFeldmanFallbackProofWithVerify(
+	wire []byte,
+	leaf *cvLeaf,
+	verify bool,
+) (*apvssCompactFallbackProof, error) {
+	if leaf == nil || leaf.context.proofProfile != cvLeafStructuralProofProfile ||
+		len(wire) == 0 || len(wire) > cvMaxLeafProofWireBytes {
+		return nil, fmt.Errorf("invalid APVSS Feldman fallback proof wire")
+	}
+	r := newCVWireReader(wire)
+	linkWire, err := r.bytes(cvMaxLeafProofWireBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decode APVSS Feldman fallback link: %w", err)
+	}
+	link, err := apvssDecodeCompactLinkProofForProfile(
+		linkWire, leaf, false, apvssFallbackFeldmanBatchProfile,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rangeWire, err := r.bytes(cvMaxLeafProofWireBytes)
+	if err != nil || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid APVSS Feldman fallback range or framing")
+	}
+	_, _, chunks, err := cvProfile(leaf.context.profile)
+	if err != nil {
+		return nil, err
+	}
+	digitRange, err := apvssDecodeCompactRangeProof(
+		rangeWire, len(link.lanes)*chunks, int(leaf.context.profile.chunkBits),
+	)
+	if err != nil {
+		return nil, err
+	}
+	proof := &apvssCompactFallbackProof{link: link, digitRange: digitRange}
+	canonical, err := apvssFeldmanFallbackProofCanonicalBytes(leaf, proof)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical APVSS Feldman fallback proof")
+	}
+	if verify {
+		if err := apvssVerifyFeldmanFallback(leaf, proof); err != nil {
+			return nil, err
+		}
+	}
+	return proof, nil
+}
+
+func apvssProveBatchFallback(
+	leaf *cvLeaf,
+	witness *apvssDealerWitness,
+	receiverIndices []int,
+	profile string,
+) (*apvssCompactFallbackProof, error) {
+	switch apvssNormalizeFallbackProfile(profile) {
+	case apvssFallbackCompactBatchProfile:
+		return apvssProveCompactFallback(leaf, witness, receiverIndices)
+	case apvssFallbackFeldmanBatchProfile:
+		return apvssProveFeldmanFallback(leaf, witness, receiverIndices)
+	default:
+		return nil, fmt.Errorf("unsupported APVSS batch fallback profile %q", profile)
+	}
+}
+
+func apvssVerifyBatchFallback(
+	leaf *cvLeaf,
+	proof *apvssCompactFallbackProof,
+	profile string,
+) error {
+	switch apvssNormalizeFallbackProfile(profile) {
+	case apvssFallbackCompactBatchProfile:
+		return apvssVerifyCompactFallback(leaf, proof)
+	case apvssFallbackFeldmanBatchProfile:
+		return apvssVerifyFeldmanFallback(leaf, proof)
+	default:
+		return fmt.Errorf("unsupported APVSS batch fallback profile %q", profile)
+	}
+}
+
+func apvssBatchFallbackProofCanonicalBytes(
+	leaf *cvLeaf,
+	proof *apvssCompactFallbackProof,
+	profile string,
+) ([]byte, error) {
+	switch apvssNormalizeFallbackProfile(profile) {
+	case apvssFallbackCompactBatchProfile:
+		return apvssCompactFallbackProofCanonicalBytes(leaf, proof)
+	case apvssFallbackFeldmanBatchProfile:
+		return apvssFeldmanFallbackProofCanonicalBytes(leaf, proof)
+	default:
+		return nil, fmt.Errorf("unsupported APVSS batch fallback profile %q", profile)
+	}
 }
 
 func apvssCompactFieldStatement(

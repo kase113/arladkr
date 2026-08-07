@@ -19,6 +19,7 @@ const (
 	cvTagComponentGet            = "CV_COMPONENT_GET"
 	cvTagComponentLeaf           = "CV_COMPONENT_LEAF"
 	cvTagComponentReady          = "CV_COMPONENT_READY"
+	cvTagEligibilityShare        = "CV_ELIGIBILITY_SHARE"
 	cvTagAggregateManifest       = "CV_AGG_MANIFEST"
 	cvTagARCShare                = "CV_ARC_SHARE"
 	cvTagARCCertificate          = "CV_ARC_CERTIFICATE"
@@ -39,6 +40,7 @@ func cvAllowedNetworkTag(tag string) bool {
 		cvTagComponentGet,
 		cvTagComponentLeaf,
 		cvTagComponentReady,
+		cvTagEligibilityShare,
 		cvTagAggregateManifest,
 		cvTagARCShare,
 		cvTagARCCertificate,

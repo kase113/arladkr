@@ -15,6 +15,7 @@ const (
 	APVSSFullProofExact          = "exact"
 	APVSSFullProofCompactBatch   = "compact-batch"
 	APVSSFullProofFieldCongruent = "field-congruent"
+	APVSSFallbackFeldmanBatch    = "feldman-batch-v1"
 )
 
 type Config struct {
@@ -59,7 +60,8 @@ type Config struct {
 	APVSSFullProofProfile string
 
 	// APVSSFallbackProfile selects the proof carried for receivers outside the
-	// ACK set. compact-batch additionally requires AllowExperimentalAPVSS.
+	// ACK set. feldman-batch-v1 is the production default; compact-batch
+	// additionally requires AllowExperimentalAPVSS.
 	APVSSFallbackProfile string
 	// AllowExperimentalAPVSS is an explicit benchmark-only admission switch for
 	// proof profiles that have not passed the production cryptographic gate.
@@ -119,11 +121,8 @@ func validateCVEpochConfig(cfg Config) error {
 	if strings.TrimSpace(c.ArtifactCacheDir) == "" {
 		return errors.New("CV epoch requires a local artifact store")
 	}
-	if c.APVSSMode == APVSSModeFullPublicVE && !c.AllowExperimentalAPVSS {
-		return errors.New("full-public-ve is a functional prototype pending the cryptographic backend gate; explicit experimental admission is required")
-	}
-	if c.APVSSMode == APVSSModeACKFallback && c.APVSSFallbackProfile == apvssFallbackCompactBatchProfile && !c.AllowExperimentalAPVSS {
-		return apvssRequireProductionFallbackBackend(c.APVSSFallbackProfile)
+	if err := validateAPVSSProductionAdmission(c); err != nil {
+		return err
 	}
 	if c.APVSSBenchmarkFallbackCount > 0 && !c.AllowExperimentalAPVSS {
 		return errors.New("forced APVSS fallback count requires explicit experimental admission")
@@ -137,6 +136,19 @@ func validateCVEpochConfig(cfg Config) error {
 	if c.APVSSMode == APVSSModeFullPublicVE &&
 		(c.APVSSBenchmarkWaitAllACKs || c.APVSSBenchmarkFallbackCount != 0) {
 		return errors.New("full-public-ve does not use ACK/fallback benchmark controls")
+	}
+	return nil
+}
+
+func validateAPVSSProductionAdmission(cfg Config) error {
+	c := NormalizeConfig(cfg)
+	if c.APVSSMode == APVSSModeFullPublicVE && !c.AllowExperimentalAPVSS {
+		return errors.New("full-public-ve is a functional prototype pending the cryptographic backend gate; explicit experimental admission is required")
+	}
+	if c.APVSSMode == APVSSModeACKFallback &&
+		c.APVSSFallbackProfile != apvssFallbackFeldmanBatchProfile &&
+		!c.AllowExperimentalAPVSS {
+		return apvssRequireProductionFallbackBackend(c.APVSSFallbackProfile)
 	}
 	return nil
 }
@@ -184,7 +196,7 @@ func NormalizeConfig(cfg Config) Config {
 	}
 	out.APVSSFullProofProfile = strings.ToLower(strings.TrimSpace(out.APVSSFullProofProfile))
 	if out.APVSSFallbackProfile == "" {
-		out.APVSSFallbackProfile = apvssFallbackExactLaneProfile
+		out.APVSSFallbackProfile = apvssFallbackFeldmanBatchProfile
 	}
 	out.APVSSFallbackProfile = strings.ToLower(strings.TrimSpace(out.APVSSFallbackProfile))
 	if out.ArtifactCacheDir == "" {

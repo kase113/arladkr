@@ -17,16 +17,17 @@ import (
 )
 
 const (
-	cvReceiverRegistryVersion        = 1
+	cvReceiverRegistryVersion        = 2
 	cvReceiverRegistryFilename       = "registry.json"
 	cvMaxReceiverRegistryBytes       = 1 << 20
 	cvReceiverIDRegistryDigestDomain = "ARL-CV-sAPVSS/receiver-id-registry"
 )
 
 type cvReceiverRegistryEntry struct {
-	ReceiverID    int    `json:"receiver_id"`
-	ReceiverIndex int    `json:"receiver_index"`
-	PublicKey     string `json:"public_key"`
+	ReceiverID       int    `json:"receiver_id"`
+	ReceiverIndex    int    `json:"receiver_index"`
+	PublicKey        string `json:"public_key"`
+	SigningPublicKey string `json:"signing_public_key"`
 }
 
 type cvReceiverRegistry struct {
@@ -36,11 +37,13 @@ type cvReceiverRegistry struct {
 }
 
 type cvReceiverKeyMaterial struct {
-	receiverOrder        []int
-	receiverIndex        map[int]int
-	receiverPublicKeys   []bls12381.G1Affine
-	localReceiverSecrets map[int]fr.Element
-	registryDigest       []byte
+	receiverOrder               []int
+	receiverIndex               map[int]int
+	receiverPublicKeys          []bls12381.G1Affine
+	receiverSigningPublicKeys   []bls12381.G1Affine
+	localReceiverSecrets        map[int]fr.Element
+	localReceiverSigningSecrets map[int]fr.Element
+	registryDigest              []byte
 }
 
 func GenerateCVReceiverKeyMaterial(publicDir, secretDir, sid string, receiverIDs []int) error {
@@ -49,6 +52,10 @@ func GenerateCVReceiverKeyMaterial(publicDir, secretDir, sid string, receiverIDs
 
 func cvReceiverSecretPath(dir string, receiverID int) string {
 	return filepath.Join(dir, fmt.Sprintf("receiver-%d.scalar", receiverID))
+}
+
+func cvReceiverSigningSecretPath(dir string, receiverID int) string {
+	return filepath.Join(dir, fmt.Sprintf("receiver-%d-signing.scalar", receiverID))
 }
 
 func cvGenerateReceiverKeyMaterial(publicDir, localSecretDir, sid string, receiverIDs []int) error {
@@ -71,10 +78,11 @@ func cvGenerateReceiverKeyMaterial(publicDir, localSecretDir, sid string, receiv
 		return fmt.Errorf("secure CV-sAPVSS secret key directory: %w", err)
 	}
 
-	paths := make([]string, 0, len(receiverIDs)+1)
+	paths := make([]string, 0, 2*len(receiverIDs)+1)
 	paths = append(paths, filepath.Join(publicDir, cvReceiverRegistryFilename))
 	for _, id := range receiverIDs {
 		paths = append(paths, cvReceiverSecretPath(localSecretDir, id))
+		paths = append(paths, cvReceiverSigningSecretPath(localSecretDir, id))
 	}
 	for _, path := range paths {
 		if _, err := os.Lstat(path); err == nil {
@@ -90,7 +98,8 @@ func cvGenerateReceiverKeyMaterial(publicDir, localSecretDir, sid string, receiv
 		Receivers: make([]cvReceiverRegistryEntry, len(receiverIDs)),
 	}
 	secretBytes := make([][]byte, len(receiverIDs))
-	seenKeys := make(map[[bls12381.SizeOfG1AffineCompressed]byte]struct{}, len(receiverIDs))
+	signingSecretBytes := make([][]byte, len(receiverIDs))
+	seenKeys := make(map[[bls12381.SizeOfG1AffineCompressed]byte]struct{}, 2*len(receiverIDs))
 	for i, id := range receiverIDs {
 		for {
 			secret, err := cvRandomReceiverSecret()
@@ -105,13 +114,32 @@ func cvGenerateReceiverKeyMaterial(publicDir, localSecretDir, sid string, receiv
 			if _, duplicate := seenKeys[encodedKey]; duplicate {
 				continue
 			}
+			signingSecret, err := cvRandomReceiverSecret()
+			if err != nil {
+				return err
+			}
+			if signingSecret.Equal(&secret) {
+				continue
+			}
+			signingPublicKey, err := cvReceiverPublicKey(signingSecret)
+			if err != nil {
+				return err
+			}
+			encodedSigningKey := signingPublicKey.Bytes()
+			if _, duplicate := seenKeys[encodedSigningKey]; duplicate {
+				continue
+			}
 			seenKeys[encodedKey] = struct{}{}
+			seenKeys[encodedSigningKey] = struct{}{}
 			encodedSecret := secret.Bytes()
 			secretBytes[i] = append([]byte(nil), encodedSecret[:]...)
+			encodedSigningSecret := signingSecret.Bytes()
+			signingSecretBytes[i] = append([]byte(nil), encodedSigningSecret[:]...)
 			registry.Receivers[i] = cvReceiverRegistryEntry{
-				ReceiverID:    id,
-				ReceiverIndex: i + 1,
-				PublicKey:     hex.EncodeToString(encodedKey[:]),
+				ReceiverID:       id,
+				ReceiverIndex:    i + 1,
+				PublicKey:        hex.EncodeToString(encodedKey[:]),
+				SigningPublicKey: hex.EncodeToString(encodedSigningKey[:]),
 			}
 			break
 		}
@@ -135,6 +163,12 @@ func cvGenerateReceiverKeyMaterial(publicDir, localSecretDir, sid string, receiv
 			return fmt.Errorf("write CV-sAPVSS receiver secret %d: %w", id, err)
 		}
 		created = append(created, path)
+		signingPath := cvReceiverSigningSecretPath(localSecretDir, id)
+		if err := cvWriteExclusiveKeyFile(signingPath, signingSecretBytes[i], 0o600); err != nil {
+			cleanup()
+			return fmt.Errorf("write CV-sAPVSS receiver signing secret %d: %w", id, err)
+		}
+		created = append(created, signingPath)
 	}
 	registryPath := filepath.Join(publicDir, cvReceiverRegistryFilename)
 	if err := cvWriteExclusiveKeyFile(registryPath, registryRaw, 0o644); err != nil {
@@ -188,12 +222,14 @@ func cvLoadReceiverKeyMaterial(
 	}
 
 	material := &cvReceiverKeyMaterial{
-		receiverOrder:        append([]int(nil), expectedReceiverIDs...),
-		receiverIndex:        make(map[int]int, len(expectedReceiverIDs)),
-		receiverPublicKeys:   make([]bls12381.G1Affine, len(expectedReceiverIDs)),
-		localReceiverSecrets: make(map[int]fr.Element, len(localReceiverIDs)),
+		receiverOrder:               append([]int(nil), expectedReceiverIDs...),
+		receiverIndex:               make(map[int]int, len(expectedReceiverIDs)),
+		receiverPublicKeys:          make([]bls12381.G1Affine, len(expectedReceiverIDs)),
+		receiverSigningPublicKeys:   make([]bls12381.G1Affine, len(expectedReceiverIDs)),
+		localReceiverSecrets:        make(map[int]fr.Element, len(localReceiverIDs)),
+		localReceiverSigningSecrets: make(map[int]fr.Element, len(localReceiverIDs)),
 	}
-	seenKeys := make(map[[bls12381.SizeOfG1AffineCompressed]byte]struct{}, len(expectedReceiverIDs))
+	seenKeys := make(map[[bls12381.SizeOfG1AffineCompressed]byte]struct{}, 2*len(expectedReceiverIDs))
 	for i, entry := range registry.Receivers {
 		if entry.ReceiverID != expectedReceiverIDs[i] || entry.ReceiverIndex != i+1 {
 			return nil, fmt.Errorf("CV-sAPVSS receiver registry order/index mismatch at position %d", i+1)
@@ -215,11 +251,28 @@ func cvLoadReceiverKeyMaterial(
 		seenKeys[encodedKey] = struct{}{}
 		material.receiverIndex[entry.ReceiverID] = entry.ReceiverIndex
 		material.receiverPublicKeys[i] = publicKey
+		signingEncoded, err := hex.DecodeString(entry.SigningPublicKey)
+		if err != nil || len(signingEncoded) != bls12381.SizeOfG1AffineCompressed ||
+			hex.EncodeToString(signingEncoded) != entry.SigningPublicKey {
+			return nil, fmt.Errorf("invalid CV-sAPVSS receiver signing public key encoding at index %d", i+1)
+		}
+		var signingPublicKey bls12381.G1Affine
+		consumed, err = signingPublicKey.SetBytes(signingEncoded)
+		if err != nil || consumed != len(signingEncoded) || !cvValidG1(&signingPublicKey, false) {
+			return nil, fmt.Errorf("invalid CV-sAPVSS receiver signing public key at index %d", i+1)
+		}
+		encodedSigningKey := signingPublicKey.Bytes()
+		if _, duplicate := seenKeys[encodedSigningKey]; duplicate {
+			return nil, fmt.Errorf("CV-sAPVSS receiver signing key reuses a registry key at index %d", i+1)
+		}
+		seenKeys[encodedSigningKey] = struct{}{}
+		material.receiverSigningPublicKeys[i] = signingPublicKey
 	}
 	material.registryDigest, err = cvIDBoundReceiverRegistryDigest(
 		sid,
 		material.receiverOrder,
 		material.receiverPublicKeys,
+		material.receiverSigningPublicKeys,
 	)
 	if err != nil {
 		return nil, err
@@ -246,6 +299,25 @@ func cvLoadReceiverKeyMaterial(
 			return nil, fmt.Errorf("local CV-sAPVSS receiver secret/public key mismatch for %d", id)
 		}
 		material.localReceiverSecrets[id] = secret
+		signingEncoded, err := cvReadReceiverSecret(cvReceiverSigningSecretPath(localSecretDir, id))
+		if err != nil {
+			return nil, fmt.Errorf("read local CV-sAPVSS receiver signing secret %d: %w", id, err)
+		}
+		if len(signingEncoded) != fr.Bytes {
+			return nil, fmt.Errorf("invalid local CV-sAPVSS receiver signing secret length for %d", id)
+		}
+		var signingSecret fr.Element
+		if err := signingSecret.SetBytesCanonical(signingEncoded); err != nil || signingSecret.IsZero() {
+			return nil, fmt.Errorf("invalid local CV-sAPVSS receiver signing secret for %d", id)
+		}
+		if signingSecret.Equal(&secret) {
+			return nil, fmt.Errorf("CV-sAPVSS receiver encryption and signing secrets must be independent for %d", id)
+		}
+		signingPublicKey, err := cvReceiverPublicKey(signingSecret)
+		if err != nil || !signingPublicKey.Equal(&material.receiverSigningPublicKeys[index-1]) {
+			return nil, fmt.Errorf("local CV-sAPVSS receiver signing secret/public key mismatch for %d", id)
+		}
+		material.localReceiverSigningSecrets[id] = signingSecret
 	}
 	return material, nil
 }
@@ -254,8 +326,9 @@ func cvIDBoundReceiverRegistryDigest(
 	sid string,
 	receiverIDs []int,
 	publicKeys []bls12381.G1Affine,
+	signingPublicKeys []bls12381.G1Affine,
 ) ([]byte, error) {
-	if sid == "" || len(receiverIDs) == 0 || len(receiverIDs) != len(publicKeys) {
+	if sid == "" || len(receiverIDs) == 0 || len(receiverIDs) != len(publicKeys) || len(publicKeys) != len(signingPublicKeys) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receiver registry digest input")
 	}
 	var wire bytes.Buffer
@@ -266,7 +339,7 @@ func cvIDBoundReceiverRegistryDigest(
 		return nil, err
 	}
 	for i, id := range receiverIDs {
-		if !cvValidG1(&publicKeys[i], false) {
+		if !cvValidG1(&publicKeys[i], false) || !cvValidG1(&signingPublicKeys[i], false) {
 			return nil, fmt.Errorf("invalid CV-sAPVSS receiver registry key at index %d", i+1)
 		}
 		var encodedID [8]byte
@@ -276,6 +349,7 @@ func cvIDBoundReceiverRegistryDigest(
 			return nil, err
 		}
 		cvWritePoint(&wire, &publicKeys[i])
+		cvWritePoint(&wire, &signingPublicKeys[i])
 	}
 	return hashBytes([]byte(cvReceiverIDRegistryDigestDomain), wire.Bytes()), nil
 }

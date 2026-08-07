@@ -7,11 +7,14 @@ import (
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
+	bnfr "github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr/poseidon2"
 )
 
 const (
 	apvssLaneStatementDomain  = "ARL-APVSS/lane-statement"
-	apvssACKChallengeDomain   = "ARL-APVSS/receiver-ack"
+	apvssACKChallengeDomain   = "ARL-APVSS/receiver-ack/v2"
+	apvssACKStatementDomain   = "ARL-APVSS/lane-statement-commitment/v2"
 	apvssFallbackDomain       = "ARL-APVSS/exact-lane-fallback"
 	apvssLeafDigestDomain     = "ARL-APVSS/leaf"
 	apvssLeafWireDomain       = "ARL-APVSS/leaf-wire"
@@ -22,6 +25,7 @@ const (
 
 	apvssFallbackExactLaneProfile    = "exact-lane"
 	apvssFallbackCompactBatchProfile = "compact-batch"
+	apvssFallbackFeldmanBatchProfile = APVSSFallbackFeldmanBatch
 	apvssFullCompactBatchProfile     = "full-compact-batch"
 	apvssFullFieldBatchProfile       = "full-field-congruent"
 	apvssFallbackProfileMarker       = 0x41505631
@@ -119,7 +123,7 @@ func apvssRequireFallbackBackend(profile string) error {
 	switch apvssNormalizeFallbackProfile(profile) {
 	case apvssFallbackExactLaneProfile:
 		return nil
-	case apvssFallbackCompactBatchProfile:
+	case apvssFallbackCompactBatchProfile, apvssFallbackFeldmanBatchProfile:
 		return nil
 	default:
 		return fmt.Errorf("unsupported APVSS fallback proof profile %q", profile)
@@ -140,7 +144,7 @@ func apvssPrototypeFallbackIndices(prototype *apvssLeafPrototype) ([]int, error)
 			indices[i] = prototype.fallbackProofs[i].receiverIndex
 		}
 		return indices, nil
-	case apvssFallbackCompactBatchProfile:
+	case apvssFallbackCompactBatchProfile, apvssFallbackFeldmanBatchProfile:
 		if len(prototype.fallbackProofs) != 0 {
 			return nil, fmt.Errorf("compact APVSS fallback carries exact proofs")
 		}
@@ -183,6 +187,8 @@ func apvssRequireProductionFallbackBackend(profile string) error {
 		return fmt.Errorf("APVSS exact-lane fallback lacks a public canonical <q comparator")
 	case apvssFallbackCompactBatchProfile:
 		return fmt.Errorf("APVSS compact batch fallback is experimental pending independent cryptographic review")
+	case apvssFallbackFeldmanBatchProfile:
+		return nil
 	default:
 		return fmt.Errorf("unsupported APVSS fallback proof profile %q", profile)
 	}
@@ -198,7 +204,7 @@ func apvssFallbackSetStatementDigest(
 ) ([]byte, error) {
 	normalizedProfile := apvssNormalizeFallbackProfile(profile)
 	switch normalizedProfile {
-	case apvssFallbackExactLaneProfile, apvssFallbackCompactBatchProfile:
+	case apvssFallbackExactLaneProfile, apvssFallbackCompactBatchProfile, apvssFallbackFeldmanBatchProfile:
 	default:
 		return nil, fmt.Errorf("unsupported APVSS fallback proof profile %q", profile)
 	}
@@ -249,12 +255,27 @@ func apvssFallbackSetStatementDigest(
 // the full-public statement. A full compact proof must cover every receiver
 // in canonical roster order; it cannot be replayed as an |I| fallback proof.
 func apvssCompactSetStatementDigest(leaf *cvLeaf, receiverIndices []int) ([]byte, error) {
+	return apvssCompactSetStatementDigestForProfile(leaf, receiverIndices, "")
+}
+
+func apvssCompactSetStatementDigestForProfile(
+	leaf *cvLeaf,
+	receiverIndices []int,
+	proofProfile string,
+) ([]byte, error) {
 	if leaf == nil {
 		return nil, fmt.Errorf("invalid APVSS compact statement")
 	}
 	if leaf.context.proofProfile == cvLeafStructuralProofProfile {
+		if proofProfile == "" {
+			proofProfile = apvssFallbackCompactBatchProfile
+		}
+		if proofProfile != apvssFallbackCompactBatchProfile &&
+			proofProfile != apvssFallbackFeldmanBatchProfile {
+			return nil, fmt.Errorf("invalid structural APVSS batch proof profile")
+		}
 		return apvssFallbackSetStatementDigest(
-			leaf, receiverIndices, apvssFallbackCompactBatchProfile,
+			leaf, receiverIndices, proofProfile,
 		)
 	}
 	if (leaf.context.proofProfile != cvLeafFullCompactProofProfile &&
@@ -265,6 +286,9 @@ func apvssCompactSetStatementDigest(leaf *cvLeaf, receiverIndices []int) ([]byte
 	profile := apvssFullCompactBatchProfile
 	if leaf.context.proofProfile == cvLeafFullFieldProofProfile {
 		profile = apvssFullFieldBatchProfile
+	}
+	if proofProfile != "" && proofProfile != profile {
+		return nil, fmt.Errorf("APVSS full proof profile mismatch")
 	}
 	contextDigest, chunks, err := apvssPrepareLaneStatement(leaf)
 	if err != nil {
@@ -333,10 +357,10 @@ func apvssLane(leaf *cvLeaf, receiverIndex int) (*cvLeafReceiver, error) {
 	return lane, nil
 }
 
-// apvssDecryptLaneStrict differs from cvDecryptShare in one security-critical
-// respect: it rejects a reconstructed integer outside [0,q), rather than
-// reducing it modulo q. ACKs must only be issued for canonical digit encodings.
-func apvssDecryptLaneStrict(
+// apvssDecryptLaneFieldCongruent decrypts individually bounded radix digits
+// and interprets their reconstruction in fr. This is the same validity
+// semantics proved by the production Feldman fallback backend.
+func apvssDecryptLaneFieldCongruent(
 	profile cvChunkProfile,
 	receiverSecret fr.Element,
 	share *cvEncryptedShare,
@@ -372,10 +396,7 @@ func apvssDecryptLaneStrict(
 		term.Lsh(term, uint(i)*profile.chunkBits)
 		integerScalar.Add(integerScalar, term)
 	}
-	if integerScalar.Cmp(fr.Modulus()) >= 0 {
-		return nil, fmt.Errorf("APVSS scalar digits are not a canonical field encoding")
-	}
-
+	integerScalar.Mod(integerScalar, fr.Modulus())
 	var scalar fr.Element
 	scalar.SetBigInt(integerScalar)
 	var blindingShared, blindingOpening, publicScalar bls12381.G1Affine
@@ -443,12 +464,16 @@ func apvssLaneStatementBytesPrepared(
 	if err != nil {
 		return nil, err
 	}
-	if err := cvValidateShare(lane.encryptedShare, chunks); err != nil {
+	if err := cvValidateShareForProfile(lane.encryptedShare, chunks, leaf.context.proofProfile); err != nil {
 		return nil, err
 	}
 	if !lane.receiverPublicKey.Equal(&leaf.context.receiverPublicKeys[receiverIndex-1]) ||
 		!lane.encryptedShare.receiverPublicKey.Equal(&lane.receiverPublicKey) {
 		return nil, fmt.Errorf("APVSS receiver key binding mismatch")
+	}
+	if len(leaf.context.receiverSigningPublicKeys) != len(leaf.context.receiverPublicKeys) ||
+		!cvValidG1(&leaf.context.receiverSigningPublicKeys[receiverIndex-1], true) {
+		return nil, fmt.Errorf("APVSS receiver signing key binding mismatch")
 	}
 	expectedCommitment := cvEvaluateCommitments(leaf.coefficientCommitments, receiverIndex)
 	if !lane.encryptedShare.commitment.Equal(&expectedCommitment) {
@@ -466,6 +491,7 @@ func apvssLaneStatementBytesPrepared(
 		return nil, err
 	}
 	cvWritePoint(&wire, &lane.receiverPublicKey)
+	cvWritePoint(&wire, &leaf.context.receiverSigningPublicKeys[receiverIndex-1])
 	if err := cvWriteUint32(&wire, len(leaf.coefficientCommitments)); err != nil {
 		return nil, err
 	}
@@ -480,7 +506,9 @@ func apvssLaneStatementBytesPrepared(
 	for i := range lane.encryptedShare.scalarChunks {
 		cvWriteCiphertext(&wire, &lane.encryptedShare.scalarChunks[i])
 	}
-	cvWriteCiphertext(&wire, &lane.encryptedShare.blinding)
+	if leaf.context.proofProfile != cvLeafStructuralProofProfile {
+		cvWriteCiphertext(&wire, &lane.encryptedShare.blinding)
+	}
 	return wire.Bytes(), nil
 }
 
@@ -508,14 +536,60 @@ func apvssLaneStatementDigestPrepared(
 }
 
 func apvssACKChallenge(
-	statementDigest []byte,
+	statementCommitment []byte,
 	nonce *bls12381.G1Affine,
 ) (fr.Element, error) {
-	if len(statementDigest) == 0 || !cvValidG1(nonce, false) {
+	if !cvValidBN254Commitment(statementCommitment) || !cvValidG1(nonce, false) {
 		return fr.Element{}, fmt.Errorf("invalid APVSS ACK challenge input")
 	}
-	nonceWire := nonce.Bytes()
-	return cvHashToFr(apvssACKChallengeDomain, statementDigest, nonceWire[:])
+	hasher := poseidon2.NewMerkleDamgardHasher()
+	writeElement := func(element *bnfr.Element) error {
+		encoded := element.Bytes()
+		if _, err := hasher.Write(encoded[:]); err != nil {
+			return fmt.Errorf("absorb APVSS ACK challenge: %w", err)
+		}
+		return nil
+	}
+	var domainElement, commitmentElement bnfr.Element
+	domainElement.SetBytes(hashBytes([]byte(apvssACKChallengeDomain)))
+	if err := commitmentElement.SetBytesCanonical(statementCommitment); err != nil {
+		return fr.Element{}, fmt.Errorf("invalid APVSS ACK statement commitment")
+	}
+	if err := writeElement(&domainElement); err != nil {
+		return fr.Element{}, err
+	}
+	if err := writeElement(&commitmentElement); err != nil {
+		return fr.Element{}, err
+	}
+	nonceX, nonceY := nonce.X.Bytes(), nonce.Y.Bytes()
+	for _, coordinate := range [][]byte{nonceX[:], nonceY[:]} {
+		for offset := 0; offset < len(coordinate); offset += cvSemanticCommitmentChunkBytes {
+			end := offset + cvSemanticCommitmentChunkBytes
+			if end > len(coordinate) {
+				end = len(coordinate)
+			}
+			var element bnfr.Element
+			element.SetBytes(coordinate[offset:end])
+			if err := writeElement(&element); err != nil {
+				return fr.Element{}, err
+			}
+		}
+	}
+	var challengeElement bnfr.Element
+	if err := challengeElement.SetBytesCanonical(hasher.Sum(nil)); err != nil {
+		return fr.Element{}, fmt.Errorf("invalid APVSS ACK challenge output")
+	}
+	var challenge fr.Element
+	challenge.SetBigInt(challengeElement.BigInt(new(big.Int)))
+	return challenge, nil
+}
+
+func apvssLaneStatementProofCommitment(leaf *cvLeaf, receiverIndex int) ([]byte, error) {
+	wire, err := apvssLaneStatementBytes(leaf, receiverIndex)
+	if err != nil {
+		return nil, err
+	}
+	return cvPoseidon2BytesCommitment(apvssACKStatementDomain, wire, cvMaxLeafWireBytes)
 }
 
 func apvssIssueLaneACK(
@@ -523,11 +597,12 @@ func apvssIssueLaneACK(
 	leaf *cvLeaf,
 	receiverIndex int,
 	receiverSecret fr.Element,
+	signingSecret fr.Element,
 ) (apvssLaneACK, error) {
 	if err := apvssValidateStructuralLeaf(context, leaf); err != nil {
 		return apvssLaneACK{}, err
 	}
-	return apvssIssueVerifiedLaneACK(context, leaf, receiverIndex, receiverSecret)
+	return apvssIssueVerifiedLaneACK(context, leaf, receiverIndex, receiverSecret, signingSecret)
 }
 
 func apvssIssueVerifiedLaneACK(
@@ -535,15 +610,35 @@ func apvssIssueVerifiedLaneACK(
 	leaf *cvLeaf,
 	receiverIndex int,
 	receiverSecret fr.Element,
+	signingSecret fr.Element,
 ) (apvssLaneACK, error) {
 	lane, err := apvssLane(leaf, receiverIndex)
 	if err != nil {
 		return apvssLaneACK{}, err
 	}
-	if _, err := apvssDecryptLaneStrict(context.profile, receiverSecret, lane.encryptedShare); err != nil {
+	decrypted, err := apvssDecryptLaneFieldCongruent(context.profile, receiverSecret, lane.encryptedShare)
+	if err != nil {
 		return apvssLaneACK{}, err
 	}
-	statementDigest, err := apvssLaneStatementDigest(leaf, receiverIndex)
+	if decrypted == nil || !cvVerifyRelation(lane.encryptedShare, decrypted) {
+		return apvssLaneACK{}, fmt.Errorf("APVSS lane Feldman/Pedersen relation failed")
+	}
+	if context.proofProfile == cvLeafStructuralProofProfile &&
+		(!decrypted.blindingOpening.IsInfinity() || !decrypted.publicScalar.Equal(&lane.encryptedShare.commitment)) {
+		return apvssLaneACK{}, fmt.Errorf("APVSS structural lane is not Feldman-bound")
+	}
+	if signingSecret.IsZero() {
+		return apvssLaneACK{}, fmt.Errorf("zero APVSS receiver signing secret")
+	}
+	signingPublicKey, err := cvReceiverPublicKey(signingSecret)
+	if err != nil {
+		return apvssLaneACK{}, err
+	}
+	if len(context.receiverSigningPublicKeys) != len(context.receiverPublicKeys) ||
+		!signingPublicKey.Equal(&context.receiverSigningPublicKeys[receiverIndex-1]) {
+		return apvssLaneACK{}, fmt.Errorf("APVSS receiver signing secret does not match registry")
+	}
+	statementCommitment, err := apvssLaneStatementProofCommitment(leaf, receiverIndex)
 	if err != nil {
 		return apvssLaneACK{}, err
 	}
@@ -556,12 +651,12 @@ func apvssIssueVerifiedLaneACK(
 	}
 	var noncePoint bls12381.G1Affine
 	noncePoint.ScalarMultiplication(&genG1, nonce.BigInt(new(big.Int)))
-	challenge, err := apvssACKChallenge(statementDigest, &noncePoint)
+	challenge, err := apvssACKChallenge(statementCommitment, &noncePoint)
 	if err != nil {
 		return apvssLaneACK{}, err
 	}
 	var response, term fr.Element
-	term.Mul(&challenge, &receiverSecret)
+	term.Mul(&challenge, &signingSecret)
 	response.Add(&nonce, &term)
 	return apvssLaneACK{
 		receiverIndex: receiverIndex,
@@ -576,21 +671,23 @@ func apvssVerifyLaneACK(leaf *cvLeaf, ack *apvssLaneACK) error {
 	if ack == nil || !cvValidG1(&ack.signature.r, false) {
 		return fmt.Errorf("invalid APVSS ACK")
 	}
-	lane, err := apvssLane(leaf, ack.receiverIndex)
+	if _, err := apvssLane(leaf, ack.receiverIndex); err != nil {
+		return err
+	}
+	statementCommitment, err := apvssLaneStatementProofCommitment(leaf, ack.receiverIndex)
 	if err != nil {
 		return err
 	}
-	statementDigest, err := apvssLaneStatementDigest(leaf, ack.receiverIndex)
+	challenge, err := apvssACKChallenge(statementCommitment, &ack.signature.r)
 	if err != nil {
 		return err
 	}
-	challenge, err := apvssACKChallenge(statementDigest, &ack.signature.r)
-	if err != nil {
-		return err
+	if len(leaf.context.receiverSigningPublicKeys) != len(leaf.context.receiverPublicKeys) {
+		return fmt.Errorf("missing APVSS receiver signing registry")
 	}
 	var lhs, publicTerm, rhs bls12381.G1Affine
 	lhs.ScalarMultiplication(&genG1, ack.signature.z.BigInt(new(big.Int)))
-	publicTerm.ScalarMultiplication(&lane.receiverPublicKey, challenge.BigInt(new(big.Int)))
+	publicTerm.ScalarMultiplication(&leaf.context.receiverSigningPublicKeys[ack.receiverIndex-1], challenge.BigInt(new(big.Int)))
 	rhs.Add(&ack.signature.r, &publicTerm)
 	if !lhs.Equal(&rhs) {
 		return fmt.Errorf("invalid APVSS receiver ACK signature")
@@ -611,13 +708,14 @@ func apvssFallbackLeaf(
 		return nil, nil, err
 	}
 	context := cvLeafContext{
-		sessionID:          hashBytes([]byte(apvssFallbackDomain), statementDigest),
-		epoch:              leaf.context.epoch,
-		sharingDegree:      0,
-		profile:            leaf.context.profile,
-		receiverPublicKeys: []bls12381.G1Affine{lane.receiverPublicKey},
-		dealerSetPolicy:    append([]byte(nil), statementDigest...),
-		proofProfile:       cvLeafGrothProofProfile,
+		sessionID:                 hashBytes([]byte(apvssFallbackDomain), statementDigest),
+		epoch:                     leaf.context.epoch,
+		sharingDegree:             0,
+		profile:                   leaf.context.profile,
+		receiverPublicKeys:        []bls12381.G1Affine{lane.receiverPublicKey},
+		receiverSigningPublicKeys: []bls12381.G1Affine{leaf.context.receiverSigningPublicKeys[receiverIndex-1]},
+		dealerSetPolicy:           append([]byte(nil), statementDigest...),
+		proofProfile:              cvLeafGrothProofProfile,
 	}
 	proxy := &cvLeaf{
 		context:                cvCloneLeafContext(context),
@@ -758,6 +856,7 @@ func apvssBuildPrototype(
 	context *cvLeafContext,
 	leaf *cvLeaf,
 	receiverSecrets []fr.Element,
+	receiverSigningSecrets []fr.Element,
 	witness *apvssDealerWitness,
 	fallbackIndices []int,
 ) (*apvssLeafPrototype, error) {
@@ -765,6 +864,7 @@ func apvssBuildPrototype(
 		context,
 		leaf,
 		receiverSecrets,
+		receiverSigningSecrets,
 		witness,
 		fallbackIndices,
 		apvssFallbackExactLaneProfile,
@@ -775,6 +875,7 @@ func apvssBuildPrototypeWithFallbackProfile(
 	context *cvLeafContext,
 	leaf *cvLeaf,
 	receiverSecrets []fr.Element,
+	receiverSigningSecrets []fr.Element,
 	witness *apvssDealerWitness,
 	fallbackIndices []int,
 	fallbackProfile string,
@@ -786,6 +887,7 @@ func apvssBuildPrototypeWithFallbackProfile(
 		return nil, err
 	}
 	if witness == nil || len(receiverSecrets) != len(leaf.receivers) ||
+		len(receiverSigningSecrets) != len(leaf.receivers) ||
 		len(witness.scalars) != len(leaf.receivers) ||
 		len(witness.blindings) != len(leaf.receivers) ||
 		len(witness.scalarCoins) != len(leaf.receivers) ||
@@ -825,14 +927,19 @@ func apvssBuildPrototypeWithFallbackProfile(
 			}
 			continue
 		}
-		ack, err := apvssIssueLaneACK(context, leaf, receiverIndex, receiverSecrets[receiverIndex-1])
+		ack, err := apvssIssueLaneACK(
+			context, leaf, receiverIndex,
+			receiverSecrets[receiverIndex-1], receiverSigningSecrets[receiverIndex-1],
+		)
 		if err != nil {
 			return nil, err
 		}
 		prototype.acks = append(prototype.acks, ack)
 	}
-	if prototype.fallbackProfile == apvssFallbackCompactBatchProfile && len(fallbackIndices) > 0 {
-		proof, err := apvssProveCompactFallback(leaf, witness, fallbackIndices)
+	if prototype.fallbackProfile != apvssFallbackExactLaneProfile && len(fallbackIndices) > 0 {
+		proof, err := apvssProveBatchFallback(
+			leaf, witness, fallbackIndices, prototype.fallbackProfile,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -931,8 +1038,10 @@ func apvssAssembleVerifiedPrototypeWithFallbackProfile(
 			prototype.fallbackIndices = append(prototype.fallbackIndices, receiverIndex)
 		}
 	}
-	if prototype.fallbackProfile == apvssFallbackCompactBatchProfile && len(prototype.fallbackIndices) > 0 {
-		proof, err := apvssProveCompactFallback(leaf, witness, prototype.fallbackIndices)
+	if prototype.fallbackProfile != apvssFallbackExactLaneProfile && len(prototype.fallbackIndices) > 0 {
+		proof, err := apvssProveBatchFallback(
+			leaf, witness, prototype.fallbackIndices, prototype.fallbackProfile,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -1015,9 +1124,11 @@ func apvssVerifyPrototypePartition(prototype *apvssLeafPrototype) error {
 	); err != nil {
 		return err
 	}
-	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) == apvssFallbackCompactBatchProfile &&
+	if apvssNormalizeFallbackProfile(prototype.fallbackProfile) != apvssFallbackExactLaneProfile &&
 		len(fallbackIndices) > 0 {
-		if err := apvssVerifyCompactFallback(prototype.leaf, prototype.compactFallback); err != nil {
+		if err := apvssVerifyBatchFallback(
+			prototype.leaf, prototype.compactFallback, prototype.fallbackProfile,
+		); err != nil {
 			return err
 		}
 	}
@@ -1046,7 +1157,9 @@ func apvssProofMaterialBytes(prototype *apvssLeafPrototype) (int, error) {
 		total += 4 + len(wire)
 	}
 	if prototype.compactFallback != nil {
-		wire, err := apvssCompactFallbackProofCanonicalBytes(prototype.leaf, prototype.compactFallback)
+		wire, err := apvssBatchFallbackProofCanonicalBytes(
+			prototype.leaf, prototype.compactFallback, prototype.fallbackProfile,
+		)
 		if err != nil {
 			return 0, err
 		}

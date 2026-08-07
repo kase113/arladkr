@@ -90,13 +90,40 @@ func TestValidateCVEpochConfigRequiresDeployableProfile(t *testing.T) {
 	}
 }
 
-func TestNormalizeConfigDefaultsToExactLaneFallback(t *testing.T) {
+func TestNormalizeConfigDefaultsToFeldmanBatchFallback(t *testing.T) {
 	cfg := NormalizeConfig(Config{FOld: 1, FNew: 1})
 	if cfg.APVSSMode != APVSSModeACKFallback ||
 		cfg.APVSSFullProofProfile != APVSSFullProofExact ||
-		cfg.APVSSFallbackProfile != apvssFallbackExactLaneProfile || cfg.AllowExperimentalAPVSS {
+		cfg.APVSSFallbackProfile != apvssFallbackFeldmanBatchProfile || cfg.AllowExperimentalAPVSS {
 		t.Fatalf("default APVSS mode/full/fallback = %q/%q/%q experimental=%t",
 			cfg.APVSSMode, cfg.APVSSFullProofProfile, cfg.APVSSFallbackProfile, cfg.AllowExperimentalAPVSS)
+	}
+}
+
+func TestACKFallbackProductionAdmissionV1(t *testing.T) {
+	base := Config{APVSSMode: APVSSModeACKFallback}
+
+	production := base
+	production.APVSSFallbackProfile = apvssFallbackFeldmanBatchProfile
+	production.AllowExperimentalAPVSS = false
+	if err := validateAPVSSProductionAdmission(production); err != nil {
+		t.Fatalf("production Feldman fallback was rejected: %v", err)
+	}
+
+	for _, profile := range []string{
+		apvssFallbackExactLaneProfile,
+		apvssFallbackCompactBatchProfile,
+	} {
+		experimental := base
+		experimental.APVSSFallbackProfile = profile
+		experimental.AllowExperimentalAPVSS = false
+		if err := validateAPVSSProductionAdmission(experimental); err == nil {
+			t.Fatalf("fallback profile %q bypassed experimental admission", profile)
+		}
+		experimental.AllowExperimentalAPVSS = true
+		if err := validateAPVSSProductionAdmission(experimental); err != nil {
+			t.Fatalf("explicitly admitted fallback profile %q was rejected: %v", profile, err)
+		}
 	}
 }
 
@@ -268,6 +295,9 @@ func TestCVBuildEpochContextAndRandomDealerLeaf(t *testing.T) {
 }
 
 func TestCVBuildEpochFullPublicVEPrototype(t *testing.T) {
+	if testing.Short() {
+		t.Skip("experimental full-public VE prototype")
+	}
 	cfg, _, _, _ := cvM4Fixture(t)
 	cfg.APVSSMode = APVSSModeFullPublicVE
 	dirs := generateCVReceiverKeysForTest(t, cfg.SID, cfg.NewCommittee)
@@ -277,6 +307,10 @@ func TestCVBuildEpochFullPublicVEPrototype(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := cvBuildEpochLeafContext(cfg, material); err == nil || !strings.Contains(err.Error(), "backend gate") {
+		t.Fatalf("direct full-public context construction bypassed experimental admission: %v", err)
+	}
+	cfg.AllowExperimentalAPVSS = true
 	leafContext, err := cvBuildEpochLeafContext(cfg, material)
 	if err != nil {
 		t.Fatal(err)
@@ -314,6 +348,9 @@ func TestCVBuildEpochFullPublicVEPrototype(t *testing.T) {
 }
 
 func TestCVBuildEpochFullCompactPublicVEPrototype(t *testing.T) {
+	if testing.Short() {
+		t.Skip("experimental compact full-public VE prototype")
+	}
 	cfg, _, _, _ := cvM4Fixture(t)
 	cfg.APVSSMode = APVSSModeFullPublicVE
 	cfg.APVSSFullProofProfile = APVSSFullProofCompactBatch
@@ -439,12 +476,13 @@ func TestCVFullExactAndCompactPreserveScalarOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseContext := cvLeafContext{
-		sessionID:          []byte("full-backend-output-equivalence"),
-		epoch:              1,
-		sharingDegree:      0,
-		profile:            cvChunkProfile{chunkBits: 8, maxComponents: 1},
-		receiverPublicKeys: []bls12381.G1Affine{key},
-		dealerSetPolicy:    []byte("first-f-plus-one"),
+		sessionID:                 []byte("full-backend-output-equivalence"),
+		epoch:                     1,
+		sharingDegree:             0,
+		profile:                   cvChunkProfile{chunkBits: 8, maxComponents: 1},
+		receiverPublicKeys:        []bls12381.G1Affine{key},
+		receiverSigningPublicKeys: cvTestSigningKeys(t, 1, 24001),
+		dealerSetPolicy:           []byte("first-f-plus-one"),
 	}
 	chunks, err := cvChunkCount(baseContext.profile)
 	if err != nil {
@@ -515,9 +553,13 @@ func TestACKFallbackDealerUsesIndependentReceiverCoins(t *testing.T) {
 	if len(witness.scalarCoins) < 2 || len(witness.scalarCoins[0]) == 0 {
 		t.Fatal("missing per-receiver encryption coins")
 	}
-	if witness.scalarCoins[0][0].Equal(&witness.scalarCoins[1][0]) ||
-		witness.blindingCoins[0].Equal(&witness.blindingCoins[1]) {
-		t.Fatal("ACK/fallback dealer reused receiver encryption randomness")
+	if witness.scalarCoins[0][0].Equal(&witness.scalarCoins[1][0]) {
+		t.Fatal("ACK/fallback dealer reused receiver scalar encryption randomness")
+	}
+	for i := range witness.blindingCoins {
+		if !witness.blindingCoins[i].IsZero() {
+			t.Fatalf("ACK/fallback receiver %d retained auxiliary blinding randomness", i+1)
+		}
 	}
 }
 
@@ -539,8 +581,9 @@ func TestCVBuildEpochContextUsesNewCommitteeFaultThreshold(t *testing.T) {
 		FNew:         2,
 	})
 	leafContext, err := cvBuildEpochLeafContext(cfg, &cvReceiverKeyMaterial{
-		receiverPublicKeys: receiverKeys,
-		registryDigest:     make([]byte, 32),
+		receiverPublicKeys:        receiverKeys,
+		receiverSigningPublicKeys: cvTestSigningKeys(t, len(receiverKeys), 30001),
+		registryDigest:            make([]byte, 32),
 	})
 	if err != nil {
 		t.Fatal(err)

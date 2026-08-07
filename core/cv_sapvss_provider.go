@@ -83,6 +83,7 @@ func cvAcceptedDecodedAPVSSLeaf(
 type cvMultiDLEQProof struct {
 	tKey, tScalar, tBlinding bls12381.G1Affine
 	z                        fr.Element
+	feldman                  bool
 }
 
 type cvReceipt struct {
@@ -406,6 +407,10 @@ func cvValidateAggregate(agg *cvAggregateTranscript) error {
 			!cvValidCiphertext(&receiver.blinding) {
 			return fmt.Errorf("invalid aggregate receiver %d", i+1)
 		}
+		if agg.context.proofProfile == cvLeafStructuralProofProfile &&
+			!cvIdentityCiphertext(&receiver.blinding) {
+			return fmt.Errorf("structural aggregate receiver %d carries a non-identity blinding ciphertext", i+1)
+		}
 		for j := range receiver.scalarChunks {
 			if !cvValidCiphertext(&receiver.scalarChunks[j]) {
 				return fmt.Errorf("invalid aggregate scalar chunk %d", j)
@@ -460,7 +465,9 @@ func cvAggregateCanonicalBytes(agg *cvAggregateTranscript) ([]byte, error) {
 		for j := range receiver.scalarChunks {
 			cvWriteCiphertext(&wire, &receiver.scalarChunks[j])
 		}
-		cvWriteCiphertext(&wire, &receiver.blinding)
+		if agg.context.proofProfile != cvLeafStructuralProofProfile {
+			cvWriteCiphertext(&wire, &receiver.blinding)
+		}
 	}
 	return wire.Bytes(), nil
 }
@@ -495,6 +502,9 @@ func cvDLEQTargets(agg *cvAggregateTranscript, receiverIndex int, publicScalar, 
 	receiver := &agg.receivers[receiverIndex-1]
 	var scalarTarget, blindingTarget bls12381.G1Affine
 	scalarTarget.Sub(&scalarCipher.c, publicScalar)
+	if blindingOpening == nil {
+		return scalarCipher.r, scalarTarget, bls12381.G1Affine{}, bls12381.G1Affine{}, nil
+	}
 	blindingTarget.Sub(&receiver.blinding.c, blindingOpening)
 	return scalarCipher.r, scalarTarget, receiver.blinding.r, blindingTarget, nil
 }
@@ -518,11 +528,14 @@ func cvDLEQChallengeWithTargets(
 	scalarBase, scalarTarget, blindingBase, blindingTarget *bls12381.G1Affine,
 ) (fr.Element, error) {
 	var points bytes.Buffer
-	for _, point := range []*bls12381.G1Affine{
+	pointsToHash := []*bls12381.G1Affine{
 		&agg.receivers[receiverIndex-1].receiverPublicKey,
-		scalarBase, scalarTarget, blindingBase, blindingTarget,
-		publicScalar, blindingOpening, &proof.tKey, &proof.tScalar, &proof.tBlinding,
-	} {
+		scalarBase, scalarTarget, publicScalar, &proof.tKey, &proof.tScalar,
+	}
+	if !proof.feldman {
+		pointsToHash = append(pointsToHash, blindingBase, blindingTarget, blindingOpening, &proof.tBlinding)
+	}
+	for _, point := range pointsToHash {
 		cvWritePoint(&points, point)
 	}
 	var indexWire bytes.Buffer
@@ -535,17 +548,24 @@ func cvProveDLEQ(agg *cvAggregateTranscript, receiverIndex int, receiverSecret f
 	if _, err := nonce.SetRandom(); err != nil {
 		return nil, fmt.Errorf("sample CV-sAPVSS receipt nonce: %w", err)
 	}
-	proof := &cvMultiDLEQProof{tKey: cvPointTimes(&genG1, &nonce)}
+	proof := &cvMultiDLEQProof{
+		tKey:    cvPointTimes(&genG1, &nonce),
+		feldman: agg.context.proofProfile == cvLeafStructuralProofProfile,
+	}
 	scalarCipher, err := cvAggregateScalarCiphertext(agg, receiverIndex)
 	if err != nil {
 		return nil, err
 	}
 	proof.tScalar = cvPointTimes(&scalarCipher.r, &nonce)
 	receiver := &agg.receivers[receiverIndex-1]
-	proof.tBlinding = cvPointTimes(&receiver.blinding.r, &nonce)
+	if !proof.feldman {
+		proof.tBlinding = cvPointTimes(&receiver.blinding.r, &nonce)
+	}
 	var scalarTarget, blindingTarget bls12381.G1Affine
 	scalarTarget.Sub(&scalarCipher.c, publicScalar)
-	blindingTarget.Sub(&receiver.blinding.c, blindingOpening)
+	if !proof.feldman {
+		blindingTarget.Sub(&receiver.blinding.c, blindingOpening)
+	}
 	challenge, err := cvDLEQChallengeWithTargets(
 		agg, receiverIndex, publicScalar, blindingOpening, proof,
 		&scalarCipher.r, &scalarTarget, &receiver.blinding.r, &blindingTarget,
@@ -603,8 +623,10 @@ func cvDecShareMode(agg *cvAggregateTranscript, receiverSecret fr.Element, recei
 		aggregateDigest: append([]byte(nil), agg.digest...),
 		receiverIndex:   receiverIndex,
 		publicScalar:    decrypted.publicScalar,
-		blindingOpening: decrypted.blindingOpening,
 		proof:           *proof,
+	}
+	if !proof.feldman {
+		receipt.blindingOpening = decrypted.blindingOpening
 	}
 	wire, err := cvReceiptCanonicalBytes(receipt)
 	if err != nil {
@@ -617,9 +639,9 @@ func cvDecShareMode(agg *cvAggregateTranscript, receiverSecret fr.Element, recei
 
 func cvReceiptCanonicalBytes(receipt *cvReceipt) ([]byte, error) {
 	if receipt == nil || len(receipt.aggregateDigest) != 32 || receipt.receiverIndex <= 0 ||
-		!cvValidG1(&receipt.publicScalar, true) || !cvValidG1(&receipt.blindingOpening, true) ||
+		!cvValidG1(&receipt.publicScalar, true) ||
 		!cvValidG1(&receipt.proof.tKey, true) || !cvValidG1(&receipt.proof.tScalar, true) ||
-		!cvValidG1(&receipt.proof.tBlinding, true) {
+		(!receipt.proof.feldman && (!cvValidG1(&receipt.blindingOpening, true) || !cvValidG1(&receipt.proof.tBlinding, true))) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS receipt")
 	}
 	var wire bytes.Buffer
@@ -632,10 +654,18 @@ func cvReceiptCanonicalBytes(receipt *cvReceipt) ([]byte, error) {
 	if err := cvWriteUint32(&wire, receipt.receiverIndex); err != nil {
 		return nil, err
 	}
-	for _, point := range []*bls12381.G1Affine{
-		&receipt.publicScalar, &receipt.blindingOpening,
-		&receipt.proof.tKey, &receipt.proof.tScalar, &receipt.proof.tBlinding,
-	} {
+	mode := byte(0)
+	if receipt.proof.feldman {
+		mode = 1
+	}
+	if err := cvWriteUint32(&wire, int(mode)); err != nil {
+		return nil, err
+	}
+	points := []*bls12381.G1Affine{&receipt.publicScalar, &receipt.proof.tKey, &receipt.proof.tScalar}
+	if !receipt.proof.feldman {
+		points = []*bls12381.G1Affine{&receipt.publicScalar, &receipt.blindingOpening, &receipt.proof.tKey, &receipt.proof.tScalar, &receipt.proof.tBlinding}
+	}
+	for _, point := range points {
 		cvWritePoint(&wire, point)
 	}
 	cvWriteScalar(&wire, &receipt.proof.z)
@@ -676,6 +706,10 @@ func cvVerifyShareMode(context *cvLeafContext, agg *cvAggregateTranscript, recei
 	if receipt == nil || receipt.receiverIndex != receiverIndex || !bytes.Equal(receipt.aggregateDigest, agg.digest) {
 		return fmt.Errorf("CV-sAPVSS receipt binding mismatch")
 	}
+	wantFeldman := agg.context.proofProfile == cvLeafStructuralProofProfile
+	if receipt.proof.feldman != wantFeldman {
+		return fmt.Errorf("CV-sAPVSS receipt mode does not match aggregate profile")
+	}
 	receiptWire, err := cvReceiptCanonicalBytes(receipt)
 	if err != nil {
 		return err
@@ -684,7 +718,11 @@ func cvVerifyShareMode(context *cvLeafContext, agg *cvAggregateTranscript, recei
 		return fmt.Errorf("CV-sAPVSS receipt digest mismatch")
 	}
 	key := &agg.receivers[receiverIndex-1].receiverPublicKey
-	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargets(agg, receiverIndex, &receipt.publicScalar, &receipt.blindingOpening)
+	var blindingOpening *bls12381.G1Affine
+	if !receipt.proof.feldman {
+		blindingOpening = &receipt.blindingOpening
+	}
+	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargets(agg, receiverIndex, &receipt.publicScalar, blindingOpening)
 	if err != nil {
 		return err
 	}
@@ -705,10 +743,18 @@ func cvVerifyShareMode(context *cvLeafContext, agg *cvAggregateTranscript, recei
 	if !left.Equal(&right) {
 		return fmt.Errorf("CV-sAPVSS receipt scalar DLEQ failed")
 	}
-	left = cvPointTimes(&blindingBase, &receipt.proof.z)
-	right = cvPointSum(&receipt.proof.tBlinding, pointPtr(cvPointTimes(&blindingTarget, &challenge)))
-	if !left.Equal(&right) {
-		return fmt.Errorf("CV-sAPVSS receipt blinding DLEQ failed")
+	if !receipt.proof.feldman {
+		left = cvPointTimes(&blindingBase, &receipt.proof.z)
+		right = cvPointSum(&receipt.proof.tBlinding, pointPtr(cvPointTimes(&blindingTarget, &challenge)))
+		if !left.Equal(&right) {
+			return fmt.Errorf("CV-sAPVSS receipt blinding DLEQ failed")
+		}
+	} else {
+		evaluation := cvEvaluateCommitments(agg.coefficientCommitments, receiverIndex)
+		if !receipt.publicScalar.Equal(&evaluation) {
+			return fmt.Errorf("CV-sAPVSS Feldman receipt evaluation mismatch")
+		}
+		return nil
 	}
 	evaluation := cvEvaluateCommitments(agg.coefficientCommitments, receiverIndex)
 	var publicCommitment bls12381.G1Affine

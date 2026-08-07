@@ -196,9 +196,12 @@ func cvLeafWireSize(context *cvLeafContext) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	ciphertexts, err := cvCheckedAdd(chunks, 1, "Leaf receiver ciphertexts")
-	if err != nil {
-		return 0, err
+	ciphertexts := chunks
+	if context.proofProfile != cvLeafStructuralProofProfile {
+		ciphertexts, err = cvCheckedAdd(ciphertexts, 1, "Leaf receiver ciphertexts")
+		if err != nil {
+			return 0, err
+		}
 	}
 	ciphertextBytes, err := cvCheckedProduct(ciphertexts, 2*bls12381.SizeOfG1AffineCompressed, "Leaf receiver ciphertexts")
 	if err != nil {
@@ -540,7 +543,11 @@ func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) 
 	if err != nil {
 		return nil, err
 	}
-	ciphertextBytes, err := cvCheckedProduct(chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "Leaf receiver ciphertexts")
+	ciphertextCount := chunks
+	if expectedContext.proofProfile != cvLeafStructuralProofProfile {
+		ciphertextCount++
+	}
+	ciphertextBytes, err := cvCheckedProduct(ciphertextCount, 2*bls12381.SizeOfG1AffineCompressed, "Leaf receiver ciphertexts")
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +578,7 @@ func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) 
 		if err := cvReadExactCount(r, chunks, "Leaf scalar chunks"); err != nil {
 			return nil, err
 		}
-		if err := cvRequireRemaining(r, chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "Leaf ciphertexts"); err != nil {
+		if err := cvRequireRemaining(r, ciphertextCount, 2*bls12381.SizeOfG1AffineCompressed, "Leaf ciphertexts"); err != nil {
 			return nil, err
 		}
 		share.scalarChunks = make([]cvElGamalCiphertext, chunks)
@@ -581,9 +588,11 @@ func cvDecodeLeaf(wire []byte, expectedContext *cvLeafContext) (*cvLeaf, error) 
 				return nil, fmt.Errorf("decode CV-sAPVSS Leaf ciphertext %d/%d: %w", i+1, j, err)
 			}
 		}
-		share.blinding, err = r.ciphertext()
-		if err != nil {
-			return nil, fmt.Errorf("decode CV-sAPVSS Leaf blinding ciphertext %d: %w", i+1, err)
+		if expectedContext.proofProfile != cvLeafStructuralProofProfile {
+			share.blinding, err = r.ciphertext()
+			if err != nil {
+				return nil, fmt.Errorf("decode CV-sAPVSS Leaf blinding ciphertext %d: %w", i+1, err)
+			}
 		}
 		receiver.encryptedShare = share
 	}
@@ -708,13 +717,22 @@ func cvDecodeReceiptMode(
 	if err != nil {
 		return nil, fmt.Errorf("decode CV-sAPVSS receipt receiver index: %w", err)
 	}
-	for i, point := range []*bls12381.G1Affine{
-		&receipt.publicScalar,
-		&receipt.blindingOpening,
-		&receipt.proof.tKey,
-		&receipt.proof.tScalar,
-		&receipt.proof.tBlinding,
-	} {
+	modeValue, err := r.uint32()
+	if err != nil || (modeValue != 0 && modeValue != 1) {
+		return nil, fmt.Errorf("invalid CV-sAPVSS receipt mode")
+	}
+	receipt.proof.feldman = modeValue == 1
+	points := []*bls12381.G1Affine{&receipt.publicScalar, &receipt.proof.tKey, &receipt.proof.tScalar}
+	if !receipt.proof.feldman {
+		points = []*bls12381.G1Affine{
+			&receipt.publicScalar,
+			&receipt.blindingOpening,
+			&receipt.proof.tKey,
+			&receipt.proof.tScalar,
+			&receipt.proof.tBlinding,
+		}
+	}
+	for i, point := range points {
 		decoded, pointErr := r.point()
 		if pointErr != nil {
 			return nil, fmt.Errorf("decode CV-sAPVSS receipt point %d: %w", i, pointErr)

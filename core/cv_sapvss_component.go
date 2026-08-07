@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+
+	bnfr "github.com/consensys/gnark-crypto/ecc/bn254/fr"
 )
 
 const (
-	cvComponentDescriptorDomain    = "ARL-CV-sAPVSS/component-descriptor-certificate"
-	cvComponentStatementDomain     = "ARL-CV-sAPVSS/component-statement"
+	cvComponentDescriptorDomain    = "ARL-CV-sAPVSS/component-descriptor-certificate/v2"
+	cvComponentStatementDomain     = "ARL-CV-sAPVSS/component-statement/v2"
 	cvComponentPayloadDomain       = "ARL-CV-sAPVSS/component-payload"
 	cvComponentShardDomain         = "ARL-CV-sAPVSS/component-shard"
 	cvComponentShardNodeDomain     = "ARL-CV-sAPVSS/component-shard-node"
@@ -23,12 +25,13 @@ const (
 // for 128 bits of independent GF(256) linear checks. Their encoded size grows
 // linearly with dataShards.
 type cvComponentDispersal struct {
-	nonce            []byte
-	dataShards       int
-	shardBytes       int
-	payloadDigest    []byte
-	root             []byte
-	dataFingerprints [][]byte
+	nonce              []byte
+	dataShards         int
+	shardBytes         int
+	payloadDigest      []byte
+	semanticCommitment []byte
+	root               []byte
+	dataFingerprints   [][]byte
 }
 
 type cvComponentShard struct {
@@ -145,6 +148,14 @@ func cvComponentLeafPayloadDigest(wire []byte) []byte {
 }
 
 func cvComponentStatementDigest(dealer int, leafDigest []byte, dispersal *cvComponentDispersal) ([]byte, error) {
+	wire, err := cvComponentStatementCanonicalBytes(dealer, leafDigest, dispersal)
+	if err != nil {
+		return nil, err
+	}
+	return hashBytes([]byte(cvComponentStatementDomain), wire), nil
+}
+
+func cvComponentStatementCanonicalBytes(dealer int, leafDigest []byte, dispersal *cvComponentDispersal) ([]byte, error) {
 	if dealer < 0 || len(leafDigest) != 32 || !cvValidComponentDispersal(dispersal) {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component statement")
 	}
@@ -159,13 +170,14 @@ func cvComponentStatementDigest(dealer int, leafDigest []byte, dispersal *cvComp
 	if err := cvWriteComponentDispersal(&wire, dispersal); err != nil {
 		return nil, err
 	}
-	return hashBytes([]byte(cvComponentStatementDomain), wire.Bytes()), nil
+	return wire.Bytes(), nil
 }
 
 func cvValidComponentDispersal(dispersal *cvComponentDispersal) bool {
 	if dispersal == nil || len(dispersal.nonce) != 32 || dispersal.dataShards <= 0 ||
 		dispersal.shardBytes <= 0 || dispersal.shardBytes > cvMaxLeafWireBytes+8 ||
-		len(dispersal.payloadDigest) != 32 || len(dispersal.root) != 32 ||
+		len(dispersal.payloadDigest) != 32 || !cvValidLeafSemanticCommitment(dispersal.semanticCommitment) ||
+		len(dispersal.root) != 32 ||
 		len(dispersal.dataFingerprints) != dispersal.dataShards {
 		return false
 	}
@@ -197,6 +209,9 @@ func cvWriteComponentDispersal(wire *bytes.Buffer, dispersal *cvComponentDispers
 	if err := cvWriteBytes(wire, dispersal.payloadDigest); err != nil {
 		return err
 	}
+	if err := cvWriteBytes(wire, dispersal.semanticCommitment); err != nil {
+		return err
+	}
 	if err := cvWriteBytes(wire, dispersal.root); err != nil {
 		return err
 	}
@@ -225,6 +240,10 @@ func cvReadComponentDispersal(r *cvWireReader) (*cvComponentDispersal, error) {
 	if err != nil || len(payloadDigest) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component payload digest")
 	}
+	semanticCommitment, err := r.bytes(bnfr.Bytes)
+	if err != nil || !cvValidLeafSemanticCommitment(semanticCommitment) {
+		return nil, fmt.Errorf("invalid CV-sAPVSS component semantic commitment")
+	}
 	root, err := r.bytes(32)
 	if err != nil || len(root) != 32 {
 		return nil, fmt.Errorf("invalid CV-sAPVSS component shard root")
@@ -238,7 +257,8 @@ func cvReadComponentDispersal(r *cvWireReader) (*cvComponentDispersal, error) {
 	}
 	return &cvComponentDispersal{
 		nonce: nonce, dataShards: dataShards, shardBytes: shardBytes,
-		payloadDigest: payloadDigest, root: root, dataFingerprints: dataFingerprints,
+		payloadDigest: payloadDigest, semanticCommitment: semanticCommitment,
+		root: root, dataFingerprints: dataFingerprints,
 	}, nil
 }
 
@@ -263,6 +283,10 @@ func cvDisperseComponent(leafWire []byte, totalShards, dataShards int) (*cvCompo
 		nonce: nonce, dataShards: dataShards, shardBytes: len(shards[0]),
 		payloadDigest: hashBytes([]byte(cvComponentPayloadDomain), leafWire), root: root,
 		dataFingerprints: dataFingerprints,
+	}
+	dispersal.semanticCommitment, err = cvLeafSemanticCommitment(leafWire)
+	if err != nil {
+		return nil, nil, err
 	}
 	encoded := make([]cvComponentShard, len(shards))
 	for i := range shards {
@@ -316,6 +340,10 @@ func cvRecoverComponentWire(dispersal *cvComponentDispersal, totalShards int, av
 	leafWire := append([]byte(nil), packed[8:8+int(length)]...)
 	if !bytes.Equal(hashBytes([]byte(cvComponentPayloadDomain), leafWire), dispersal.payloadDigest) {
 		return nil, fmt.Errorf("recovered CV-sAPVSS component payload digest mismatch")
+	}
+	semanticCommitment, err := cvLeafSemanticCommitment(leafWire)
+	if err != nil || !bytes.Equal(semanticCommitment, dispersal.semanticCommitment) {
+		return nil, fmt.Errorf("recovered CV-sAPVSS component semantic commitment mismatch")
 	}
 	return leafWire, nil
 }

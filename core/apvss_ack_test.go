@@ -13,6 +13,7 @@ type apvssTestFixture struct {
 	context         cvLeafContext
 	leaf            *cvLeaf
 	receiverSecrets []fr.Element
+	signingSecrets  []fr.Element
 	witness         apvssDealerWitness
 }
 
@@ -27,34 +28,44 @@ func apvssFixture(tb testing.TB, receivers, f int) apvssTestFixture {
 		tb.Fatal(err)
 	}
 	secrets := make([]fr.Element, receivers)
+	signingSecrets := make([]fr.Element, receivers)
 	keys := make([]bls12381.G1Affine, receivers)
+	signingKeys := make([]bls12381.G1Affine, receivers)
 	for i := range secrets {
 		secrets[i] = cvTestScalar(uint64(101 + i))
+		signingSecrets[i] = cvTestScalar(uint64(10001 + i))
 		keys[i], err = cvReceiverPublicKey(secrets[i])
+		if err != nil {
+			tb.Fatal(err)
+		}
+		signingKeys[i], err = cvReceiverPublicKey(signingSecrets[i])
 		if err != nil {
 			tb.Fatal(err)
 		}
 	}
 	context := cvLeafContext{
-		sessionID:          []byte("apvss-ack-test-session"),
-		epoch:              17,
-		sharingDegree:      f,
-		profile:            profile,
-		receiverPublicKeys: keys,
-		dealerSetPolicy:    []byte("availability-then-local-valid-k"),
-		proofProfile:       cvLeafStructuralProofProfile,
+		sessionID:                 []byte("apvss-ack-test-session"),
+		epoch:                     17,
+		sharingDegree:             f,
+		profile:                   profile,
+		receiverPublicKeys:        keys,
+		receiverSigningPublicKeys: signingKeys,
+		dealerSetPolicy:           []byte("availability-then-local-valid-k"),
+		proofProfile:              cvLeafStructuralProofProfile,
 	}
 	scalarCoefficients := make([]fr.Element, f+1)
 	blindingCoefficients := make([]fr.Element, f+1)
 	for i := 0; i <= f; i++ {
 		scalarCoefficients[i] = cvTestScalar(uint64(11 + i*3))
-		blindingCoefficients[i] = cvTestScalar(uint64(701 + i*5))
+		// Structural leaves use Feldman commitments; the auxiliary Pedersen
+		// blinding lane is the identity during this migration.
+		blindingCoefficients[i].SetZero()
 	}
 	scalarCoins := make([][]fr.Element, receivers)
 	blindingCoins := make([]fr.Element, receivers)
 	for i := 0; i < receivers; i++ {
 		scalarCoins[i] = cvTestCoins(chunks, uint64(2001+i*(chunks+1)))
-		blindingCoins[i] = cvTestScalar(uint64(9001 + i))
+		blindingCoins[i].SetZero()
 	}
 	leaf, err := cvReferenceDeal(
 		context,
@@ -81,6 +92,7 @@ func apvssFixture(tb testing.TB, receivers, f int) apvssTestFixture {
 		context:         context,
 		leaf:            leaf,
 		receiverSecrets: secrets,
+		signingSecrets:  signingSecrets,
 		witness:         witness,
 	}
 }
@@ -95,6 +107,9 @@ func apvssClonePrototypeForTest(in *apvssLeafPrototype) *apvssLeafPrototype {
 }
 
 func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
+	if testing.Short() {
+		t.Skip("experimental ACK/fallback prototype profiles")
+	}
 	fixture := apvssFixture(t, 7, 2)
 	profiles := []struct {
 		name     string
@@ -111,6 +126,7 @@ func TestAPVSSPrototypeACKFallbackProfilesV1(t *testing.T) {
 				&fixture.context,
 				fixture.leaf,
 				fixture.receiverSecrets,
+				fixture.signingSecrets,
 				&fixture.witness,
 				profile.fallback,
 			)
@@ -142,6 +158,7 @@ func TestAPVSSFallbackBackendSelectionFailsClosedV1(t *testing.T) {
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
+		fixture.signingSecrets,
 		&fixture.witness,
 		[]int{1, 2},
 		apvssFallbackCompactBatchProfile,
@@ -156,6 +173,7 @@ func TestAPVSSFallbackBackendSelectionFailsClosedV1(t *testing.T) {
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
+		fixture.signingSecrets,
 		&fixture.witness,
 		[]int{1, 2},
 		"unknown-fallback",
@@ -167,6 +185,7 @@ func TestAPVSSFallbackBackendSelectionFailsClosedV1(t *testing.T) {
 		&fixture.context,
 		fixture.leaf,
 		fixture.receiverSecrets,
+		fixture.signingSecrets,
 		&fixture.witness,
 		[]int{1, 2},
 	)
@@ -307,13 +326,43 @@ func TestAPVSSFallbackWitnessRelationGateV1(t *testing.T) {
 
 func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 	fixture := apvssFixture(t, 4, 1)
-	ack, err := apvssIssueLaneACK(&fixture.context, fixture.leaf, 1, fixture.receiverSecrets[0])
+	ack, err := apvssIssueLaneACK(
+		&fixture.context, fixture.leaf, 1,
+		fixture.receiverSecrets[0], fixture.signingSecrets[0],
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := apvssVerifyLaneACK(fixture.leaf, &ack); err != nil {
 		t.Fatalf("valid ACK rejected: %v", err)
 	}
+
+	t.Run("legacy challenge downgrade", func(t *testing.T) {
+		statementDigest, err := apvssLaneStatementDigest(fixture.leaf, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonce := cvTestScalar(70001)
+		var noncePoint bls12381.G1Affine
+		noncePoint.ScalarMultiplication(&genG1, nonce.BigInt(new(big.Int)))
+		nonceWire := noncePoint.Bytes()
+		legacyChallenge, err := cvHashToFr(
+			"ARL-APVSS/receiver-ack", statementDigest, nonceWire[:],
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response, term fr.Element
+		term.Mul(&legacyChallenge, &fixture.signingSecrets[0])
+		response.Add(&nonce, &term)
+		legacyACK := apvssLaneACK{
+			receiverIndex: 1,
+			signature:     apvssSchnorrSignature{r: noncePoint, z: response},
+		}
+		if err := apvssVerifyLaneACK(fixture.leaf, &legacyACK); err == nil {
+			t.Fatal("v2 verifier accepted a legacy SHA/XMD ACK challenge")
+		}
+	})
 
 	t.Run("ciphertext replacement after ACK", func(t *testing.T) {
 		bad := cvCloneLeafForTest(fixture.leaf)
@@ -355,8 +404,28 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 			fixture.leaf,
 			1,
 			fixture.receiverSecrets[1],
+			fixture.signingSecrets[0],
 		); err == nil {
 			t.Fatal("issued ACK using another receiver's secret")
+		}
+	})
+	t.Run("wrong signing secret", func(t *testing.T) {
+		if _, err := apvssIssueLaneACK(
+			&fixture.context,
+			fixture.leaf,
+			1,
+			fixture.receiverSecrets[0],
+			fixture.signingSecrets[1],
+		); err == nil {
+			t.Fatal("issued ACK using another receiver's identity key")
+		}
+	})
+	t.Run("signing registry mutation", func(t *testing.T) {
+		bad := cvCloneLeafForTest(fixture.leaf)
+		bad.context.receiverSigningPublicKeys[0] = bad.context.receiverSigningPublicKeys[1]
+		bad.digest = cvLeafDigest(bad)
+		if err := apvssVerifyLaneACK(bad, &ack); err == nil {
+			t.Fatal("ACK survived a receiver signing-registry mutation")
 		}
 	})
 	t.Run("wrong scalar opening", func(t *testing.T) {
@@ -371,6 +440,7 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 			bad,
 			1,
 			fixture.receiverSecrets[0],
+			fixture.signingSecrets[0],
 		); err == nil {
 			t.Fatal("issued ACK for a scalar that does not open V_i,j")
 		}
@@ -387,11 +457,12 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 			bad,
 			1,
 			fixture.receiverSecrets[0],
+			fixture.signingSecrets[0],
 		); err == nil {
 			t.Fatal("issued ACK for a mutated blinding lane")
 		}
 	})
-	t.Run("noncanonical s plus q digits", func(t *testing.T) {
+	t.Run("field-congruent s plus q digits", func(t *testing.T) {
 		bad := cvCloneLeafForTest(fixture.leaf)
 		lifted := new(big.Int).Add(
 			fr.Modulus(),
@@ -417,13 +488,18 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 			t.Fatal("fixture chunk width did not cover s+q")
 		}
 		bad.digest = cvLeafDigest(bad)
-		if _, err := apvssIssueLaneACK(
+		ack, err := apvssIssueLaneACK(
 			&fixture.context,
 			bad,
 			1,
 			fixture.receiverSecrets[0],
-		); err == nil {
-			t.Fatal("issued ACK for a noncanonical s+q digit encoding")
+			fixture.signingSecrets[0],
+		)
+		if err != nil {
+			t.Fatalf("rejected field-congruent s+q digit encoding: %v", err)
+		}
+		if err := apvssVerifyLaneACK(bad, &ack); err != nil {
+			t.Fatalf("field-congruent ACK did not verify: %v", err)
 		}
 	})
 }
@@ -431,13 +507,13 @@ func TestAPVSSACKStrictDecryptionAndStatementBindingV1(t *testing.T) {
 func TestAPVSSACKFallbackPartitionRejectsMalformedSetsV1(t *testing.T) {
 	fixture := apvssFixture(t, 7, 2)
 	allACK, err := apvssBuildPrototype(
-		&fixture.context, fixture.leaf, fixture.receiverSecrets, &fixture.witness, nil,
+		&fixture.context, fixture.leaf, fixture.receiverSecrets, fixture.signingSecrets, &fixture.witness, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	withFallback, err := apvssBuildPrototype(
-		&fixture.context, fixture.leaf, fixture.receiverSecrets, &fixture.witness, []int{1},
+		&fixture.context, fixture.leaf, fixture.receiverSecrets, fixture.signingSecrets, &fixture.witness, []int{1},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -492,6 +568,7 @@ func TestAPVSSACKFallbackPartitionRejectsMalformedSetsV1(t *testing.T) {
 			&fixture.context,
 			fixture.leaf,
 			fixture.receiverSecrets,
+			fixture.signingSecrets,
 			&fixture.witness,
 			[]int{1, 2, 3},
 		); err == nil {
