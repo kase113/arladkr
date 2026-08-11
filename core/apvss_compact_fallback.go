@@ -356,18 +356,6 @@ func apvssProveCompactComparator(
 	return proof, nil
 }
 
-func apvssVerifyCompactComparator(
-	leaf *cvLeaf,
-	link *apvssCompactLinkProof,
-	proof *apvssCompactComparatorProof,
-) error {
-	statement, err := apvssCompactComparatorStatement(leaf, link, proof)
-	if err != nil {
-		return err
-	}
-	return apvssVerifyCompactComparatorWithStatement(leaf, link, proof, statement)
-}
-
 func apvssVerifyCompactComparatorWithStatement(
 	leaf *cvLeaf,
 	link *apvssCompactLinkProof,

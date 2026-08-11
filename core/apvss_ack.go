@@ -953,29 +953,6 @@ func apvssBuildPrototypeWithFallbackProfile(
 	return prototype, nil
 }
 
-func apvssAssemblePrototype(
-	context *cvLeafContext,
-	leaf *cvLeaf,
-	witness *apvssDealerWitness,
-	acks []apvssLaneACK,
-) (*apvssLeafPrototype, error) {
-	if err := apvssValidateStructuralLeaf(context, leaf); err != nil {
-		return nil, err
-	}
-	return apvssAssembleVerifiedPrototype(context, leaf, witness, acks)
-}
-
-func apvssAssembleVerifiedPrototype(
-	context *cvLeafContext,
-	leaf *cvLeaf,
-	witness *apvssDealerWitness,
-	acks []apvssLaneACK,
-) (*apvssLeafPrototype, error) {
-	return apvssAssembleVerifiedPrototypeWithFallbackProfile(
-		context, leaf, witness, acks, apvssFallbackExactLaneProfile,
-	)
-}
-
 func apvssAssembleVerifiedPrototypeWithFallbackProfile(
 	context *cvLeafContext,
 	leaf *cvLeaf,

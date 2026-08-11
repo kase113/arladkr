@@ -927,14 +927,6 @@ func formatBenchResult(in benchResultInput) string {
 	)
 }
 
-func consensusHash(pk []byte) string {
-	if len(pk) == 0 {
-		return "none"
-	}
-	sum := sha256.Sum256(pk)
-	return hex.EncodeToString(sum[:8])
-}
-
 func summarizeConsensusHash(stats []runStat) string {
 	if len(stats) == 0 {
 		return "none"

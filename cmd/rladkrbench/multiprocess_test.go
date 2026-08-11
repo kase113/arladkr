@@ -89,11 +89,6 @@ type benchProcessTopology struct {
 	localNodeSets [][]int
 }
 
-func runBenchProcessesWithTopology(t *testing.T, topo benchProcessTopology) []string {
-	t.Helper()
-	return runBenchLines(runBenchProcessesDetailedWithTopology(t, topo))
-}
-
 func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopology) []benchProcResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

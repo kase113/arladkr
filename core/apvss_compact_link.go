@@ -594,13 +594,6 @@ func apvssCompactLinkProofBytes(leaf *cvLeaf, proof *apvssCompactLinkProof) (int
 	return len(wire), nil
 }
 
-func apvssDecodeCompactLinkProof(
-	wire []byte,
-	leaf *cvLeaf,
-) (*apvssCompactLinkProof, error) {
-	return apvssDecodeCompactLinkProofWithVerify(wire, leaf, true)
-}
-
 func apvssDecodeCompactLinkProofWithVerify(
 	wire []byte,
 	leaf *cvLeaf,

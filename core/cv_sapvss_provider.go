@@ -509,17 +509,6 @@ func cvDLEQTargets(agg *cvAggregateTranscript, receiverIndex int, publicScalar, 
 	return scalarCipher.r, scalarTarget, receiver.blinding.r, blindingTarget, nil
 }
 
-func cvDLEQChallenge(agg *cvAggregateTranscript, receiverIndex int, publicScalar, blindingOpening *bls12381.G1Affine, proof *cvMultiDLEQProof) (fr.Element, error) {
-	scalarBase, scalarTarget, blindingBase, blindingTarget, err := cvDLEQTargets(agg, receiverIndex, publicScalar, blindingOpening)
-	if err != nil {
-		return fr.Element{}, err
-	}
-	return cvDLEQChallengeWithTargets(
-		agg, receiverIndex, publicScalar, blindingOpening, proof,
-		&scalarBase, &scalarTarget, &blindingBase, &blindingTarget,
-	)
-}
-
 func cvDLEQChallengeWithTargets(
 	agg *cvAggregateTranscript,
 	receiverIndex int,
