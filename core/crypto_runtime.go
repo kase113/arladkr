@@ -190,6 +190,9 @@ func (r *runtimeCrypto) phaseCommStats() (map[string]uint64, map[string]uint64) 
 type tblsThresholdSigner struct {
 	t int
 	n int
+	// v2Role is non-empty only for signers loaded from the V2 role bundle.
+	// Protocol entry points use it to reject APDB/control/coin key swapping.
+	v2Role string
 
 	pubKey                bls12381.G2Affine   // group public key = secret * G2
 	pubKeyShares          []bls12381.G2Affine // individual pk_i = share_i * G2
@@ -287,6 +290,10 @@ func newTBLSThresholdSignerFromMaterial(material *cvOldLockKeyMaterial) (*tblsTh
 	}, nil
 }
 
+func cvV2SignerHasRole(signer *tblsThresholdSigner, role string) bool {
+	return signer != nil && cvV2KnownThresholdRole(role) && signer.v2Role == role
+}
+
 func newTBLSThresholdSignerFromCoinMaterial(material *cvMVBACoinKeyMaterial) (*tblsThresholdSigner, error) {
 	if material == nil || material.threshold <= 0 || material.threshold > len(material.members) ||
 		len(material.publicShares) != len(material.members) || len(material.localShares) == 0 {
@@ -304,6 +311,29 @@ func newTBLSThresholdSignerFromCoinMaterial(material *cvMVBACoinKeyMaterial) (*t
 		t: material.threshold, n: len(material.members), pubKey: material.groupPublic,
 		pubKeyShares: append([]bls12381.G2Affine(nil), material.publicShares...), shares: shares,
 		memberOrder: append([]int(nil), material.members...), memberIndex: memberIndex,
+		signingMembers: nodeSet(materialMemberIDs(material.localShares)),
+	}, nil
+}
+
+func newTBLSThresholdSignerFromV2Material(material *cvV2ThresholdKeyMaterial) (*tblsThresholdSigner, error) {
+	if material == nil || !cvV2KnownThresholdRole(material.role) || material.threshold <= 0 ||
+		material.threshold > len(material.members) || len(material.publicShares) != len(material.members) ||
+		len(material.transportPublicShares) != len(material.members) || len(material.localShares) == 0 {
+		return nil, fmt.Errorf("invalid CV V2 threshold signer material")
+	}
+	memberIndex := make(map[int]int, len(material.members))
+	shares := make([]fr.Element, len(material.members))
+	for i, member := range material.members {
+		memberIndex[member] = i
+		if share, ok := material.localShares[member]; ok {
+			shares[i] = share
+		}
+	}
+	return &tblsThresholdSigner{
+		t: material.threshold, n: len(material.members), v2Role: material.role, pubKey: material.groupPublic,
+		pubKeyShares: append([]bls12381.G2Affine(nil), material.publicShares...), shares: shares,
+		transportPubKeyShares: append([]bls12381.G1Affine(nil), material.transportPublicShares...),
+		memberOrder:           append([]int(nil), material.members...), memberIndex: memberIndex,
 		signingMembers: nodeSet(materialMemberIDs(material.localShares)),
 	}, nil
 }

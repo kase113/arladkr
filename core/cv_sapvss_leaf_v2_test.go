@@ -1,0 +1,231 @@
+package core
+
+import (
+	"bytes"
+	"path/filepath"
+	"testing"
+
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
+)
+
+func cvAllACKLeafV2Fixture(
+	t *testing.T,
+) (*cvLeafV2, *cvLeafContextV2, *cvReceiverKeyMaterialV2, *cvValidatorKeyMaterialV2) {
+	t.Helper()
+	cfg := cvV2ParamsTestConfig()
+	receiverPublicDir := filepath.Join(t.TempDir(), "receiver-public")
+	receiverSecretDir := filepath.Join(t.TempDir(), "receiver-secret")
+	if err := cvGenerateReceiverRegistryV2(
+		receiverPublicDir, receiverSecretDir, cfg.SID, uint64(cfg.Epoch), cfg.NewCommittee,
+	); err != nil {
+		t.Fatal(err)
+	}
+	receivers, err := cvLoadReceiverRegistryV2(
+		receiverPublicDir, receiverSecretDir, cfg.SID, uint64(cfg.Epoch),
+		cfg.NewCommittee, cfg.NewCommittee,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatorPublicDir := filepath.Join(t.TempDir(), "validator-public")
+	validatorSecretDir := filepath.Join(t.TempDir(), "validator-secret")
+	if err := cvGenerateValidatorRegistryV2(
+		validatorPublicDir, validatorSecretDir, cfg.SID, uint64(cfg.Epoch), cfg.OldCommittee,
+	); err != nil {
+		t.Fatal(err)
+	}
+	validators, err := cvLoadValidatorRegistryV2(
+		validatorPublicDir, validatorSecretDir, cfg.SID, uint64(cfg.Epoch),
+		cfg.OldCommittee, cfg.OldCommittee,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context := &cvLeafContextV2{
+		SID: cfg.SID, Epoch: uint64(cfg.Epoch),
+		OldRoster: append([]int(nil), cfg.OldCommittee...), NewRoster: append([]int(nil), cfg.NewCommittee...),
+		ReceiverRegistryDigest: append([]byte(nil), receivers.registryDigest...),
+		SharingDegree:          len(cfg.NewCommittee) - cfg.NewFaults - 1,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: cfg.OldFaults + 1},
+	}
+	coefficientCount := context.SharingDegree + 1
+	scalarCoefficients := make([]fr.Element, coefficientCount)
+	blindingCoefficients := make([]fr.Element, coefficientCount)
+	for i := 0; i < coefficientCount; i++ {
+		if _, err := scalarCoefficients[i].SetRandom(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := blindingCoefficients[i].SetRandom(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dealer := cfg.OldCommittee[0]
+	commitments, coreProof, err := cvProveCoreV2(context, dealer, scalarCoefficients, blindingCoefficients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers := make([]*cvReceiverLaneOfferV2, len(cfg.NewCommittee))
+	acks := make([]*cvACKEvidenceV2, len(cfg.NewCommittee))
+	for i, receiverID := range cfg.NewCommittee {
+		index := i + 1
+		scalar := cvEvaluateScalarPolynomialV2(scalarCoefficients, index)
+		blinding := cvEvaluateScalarPolynomialV2(blindingCoefficients, index)
+		offers[i], _, err = cvEncryptReceiverLanesV2(
+			context, dealer, receiverID, index, &receivers.encryptionPublicKeys[i], scalar, blinding,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		acks[i], _, _, err = cvVerifyDecryptAndSignACKV2(
+			context, dealer, offers[i], &receivers.encryptionPublicKeys[i],
+			receivers.localEncryptionSecrets[receiverID], receivers.identityPublicKeys[i],
+			receivers.localIdentitySecrets[receiverID],
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	leaf, err := cvBuildAllACKLeafV2(
+		context, dealer, commitments, coreProof, offers, acks, receivers, validators,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf, context, receivers, validators
+}
+
+func TestCVAllACKLeafV2BuildVerifyAndCodec(t *testing.T) {
+	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+	if err := cvVerifyAPVSSV2(leaf, context, receivers, validators); err != nil {
+		t.Fatalf("verify all-ACK V2 leaf: %v", err)
+	}
+	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeLeafV2(wire, context, receivers, validators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.Digest, leaf.Digest) ||
+		cvVerifyAPVSSV2(decoded, context, receivers, validators) != nil {
+		t.Fatal("decoded all-ACK V2 leaf did not verify")
+	}
+	if _, err := cvDecodeLeafV2(append(append([]byte(nil), wire...), 0),
+		context, receivers, validators); err == nil {
+		t.Fatal("accepted V2 leaf with trailing bytes")
+	}
+}
+
+func TestCVAllACKLeafV2RejectsCryptographicMutations(t *testing.T) {
+	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+
+	badEvaluation := *leaf
+	badEvaluation.Receivers = append([]cvLeafReceiverV2(nil), leaf.Receivers...)
+	badEvaluation.Receivers[0] = leaf.Receivers[0]
+	badEvaluation.Receivers[0].Offer = *cvCloneReceiverLaneOfferV2(&leaf.Receivers[0].Offer)
+	badEvaluation.Receivers[0].Offer.Evaluation.Add(
+		&badEvaluation.Receivers[0].Offer.Evaluation, &genG1,
+	)
+	if err := cvVerifyAPVSSV2(&badEvaluation, context, receivers, validators); err == nil {
+		t.Fatal("accepted V2 leaf with wrong polynomial evaluation")
+	}
+
+	badACK := *leaf
+	badACK.Receivers = append([]cvLeafReceiverV2(nil), leaf.Receivers...)
+	badACK.Receivers[0] = leaf.Receivers[0]
+	badACK.Receivers[0].ACK = &cvACKEvidenceV2{
+		Ownership: cvCloneOwnershipProofV2(&leaf.Receivers[0].ACK.Ownership),
+		Signature: append([]byte(nil), leaf.Receivers[0].ACK.Signature...),
+	}
+	badACK.Receivers[0].ACK.Signature[0] ^= 1
+	if err := cvVerifyAPVSSV2(&badACK, context, receivers, validators); err == nil {
+		t.Fatal("accepted V2 leaf with mutated ACK")
+	}
+
+	badDealer := *leaf
+	badDealer.DealerSignature = append([]byte(nil), leaf.DealerSignature...)
+	badDealer.DealerSignature[0] ^= 1
+	if err := cvVerifyAPVSSV2(&badDealer, context, receivers, validators); err == nil {
+		t.Fatal("accepted V2 leaf with mutated dealer signature")
+	}
+
+	badDigest := *leaf
+	badDigest.Digest = append([]byte(nil), leaf.Digest...)
+	badDigest.Digest[0] ^= 1
+	if err := cvVerifyAPVSSV2(&badDigest, context, receivers, validators); err == nil {
+		t.Fatal("accepted V2 leaf with mutated digest")
+	}
+}
+
+func TestCVLeafV2MixedACKFallbackBuildVerifyAndCodec(t *testing.T) {
+	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+	fallbackIndex := 1
+	receiverID := context.NewRoster[fallbackIndex-1]
+	scalar, blinding, err := cvVerifyAndDecryptReceiverLanesV2(
+		context, leaf.DealerID, &leaf.Receivers[fallbackIndex-1].Offer,
+		&receivers.encryptionPublicKeys[fallbackIndex-1], receivers.localEncryptionSecrets[receiverID],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackOffer, witness, err := cvEncryptReceiverLanesV2(
+		context, leaf.DealerID, receiverID, fallbackIndex, &receivers.encryptionPublicKeys[fallbackIndex-1],
+		scalar, blinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := cvBuildFallbackEvidenceV2(
+		context, leaf.DealerID, []*cvReceiverLaneOfferV2{fallbackOffer},
+		[]bls12381.G1Affine{receivers.encryptionPublicKeys[fallbackIndex-1]},
+		[]*cvDealerReceiverWitnessV2{witness},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers := make([]*cvReceiverLaneOfferV2, len(leaf.Receivers))
+	acks := make([]*cvACKEvidenceV2, len(leaf.Receivers))
+	for i := range leaf.Receivers {
+		offers[i] = &leaf.Receivers[i].Offer
+		acks[i] = leaf.Receivers[i].ACK
+	}
+	offers[fallbackIndex-1], acks[fallbackIndex-1] = fallbackOffer, nil
+	partition := &cvEvidencePartitionV2{
+		ACKReceiverIndices: []int{2, 3, 4}, FallbackReceiverIndices: []int{1},
+	}
+	mixed, err := cvBuildLeafV2(
+		context, leaf.DealerID, leaf.CoefficientCommitments, &leaf.CoreProof, offers, acks,
+		partition, evidence, receivers, validators,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cvVerifyAPVSSV2(mixed, context, receivers, validators); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := cvLeafV2CanonicalBytes(mixed, receivers, validators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeLeafV2(wire, context, receivers, validators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Receivers[fallbackIndex-1].ACK != nil ||
+		len(decoded.Receivers[fallbackIndex-1].Offer.Ownership.CoinResponses) != 0 {
+		t.Fatal("fallback receiver wire retained redundant ownership/ACK evidence")
+	}
+	bad := *mixed
+	badFallback := *mixed.Fallback
+	badRange := badFallback.Range
+	badRange.proof = apvssCloneCompactRangeProofForTest(badFallback.Range.proof)
+	one := fr.One()
+	badRange.proof.tHat.Add(&badRange.proof.tHat, &one)
+	badFallback.Range = badRange
+	bad.Fallback = &badFallback
+	if err := cvVerifyAPVSSV2(&bad, context, receivers, validators); err == nil {
+		t.Fatal("accepted mixed CV V2 leaf with mutated fallback range proof")
+	}
+}

@@ -33,6 +33,18 @@ type Config struct {
 	// FNew controls the new-committee APVSS sharing degree, receiver validity,
 	// and scalar-share reconstruction threshold.
 	FNew int
+	// OldFaults and NewFaults are the CV V2 names for the independently
+	// parameterized old and new committee fault bounds. FOld/FNew remain for
+	// legacy providers; CV V2 code must derive its thresholds from these fields.
+	// A non-zero alias must agree with its legacy counterpart when both are set.
+	OldFaults int
+	NewFaults int
+
+	// CVProposerSampleSize and CVValidatorSampleSize are explicit protocol
+	// parameters for the CV V2 eligibility coin. They intentionally have no
+	// hidden defaults: deployment tooling must record the chosen failure bounds.
+	CVProposerSampleSize  int
+	CVValidatorSampleSize int
 
 	Kappa int
 
@@ -158,8 +170,23 @@ func NormalizeConfig(cfg Config) Config {
 	if out.Epoch <= 0 {
 		out.Epoch = 1
 	}
+	// Keep legacy providers working while making the V2 parameters explicit.
+	// Zero is a valid fault bound, so only a non-zero value can select the
+	// alias. Conflicting non-zero values are rejected by ValidateConfig.
+	if out.OldFaults == 0 {
+		out.OldFaults = out.FOld
+	}
+	if out.NewFaults == 0 {
+		out.NewFaults = out.FNew
+	}
+	if out.FOld == 0 {
+		out.FOld = out.OldFaults
+	}
+	if out.FNew == 0 {
+		out.FNew = out.NewFaults
+	}
 	if out.Kappa == 0 {
-		out.Kappa = out.FOld + 1
+		out.Kappa = out.OldFaults + 1
 	}
 	if out.WaitSPBCTimeout <= 0 {
 		out.WaitSPBCTimeout = 2 * time.Second
@@ -228,11 +255,17 @@ func ValidateConfig(cfg Config) error {
 	if len(newCommittee) != len(cfg.NewCommittee) {
 		return errors.New("duplicate new committee member")
 	}
-	if cfg.FOld < 0 {
+	if cfg.FOld < 0 || cfg.OldFaults < 0 {
 		return errors.New("invalid old-committee fault threshold")
 	}
-	if cfg.FNew < 0 {
+	if cfg.FNew < 0 || cfg.NewFaults < 0 {
 		return errors.New("invalid new-committee fault threshold")
+	}
+	if cfg.FOld != cfg.OldFaults {
+		return errors.New("conflicting legacy and CV V2 old-committee fault thresholds")
+	}
+	if cfg.FNew != cfg.NewFaults {
+		return errors.New("conflicting legacy and CV V2 new-committee fault thresholds")
 	}
 	if len(oldCommittee) < 3*cfg.FOld+1 {
 		return errors.New("old committee does not satisfy n_o >= 3f_o+1")

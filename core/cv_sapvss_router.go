@@ -30,6 +30,13 @@ const (
 	cvTagReceiptDone             = "CV_RECEIPT_DONE"
 	apvssTagLaneOffer            = "APVSS_LANE_OFFER"
 	apvssTagLaneACK              = "APVSS_LANE_ACK"
+	cvTagHandoffV2               = "CV_V2_HANDOFF"
+	cvTagAPDBStoreV2             = "CV_V2_APDB_STORE"
+	cvTagAPDBStoredShareV2       = "CV_V2_APDB_STORED_SHARE"
+	cvTagAPDBRecoverGetV2        = "CV_V2_APDB_RECOVER_GET"
+	cvTagAPDBRecoverStoreV2      = "CV_V2_APDB_RECOVER_STORE"
+	cvTagAggregateRecoverGetV2   = "CV_V2_AGG_RECOVER_GET"
+	cvTagAggregateRecoverStoreV2 = "CV_V2_AGG_RECOVER_STORE"
 )
 
 func cvAllowedNetworkTag(tag string) bool {
@@ -50,7 +57,14 @@ func cvAllowedNetworkTag(tag string) bool {
 		cvTagReceipt,
 		cvTagReceiptDone,
 		apvssTagLaneOffer,
-		apvssTagLaneACK:
+		apvssTagLaneACK,
+		cvTagHandoffV2,
+		cvTagAPDBStoreV2,
+		cvTagAPDBStoredShareV2,
+		cvTagAPDBRecoverGetV2,
+		cvTagAPDBRecoverStoreV2,
+		cvTagAggregateRecoverGetV2,
+		cvTagAggregateRecoverStoreV2:
 		return true
 	default:
 		return false
@@ -114,12 +128,16 @@ type cvSAPVSSRouter struct {
 	epoch    int
 	oldNodes map[int]struct{}
 	newNodes map[int]struct{}
-	auth     *cvNetworkAuthenticator
+	auth     cvNetworkEnvelopeOpener
 	queues   map[int]chan Message
 	errors   chan error
 	done     chan struct{}
 	wait     sync.WaitGroup
 	failOnce sync.Once
+}
+
+type cvNetworkEnvelopeOpener interface {
+	open(from, to int, tag string, wire []byte) ([]byte, error)
 }
 
 func newCVSAPVSSRouter(
@@ -142,7 +160,7 @@ func newCVSAPVSSRouterWithReceivers(
 	epoch int,
 	oldNodes, newNodes, localNodes []int,
 	queueCapacity int,
-	authenticators ...*cvNetworkAuthenticator,
+	authenticators ...cvNetworkEnvelopeOpener,
 ) (*cvSAPVSSRouter, error) {
 	if ctx == nil || transport == nil || sid == "" || len(sid) > cvMaxNetworkEnvelopeSIDBytes ||
 		epoch < 0 || queueCapacity <= 0 || len(oldNodes) == 0 || len(localNodes) == 0 {
@@ -188,7 +206,7 @@ func newCVSAPVSSRouterWithReceivers(
 		inboxes[node] = inbox
 	}
 	routerContext, cancel := context.WithCancel(ctx)
-	var auth *cvNetworkAuthenticator
+	var auth cvNetworkEnvelopeOpener
 	if len(authenticators) > 0 {
 		auth = authenticators[0]
 	}
@@ -277,14 +295,14 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 		return Message{}, false
 	}
 	switch msg.Tag {
-	case apvssTagLaneOffer:
+	case apvssTagLaneOffer, cvTagHandoffV2, cvTagAggregateRecoverStoreV2:
 		if _, ok := r.oldNodes[msg.From]; !ok {
 			return Message{}, false
 		}
 		if _, ok := r.newNodes[msg.To]; !ok {
 			return Message{}, false
 		}
-	case apvssTagLaneACK:
+	case apvssTagLaneACK, cvTagAggregateRecoverGetV2:
 		if _, ok := r.newNodes[msg.From]; !ok {
 			return Message{}, false
 		}
@@ -299,9 +317,13 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 			return Message{}, false
 		}
 	}
-	envelope, err := r.auth.open(msg.From, msg.To, msg.Tag, msg.Body)
-	if err != nil {
-		return Message{}, false
+	envelope := append([]byte(nil), msg.Body...)
+	if r.auth != nil {
+		var err error
+		envelope, err = r.auth.open(msg.From, msg.To, msg.Tag, msg.Body)
+		if err != nil {
+			return Message{}, false
+		}
 	}
 	payload, err := cvDecodeNetworkEnvelope(envelope, r.sid, r.epoch)
 	if err != nil {

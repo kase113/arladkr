@@ -273,6 +273,58 @@ func TestCVSAPVSSRouterSeparatesOldDealerAndNewReceiverTags(t *testing.T) {
 	}
 }
 
+func TestCVSAPVSSRouterEnforcesV2HandoffRecoveryDirections(t *testing.T) {
+	const sid = "router-v2-handoff"
+	const epoch = 6
+	transport := newCVRouterTestTransport([]int{1, 2, 10, 11}, 16)
+	router, err := newCVSAPVSSRouterWithReceivers(
+		context.Background(), transport, sid, epoch,
+		[]int{1, 2}, []int{10, 11}, []int{1, 10}, 8,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+	oldInbox, _ := router.Receive(1)
+	newInbox, _ := router.Receive(10)
+	envelope, err := cvEncodeNetworkEnvelope(sid, epoch, []byte("V2 recovery payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.inject(10, Message{From: 1, To: 10, Tag: cvTagHandoffV2, Body: envelope})
+	transport.inject(10, Message{From: 2, To: 10, Tag: cvTagAggregateRecoverStoreV2, Body: envelope})
+	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagAggregateRecoverGetV2, Body: envelope})
+	transport.inject(10, Message{From: 11, To: 10, Tag: cvTagHandoffV2, Body: envelope})
+	transport.inject(1, Message{From: 2, To: 1, Tag: cvTagAggregateRecoverGetV2, Body: envelope})
+	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagAggregateRecoverStoreV2, Body: envelope})
+
+	for _, expected := range []string{cvTagHandoffV2, cvTagAggregateRecoverStoreV2} {
+		select {
+		case msg := <-newInbox:
+			if msg.Tag != expected {
+				t.Fatalf("new node received %s, want %s", msg.Tag, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("new node did not receive %s", expected)
+		}
+	}
+	select {
+	case msg := <-oldInbox:
+		if msg.Tag != cvTagAggregateRecoverGetV2 {
+			t.Fatalf("old node received unexpected V2 tag %s", msg.Tag)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old node did not receive V2 aggregate recovery request")
+	}
+	select {
+	case extra := <-oldInbox:
+		t.Fatalf("unauthorized V2 message reached old node: %+v", extra)
+	case extra := <-newInbox:
+		t.Fatalf("unauthorized V2 message reached new node: %+v", extra)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
 func TestCVSAPVSSRouterHasBoundedQueueAndStopsWithoutClosingTransport(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	transport := newCVRouterTestTransport([]int{5}, 4)
