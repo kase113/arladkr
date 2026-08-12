@@ -15,7 +15,7 @@ func newCVAPDBHolderStoreV2(root string) (*cvAPDBHolderStoreV2, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("empty CV V2 APDB holder store root")
 	}
-	store := &cvAPDBHolderStoreV2{root: filepath.Join(root, "apdb-v2")}
+	store := &cvAPDBHolderStoreV2{root: filepath.Join(root, "apdb-v2-scalar-group")}
 	if err := cvEnsurePrivateStoreDir(store.root); err != nil {
 		return nil, err
 	}

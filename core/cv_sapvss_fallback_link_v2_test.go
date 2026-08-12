@@ -67,11 +67,18 @@ func TestCVFallbackLinkV2BindsCommitmentsCiphertextsAndEvaluation(t *testing.T) 
 		t.Fatal("accepted mutated fallback digit response")
 	}
 	badOffer := *cvCloneReceiverLaneOfferV2(offer)
-	badOffer.Lanes[0].Chunks[0].c.Add(&badOffer.Lanes[0].Chunks[0].c, &genG1)
+	badOffer.ScalarChunks[0].c.Add(&badOffer.ScalarChunks[0].c, &genG1)
 	if err := cvVerifyFallbackLinkV2(
 		context, dealer, []*cvReceiverLaneOfferV2{&badOffer}, []bls12381.G1Affine{publicKey}, proof,
 	); err == nil {
 		t.Fatal("replayed fallback-link proof after ciphertext mutation")
+	}
+	badBlinding := *cvCloneReceiverLaneOfferV2(offer)
+	badBlinding.Blinding.c.Add(&badBlinding.Blinding.c, &genG1)
+	if err := cvVerifyFallbackLinkV2(
+		context, dealer, []*cvReceiverLaneOfferV2{&badBlinding}, []bls12381.G1Affine{publicKey}, proof,
+	); err == nil {
+		t.Fatal("replayed fallback-link proof after blinding ciphertext mutation")
 	}
 	badEvaluation := *cvCloneReceiverLaneOfferV2(offer)
 	badEvaluation.Evaluation.Add(&badEvaluation.Evaluation, &genG1)
@@ -99,11 +106,11 @@ func TestCVFallbackLinkV2DoesNotMasqueradeAsRangeProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldDigit := witness.Digits[0][0]
-	witness.Digits[0][0] = base
+	oldDigit := witness.ScalarDigits[0]
+	witness.ScalarDigits[0] = base
 	var outOfRangePoint bls12381.G1Affine
 	outOfRangePoint.ScalarMultiplication(&genG1, new(big.Int).SetUint64(base))
-	offer.Lanes[0].Chunks[0], err = cvEncryptPoint(&publicKey, &outOfRangePoint, witness.Coins[0][0])
+	offer.ScalarChunks[0], err = cvEncryptPoint(&publicKey, &outOfRangePoint, witness.ScalarCoins[0])
 	if err != nil {
 		t.Fatal(err)
 	}

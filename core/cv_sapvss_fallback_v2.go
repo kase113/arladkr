@@ -7,7 +7,7 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
-const cvFallbackEvidenceWireDomainV2 = "ARL-CV-sAPVSS/v2/fallback-evidence"
+const cvFallbackEvidenceWireDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/fallback-evidence"
 
 type cvFallbackEvidenceV2 struct {
 	ReceiverIndices []int

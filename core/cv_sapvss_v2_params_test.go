@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 )
@@ -55,6 +56,35 @@ func TestCVDeriveV2ParamsRejectsImplicitSamplesAndConflictingFaultBounds(t *test
 func TestCVV2StartupAcceptsAuditedAggregatedRangeBackend(t *testing.T) {
 	if _, err := cvValidateV2Startup(cvV2ParamsTestConfig()); err != nil {
 		t.Fatalf("V2 startup rejected aggregated range backend: %v", err)
+	}
+}
+
+func TestCVV2ProtocolVersionRejectsLegacyContextWire(t *testing.T) {
+	if cvSAPVSSV2ProtocolVersion != "cv-sapvss-v2-scalar-group" {
+		t.Fatalf("unexpected CV V2 protocol label %q", cvSAPVSSV2ProtocolVersion)
+	}
+	context := &cvLeafContextV2{
+		SID: "cv-v2-version", Epoch: 1, OldRoster: []int{0}, NewRoster: []int{1},
+		ReceiverRegistryDigest: hashBytes([]byte("cv-v2-version-registry")),
+		SharingDegree:          0,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: 1},
+	}
+	wire, err := cvLeafContextV2CanonicalBytes(context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacyDomain = "ARL-CV-sAPVSS/v2/leaf-context"
+	var legacy bytes.Buffer
+	if err := cvWriteBytes(&legacy, []byte(legacyDomain)); err != nil {
+		t.Fatal(err)
+	}
+	currentPrefixBytes := 4 + len(cvLeafContextWireDomainV2)
+	if len(wire) <= currentPrefixBytes {
+		t.Fatal("invalid current CV V2 context wire")
+	}
+	legacy.Write(wire[currentPrefixBytes:])
+	if _, err := cvDecodeLeafContextV2(legacy.Bytes()); err == nil {
+		t.Fatal("accepted legacy dual-lane CV V2 context wire")
 	}
 }
 

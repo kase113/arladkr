@@ -7,15 +7,55 @@ import (
 )
 
 const (
-	cvV2SamplerDomain      = "ARL-CV-sAPVSS/v2/sample"
-	cvV2CoinDomain         = "ARL-CV-sAPVSS/v2/coin"
-	cvV2CoinOutputDomain   = "ARL-CV-sAPVSS/v2/coin-output"
+	cvV2SamplerDomain      = "ARL-CV-sAPVSS/v2-scalar-group/sample"
+	cvV2CoinDomain         = "ARL-CV-sAPVSS/v2-scalar-group/coin"
+	cvV2CoinOutputDomain   = "ARL-CV-sAPVSS/v2-scalar-group/coin-output"
 	cvV2EligibilityCoinTag = "ELIG"
 	cvV2ContributorCoinTag = "CONTRIB"
 	cvV2ProposerSampleTag  = "PROP"
 	cvV2ValidatorSampleTag = "VAL"
 	cvV2SelectionSampleTag = "SELECT"
+	cvV2CoinShareDomain    = "ARL-CV-sAPVSS/v2-scalar-group/coin-share"
 )
+
+type cvCoinShareV2 struct {
+	InvocationDigest []byte
+	Signature        []byte
+}
+
+func cvCoinShareV2CanonicalBytes(share *cvCoinShareV2) ([]byte, error) {
+	if share == nil || len(share.InvocationDigest) != 32 || len(share.Signature) == 0 ||
+		len(share.Signature) > cvMaxComponentSignatureBytes {
+		return nil, fmt.Errorf("invalid CV V2 coin share")
+	}
+	var wire bytes.Buffer
+	_ = cvWriteBytes(&wire, []byte(cvV2CoinShareDomain))
+	_ = cvWriteBytes(&wire, share.InvocationDigest)
+	_ = cvWriteBytes(&wire, share.Signature)
+	return wire.Bytes(), nil
+}
+
+func cvDecodeCoinShareV2(wire []byte) (*cvCoinShareV2, error) {
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(cvV2CoinShareDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvV2CoinShareDomain)) {
+		return nil, fmt.Errorf("invalid CV V2 coin share domain")
+	}
+	digest, err := r.bytes(32)
+	if err != nil || len(digest) != 32 {
+		return nil, fmt.Errorf("invalid CV V2 coin share invocation")
+	}
+	signature, err := r.bytes(cvMaxComponentSignatureBytes)
+	if err != nil || len(signature) == 0 || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid CV V2 coin share signature")
+	}
+	share := &cvCoinShareV2{InvocationDigest: digest, Signature: signature}
+	canonical, err := cvCoinShareV2CanonicalBytes(share)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical CV V2 coin share")
+	}
+	return share, nil
+}
 
 type cvCoinOutputV2 struct {
 	Invocation  []byte

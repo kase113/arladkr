@@ -6,11 +6,12 @@ import (
 )
 
 const (
-	cvComponentHeaderV2Domain = "ARL-CV-sAPVSS/v2/component-header"
-	cvComponentRefV2Domain    = "ARL-CV-sAPVSS/v2/component-ref"
-	cvPoolV2Domain            = "ARL-CV-sAPVSS/v2/pool"
-	cvPoolDigestV2Domain      = "ARL-CV-sAPVSS/v2/pool-digest"
-	cvPoolCertV2Domain        = "ARL-CV-sAPVSS/v2/pool-cert"
+	cvComponentHeaderV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/component-header"
+	cvComponentRefV2Domain    = "ARL-CV-sAPVSS/v2-scalar-group/component-ref"
+	cvPoolV2Domain            = "ARL-CV-sAPVSS/v2-scalar-group/pool"
+	cvPoolDigestV2Domain      = "ARL-CV-sAPVSS/v2-scalar-group/pool-digest"
+	cvPoolCertV2Domain        = "ARL-CV-sAPVSS/v2-scalar-group/pool-cert"
+	cvPoolCertShareV2Domain   = "ARL-CV-sAPVSS/v2-scalar-group/pool-cert-share-wire"
 )
 
 type cvComponentHeaderV2 struct {
@@ -36,6 +37,51 @@ type cvPoolV2 struct {
 type cvPoolCertificateV2 struct {
 	PoolDigest  []byte
 	Certificate []byte
+}
+
+type cvPoolCertificateShareV2 struct {
+	ProposerID int
+	PoolDigest []byte
+	Signature  []byte
+}
+
+func cvPoolCertificateShareV2CanonicalBytes(share *cvPoolCertificateShareV2) ([]byte, error) {
+	if share == nil || share.ProposerID < 0 || len(share.PoolDigest) != 32 || len(share.Signature) == 0 ||
+		len(share.Signature) > cvMaxComponentSignatureBytes {
+		return nil, fmt.Errorf("invalid CV V2 pool certificate share")
+	}
+	var wire bytes.Buffer
+	_ = cvWriteBytes(&wire, []byte(cvPoolCertShareV2Domain))
+	cvWriteUint64(&wire, uint64(share.ProposerID))
+	_ = cvWriteBytes(&wire, share.PoolDigest)
+	_ = cvWriteBytes(&wire, share.Signature)
+	return wire.Bytes(), nil
+}
+
+func cvDecodePoolCertificateShareV2(wire []byte) (*cvPoolCertificateShareV2, error) {
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(cvPoolCertShareV2Domain))
+	if err != nil || !bytes.Equal(domain, []byte(cvPoolCertShareV2Domain)) {
+		return nil, fmt.Errorf("invalid CV V2 pool certificate share domain")
+	}
+	proposer, err := r.uint64()
+	if err != nil || proposer > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("invalid CV V2 pool certificate share proposer")
+	}
+	digest, err := r.bytes(32)
+	if err != nil || len(digest) != 32 {
+		return nil, fmt.Errorf("invalid CV V2 pool certificate share digest")
+	}
+	signature, err := r.bytes(cvMaxComponentSignatureBytes)
+	if err != nil || len(signature) == 0 || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid CV V2 pool certificate share signature")
+	}
+	share := &cvPoolCertificateShareV2{ProposerID: int(proposer), PoolDigest: digest, Signature: signature}
+	canonical, err := cvPoolCertificateShareV2CanonicalBytes(share)
+	if err != nil || !bytes.Equal(canonical, wire) {
+		return nil, fmt.Errorf("non-canonical CV V2 pool certificate share")
+	}
+	return share, nil
 }
 
 type cvPoolSlotStateV2 struct {

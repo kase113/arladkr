@@ -9,8 +9,8 @@ import (
 
 const (
 	cvFallbackRangeBackendV2         = "bulletproofs-bls12381-aggregated-v1"
-	cvFallbackRangeWireDomainV2      = "ARL-CV-sAPVSS/v2/fallback-range"
-	cvFallbackRangeStatementDomainV2 = "ARL-CV-sAPVSS/v2/fallback-range/statement"
+	cvFallbackRangeWireDomainV2      = "ARL-CV-sAPVSS/v2-scalar-group/fallback-range"
+	cvFallbackRangeStatementDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/fallback-range/statement"
 )
 
 // cvFallbackRangeProofV2 is a V2-domain adapter around the repository's
@@ -40,14 +40,12 @@ func cvProveFallbackRangeV2(
 		if witness == nil {
 			return nil, fmt.Errorf("nil CV V2 fallback-range dealer witness")
 		}
-		for lane := 0; lane < 2; lane++ {
-			if len(witness.Digits[lane]) != chunks {
-				return nil, fmt.Errorf("invalid CV V2 fallback-range witness dimensions")
-			}
-			for chunk := 0; chunk < chunks; chunk++ {
-				position := cvFallbackLinkPositionV2(receiver, lane, chunk, chunks)
-				values[position] = witness.Digits[lane][chunk]
-			}
+		if len(witness.ScalarDigits) != chunks {
+			return nil, fmt.Errorf("invalid CV V2 fallback-range witness dimensions")
+		}
+		for chunk := 0; chunk < chunks; chunk++ {
+			position := cvFallbackLinkPositionV2(receiver, chunk, chunks)
+			values[position] = witness.ScalarDigits[chunk]
 		}
 	}
 	statement, err := cvFallbackRangeStatementV2(context, dealerID, offers, receiverPublicKeys, linkProof)
@@ -119,11 +117,11 @@ func cvFallbackRangeStatementV2(
 		cvWriteUint64(&wire, uint64(offer.ReceiverIndex))
 		cvWritePoint(&wire, &receiverPublicKeys[i])
 		cvWritePoint(&wire, &offer.Evaluation)
-		for lane := 0; lane < 2; lane++ {
-			for chunk := range offer.Lanes[lane].Chunks {
-				cvWriteCiphertext(&wire, &offer.Lanes[lane].Chunks[chunk])
-			}
+		_ = cvWriteUint32(&wire, len(offer.ScalarChunks))
+		for chunk := range offer.ScalarChunks {
+			cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
 		}
+		cvWriteCiphertext(&wire, &offer.Blinding)
 	}
 	_ = cvWriteBytes(&wire, linkWire)
 	return hashBytes([]byte(cvFallbackRangeStatementDomainV2), wire.Bytes()), nil
@@ -151,7 +149,7 @@ func cvDecodeFallbackRangeProofV2(
 	if err != nil || fallbackCount <= 0 || fallbackCount > cvNewFaultBoundFromContextV2(context) {
 		return nil, fmt.Errorf("invalid CV V2 fallback-range decode parameters")
 	}
-	total := fallbackCount * 2 * chunks
+	total := fallbackCount * chunks
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(cvFallbackRangeWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvFallbackRangeWireDomainV2)) {

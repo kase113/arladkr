@@ -78,6 +78,19 @@ func TestCVPoolV2FreezesFirstPoolAndVerifiesControlCertificate(t *testing.T) {
 	if err := cvVerifyPoolCertificateV2(pool, certificate, control); err != nil {
 		t.Fatalf("verify V2 pool certificate: %v", err)
 	}
+	shareWire, err := cvPoolCertificateShareV2CanonicalBytes(&cvPoolCertificateShareV2{
+		ProposerID: pool.ProposerID, PoolDigest: pool.Digest, Signature: shares[cfg.OldCommittee[0]],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedShare, err := cvDecodePoolCertificateShareV2(shareWire)
+	if err != nil || decodedShare.ProposerID != pool.ProposerID || !bytes.Equal(decodedShare.PoolDigest, pool.Digest) {
+		t.Fatalf("round-trip V2 pool certificate share: %v", err)
+	}
+	if _, err := cvDecodePoolCertificateShareV2(append(append([]byte(nil), shareWire...), 0)); err == nil {
+		t.Fatal("accepted trailing V2 pool certificate share bytes")
+	}
 
 	var slot cvPoolSlotStateV2
 	if err := slot.observePool(pool); err != nil || slot.observePool(pool) != nil {

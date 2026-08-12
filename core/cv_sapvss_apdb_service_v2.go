@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-const cvAPDBStoredShareWireDomainV2 = "ARL-CV-sAPVSS/v2/apdb-stored-share"
+const cvAPDBStoredShareWireDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/apdb-stored-share"
 
 type cvAPDBStoredShareV2 struct {
 	InstanceDigest []byte

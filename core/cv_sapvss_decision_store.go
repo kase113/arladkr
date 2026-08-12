@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const cvDecisionSignRecordV2Domain = "ARL-CV-sAPVSS/v2/decision-sign-record"
+const cvDecisionSignRecordV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/decision-sign-record"
 
 type cvDecisionSignStoreV2 struct {
 	root string
@@ -17,7 +17,7 @@ func newCVDecisionSignStoreV2(root string) (*cvDecisionSignStoreV2, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("empty CV V2 decision-sign store root")
 	}
-	store := &cvDecisionSignStoreV2{root: filepath.Join(root, "decision-sign-v2")}
+	store := &cvDecisionSignStoreV2{root: filepath.Join(root, "decision-sign-v2-scalar-group")}
 	if err := cvEnsurePrivateStoreDir(store.root); err != nil {
 		return nil, err
 	}

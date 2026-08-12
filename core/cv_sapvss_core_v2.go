@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	cvLeafContextWireDomainV2 = "ARL-CV-sAPVSS/v2/leaf-context"
-	cvCoreProofWireDomainV2   = "ARL-CV-sAPVSS/v2/core-proof"
-	cvCoreProofChallengeV2    = "ARL-CV-sAPVSS/v2/core-proof/challenge"
+	cvLeafContextWireDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/leaf-context"
+	cvCoreProofWireDomainV2   = "ARL-CV-sAPVSS/v2-scalar-group/core-proof"
+	cvCoreProofChallengeV2    = "ARL-CV-sAPVSS/v2-scalar-group/core-proof/challenge"
 )
 
 type cvLeafContextV2 struct {

@@ -60,7 +60,7 @@ type cvOldCommitteeKeyBundleV2 struct {
 }
 
 func cvV2ThresholdSecretPath(dir, role string, member int) string {
-	return filepath.Join(dir, fmt.Sprintf("old-node-%d-%s.scalar", member, role))
+	return filepath.Join(dir, fmt.Sprintf("old-node-%d-v2-%s.scalar", member, role))
 }
 
 func cvGenerateOldCommitteeKeyBundleV2(

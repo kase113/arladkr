@@ -109,3 +109,18 @@ func TestCVDecisionSignStoreV2RejectsNonLocalSignerWithoutRecord(t *testing.T) {
 		t.Fatalf("failed signing attempt persisted a decision record: %v", err)
 	}
 }
+
+func TestCVDecisionShareV2StrictCodec(t *testing.T) {
+	share := &cvDecisionShareV2{Statement: hashBytes([]byte("decision statement")), Signature: []byte{1, 2, 3}}
+	wire, err := cvDecisionShareV2CanonicalBytes(share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeDecisionShareV2(wire)
+	if err != nil || !bytes.Equal(decoded.Statement, share.Statement) || !bytes.Equal(decoded.Signature, share.Signature) {
+		t.Fatalf("round-trip CV V2 decision share: %v", err)
+	}
+	if _, err := cvDecodeDecisionShareV2(append(append([]byte(nil), wire...), 0)); err == nil {
+		t.Fatal("accepted trailing CV V2 decision share bytes")
+	}
+}

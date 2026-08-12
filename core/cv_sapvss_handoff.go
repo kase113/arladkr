@@ -6,10 +6,10 @@ import (
 )
 
 const (
-	cvHandoffV2Domain                  = "ARL-CV-sAPVSS/v2/handoff"
-	cvHandoffDigestV2Domain            = "ARL-CV-sAPVSS/v2/handoff-digest"
-	cvDecisionCertificateV2Domain      = "ARL-CV-sAPVSS/v2/decide"
-	cvAggregateRecoveryRequestV2Domain = "ARL-CV-sAPVSS/v2/aggregate-recovery-request"
+	cvHandoffV2Domain                  = "ARL-CV-sAPVSS/v2-scalar-group/handoff"
+	cvHandoffDigestV2Domain            = "ARL-CV-sAPVSS/v2-scalar-group/handoff-digest"
+	cvDecisionCertificateV2Domain      = "ARL-CV-sAPVSS/v2-scalar-group/decide"
+	cvAggregateRecoveryRequestV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/aggregate-recovery-request"
 )
 
 // cvHandoffV2 is the only agreement artifact intended to cross from the old

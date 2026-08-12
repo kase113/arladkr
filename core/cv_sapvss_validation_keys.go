@@ -17,8 +17,8 @@ import (
 const (
 	cvValidatorRegistryV2Version  = 2
 	cvValidatorRegistryV2Filename = "validator-registry-v2.json"
-	cvValidatorRegistryV2Domain   = "ARL-CV-sAPVSS/v2/validator-registry"
-	cvValidatorPoPDomain          = "ARL-CV-sAPVSS/v2/validator-pop"
+	cvValidatorRegistryV2Domain   = "ARL-CV-sAPVSS/v2-scalar-group/validator-registry"
+	cvValidatorPoPDomain          = "ARL-CV-sAPVSS/v2-scalar-group/validator-pop"
 )
 
 // cvValidatorRegistryEntryV2 contains a validator's independent BLS key. It

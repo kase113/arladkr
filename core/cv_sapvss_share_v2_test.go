@@ -11,14 +11,18 @@ import (
 func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 	aggregate, context, params, receivers := cvAggregateForShareV2Fixture(t)
 	outputs := make([]*cvScalarShareOutputV2, len(context.NewRoster))
+	scalars := make([]fr.Element, len(context.NewRoster))
 	for i, receiverID := range context.NewRoster {
 		var err error
-		outputs[i], err = cvDecryptAggregateShareV2(
+		scalars[i], outputs[i], err = cvDecryptAggregateShareV2(
 			aggregate, context, params, receiverID, i+1, &receivers.encryptionPublicKeys[i],
 			receivers.localEncryptionSecrets[receiverID],
 		)
 		if err != nil {
 			t.Fatalf("decrypt aggregate share %d: %v", i+1, err)
+		}
+		if want := cvPointTimes(&genG1, &scalars[i]); !want.Equal(&outputs[i].Y) {
+			t.Fatalf("local scalar %d does not match public share", i+1)
 		}
 		if err := cvVerifyAggregateShareV2(
 			outputs[i], aggregate, context, params, &receivers.encryptionPublicKeys[i],
@@ -62,7 +66,7 @@ func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 
 	var wrongSecret fr.Element
 	wrongSecret.SetOne()
-	if _, err := cvDecryptAggregateShareV2(
+	if _, _, err := cvDecryptAggregateShareV2(
 		aggregate, context, params, context.NewRoster[0], 1, &receivers.encryptionPublicKeys[0], wrongSecret,
 	); err == nil {
 		t.Fatal("accepted wrong CV V2 aggregate-share decryption secret")
@@ -81,6 +85,37 @@ func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 	if err := cvVerifyAggregateShareV2(&badResponse, aggregate, context, params, &receivers.encryptionPublicKeys[0]); err == nil {
 		t.Fatal("accepted mutated CV V2 aggregate-share response")
 	}
+	badScalarResponse := *outputs[0]
+	badScalarResponse.Proof.ScalarResponse.Add(&badScalarResponse.Proof.ScalarResponse, &one)
+	if err := cvVerifyAggregateShareV2(&badScalarResponse, aggregate, context, params, &receivers.encryptionPublicKeys[0]); err == nil {
+		t.Fatal("accepted mutated CV V2 scalar-knowledge response")
+	}
+	var wrongReceiverSecret fr.Element
+	if _, err := wrongReceiverSecret.SetRandom(); err != nil {
+		t.Fatal(err)
+	}
+	wrongReceiverKey, err := cvReceiverPublicKey(wrongReceiverSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cvVerifyAggregateShareV2(outputs[0], aggregate, context, params, &wrongReceiverKey); err == nil {
+		t.Fatal("accepted CV V2 aggregate-share proof under another receiver key")
+	}
+
+	badBlindingAggregate := cvCloneAggregateForShareV2(aggregate)
+	badBlindingAggregate.Receivers[0].Blinding.c.Add(&badBlindingAggregate.Receivers[0].Blinding.c, &genG1)
+	unsigned, err := cvAggregateV2UnsignedCanonicalBytes(badBlindingAggregate, context, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badBlindingAggregate.Digest = hashBytes([]byte(cvAggregateDigestV2Domain), unsigned)
+	replayedBlinding := *outputs[0]
+	replayedBlinding.AggregateDigest = append([]byte(nil), badBlindingAggregate.Digest...)
+	if err := cvVerifyAggregateShareV2(
+		&replayedBlinding, badBlindingAggregate, context, params, &receivers.encryptionPublicKeys[0],
+	); err == nil {
+		t.Fatal("replayed CV V2 aggregate-share proof after blinding ciphertext mutation")
+	}
 
 	outOfRange := cvCloneAggregateForShareV2(aggregate)
 	_, bound, _, err := cvProfile(context.Profile)
@@ -89,10 +124,10 @@ func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 	}
 	var excessivePoint = genG1
 	excessivePoint.ScalarMultiplication(&genG1, new(big.Int).SetUint64(bound+1))
-	outOfRange.Receivers[0].Lanes[0].Chunks[0].c.Add(
-		&outOfRange.Receivers[0].Lanes[0].Chunks[0].c, &excessivePoint,
+	outOfRange.Receivers[0].ScalarChunks[0].c.Add(
+		&outOfRange.Receivers[0].ScalarChunks[0].c, &excessivePoint,
 	)
-	unsigned, err := cvAggregateV2UnsignedCanonicalBytes(outOfRange, context, params)
+	unsigned, err = cvAggregateV2UnsignedCanonicalBytes(outOfRange, context, params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +139,7 @@ func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 	); err == nil {
 		t.Fatal("replayed CV V2 aggregate-share proof onto mutated ciphertext lanes")
 	}
-	if _, err := cvDecryptAggregateShareV2(
+	if _, _, err := cvDecryptAggregateShareV2(
 		outOfRange, context, params, context.NewRoster[0], 1, &receivers.encryptionPublicKeys[0],
 		receivers.localEncryptionSecrets[context.NewRoster[0]],
 	); err == nil {
@@ -113,7 +148,7 @@ func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 
 	wrongDegree := *context
 	wrongDegree.SharingDegree--
-	if _, err := cvDecryptAggregateShareV2(
+	if _, _, err := cvDecryptAggregateShareV2(
 		aggregate, &wrongDegree, params, wrongDegree.NewRoster[0], 1, &receivers.encryptionPublicKeys[0],
 		receivers.localEncryptionSecrets[wrongDegree.NewRoster[0]],
 	); err == nil {
@@ -152,11 +187,10 @@ func cvCloneAggregateForShareV2(aggregate *cvAggregateV2) *cvAggregateV2 {
 	cloned.CoefficientCommitments = append([]bls12381.G1Affine(nil), aggregate.CoefficientCommitments...)
 	cloned.Receivers = append([]cvAggregateReceiverV2(nil), aggregate.Receivers...)
 	for i := range cloned.Receivers {
-		for lane := 0; lane < 2; lane++ {
-			cloned.Receivers[i].Lanes[lane].Chunks = append(
-				[]cvElGamalCiphertext(nil), aggregate.Receivers[i].Lanes[lane].Chunks...,
-			)
-		}
+		cloned.Receivers[i].ScalarChunks = append(
+			[]cvElGamalCiphertext(nil), aggregate.Receivers[i].ScalarChunks...,
+		)
+		cloned.Receivers[i].Blinding = aggregate.Receivers[i].Blinding
 	}
 	return &cloned
 }

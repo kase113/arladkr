@@ -117,6 +117,8 @@ func main() {
 		f                        = flag.Int("f", 1, "common default Byzantine threshold for both committees")
 		fOld                     = flag.Int("f-old", -1, "old-committee Byzantine threshold (-1 = use --f)")
 		fNew                     = flag.Int("f-new", -1, "new-committee Byzantine threshold (-1 = use --f)")
+		cvProposerSample         = flag.Int("cv-proposer-sample", 3, "CV V2 eligibility proposer sample size")
+		cvValidatorSample        = flag.Int("cv-validator-sample", 3, "CV V2 aggregate validator sample size")
 		kappa                    = flag.Int("kappa", 0, "aggregate dealer count (0 = f_old+1; other values are rejected)")
 		runs                     = flag.Int("runs", 3, "number of benchmark runs")
 		epochs                   = flag.Int("epochs", 1, "sequential domain-separated epochs per benchmark run")
@@ -142,7 +144,7 @@ func main() {
 		cvLocalSecretDir         = flag.String("cv-local-secret-dir", os.Getenv("RLADKR_CV_LOCAL_SECRET_DIR"), "CV local receiver secret directory")
 		cvLocalReceiverRaw       = flag.String("cv-local-receiver-ids", os.Getenv("RLADKR_LOCAL_RECEIVER_IDS"), "comma-separated local new-committee receiver IDs")
 		cvStateChainDir          = flag.String("cv-state-chain-dir", os.Getenv("RLADKR_STATE_CHAIN_DIR"), "private directory for verified CV epoch output state")
-		cvKeygenOnly             = flag.Bool("cv-keygen-only", false, "generate CV receiver, old-lock, and MVBA coin keys and exit")
+		cvKeygenOnly             = flag.Bool("cv-keygen-only", false, "generate legacy and epoch-1 CV V2 key material and exit")
 	)
 	flag.Parse()
 	if *fOld < -1 || *fNew < -1 {
@@ -230,14 +232,31 @@ func main() {
 			fmt.Fprintf(os.Stderr, "CV_KEYGEN_ERROR err=%v\n", err)
 			os.Exit(1)
 		}
+		v2KeyConfig := core.Config{
+			SID: "rladkr-go-bench", Epoch: 1,
+			OldCommittee: old, NewCommittee: newC,
+			FOld: oldFaults, FNew: newFaults,
+			OldFaults: oldFaults, NewFaults: newFaults,
+			Kappa:                effectiveKappa,
+			CVProposerSampleSize: *cvProposerSample, CVValidatorSampleSize: *cvValidatorSample,
+		}
+		if err := core.GenerateCVV2KeyMaterial(*cvPublicKeyDir, *cvLocalSecretDir, v2KeyConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "CV_V2_KEYGEN_ERROR err=%v\n", err)
+			os.Exit(1)
+		}
 		setupBundleDigest, err := core.CVSetupBundleDigest(*cvPublicKeyDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "CV_KEYGEN_ERROR err=%v\n", err)
 			os.Exit(1)
 		}
+		v2SetupBundleDigest, err := core.CVV2SetupBundleDigest(*cvPublicKeyDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CV_V2_KEYGEN_ERROR err=%v\n", err)
+			os.Exit(1)
+		}
 		fmt.Printf(
-			"CV_KEYGEN_OK public_dir=%s secret_dir=%s receivers=%d old_lock_threshold=%d mvba_coin_threshold=%d setup_bundle_digest=%s\n",
-			*cvPublicKeyDir, *cvLocalSecretDir, len(newC), len(old)-oldFaults, oldFaults+1, setupBundleDigest,
+			"CV_KEYGEN_OK public_dir=%s secret_dir=%s receivers=%d old_lock_threshold=%d mvba_coin_threshold=%d v2_epoch=1 setup_bundle_digest=%s v2_setup_bundle_digest=%s\n",
+			*cvPublicKeyDir, *cvLocalSecretDir, len(newC), len(old)-oldFaults, oldFaults+1, setupBundleDigest, v2SetupBundleDigest,
 		)
 		return
 	}
@@ -264,6 +283,10 @@ func main() {
 			NewCommittee:                newC,
 			FOld:                        oldFaults,
 			FNew:                        newFaults,
+			OldFaults:                   oldFaults,
+			NewFaults:                   newFaults,
+			CVProposerSampleSize:        *cvProposerSample,
+			CVValidatorSampleSize:       *cvValidatorSample,
 			Kappa:                       effectiveKappa,
 			AgreementTransport:          *transport,
 			AgreementBindHost:           *bindHost,
@@ -311,6 +334,10 @@ func main() {
 				NewCommittee:                newC,
 				FOld:                        oldFaults,
 				FNew:                        newFaults,
+				OldFaults:                   oldFaults,
+				NewFaults:                   newFaults,
+				CVProposerSampleSize:        *cvProposerSample,
+				CVValidatorSampleSize:       *cvValidatorSample,
 				Kappa:                       effectiveKappa,
 				AgreementTransport:          *transport,
 				AgreementBindHost:           *bindHost,

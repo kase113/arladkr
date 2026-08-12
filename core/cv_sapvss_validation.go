@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	cvValidationStatementV2Domain   = "ARL-CV-sAPVSS/v2/validation-statement"
-	cvValidationCertificateV2Domain = "ARL-CV-sAPVSS/v2/validation-certificate"
+	cvValidationStatementV2Domain   = "ARL-CV-sAPVSS/v2-scalar-group/validation-statement"
+	cvValidationCertificateV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/validation-certificate"
 )
 
 // cvValidationCertificateV2 certifies one aggregate object digest. The

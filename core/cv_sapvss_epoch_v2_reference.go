@@ -8,7 +8,7 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
-const cvComponentPayloadDigestV2Domain = "ARL-CV-sAPVSS/v2/component-payload"
+const cvComponentPayloadDigestV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/component-payload"
 
 // cvReferenceEpochInputV2 contains the cryptographic material used by the
 // deterministic, in-memory V2 experiment. Leaves are supplied by the dealers;
@@ -62,6 +62,7 @@ type cvReferenceEpochResultV2 struct {
 	HandoffWire        []byte
 	RecoveredAggregate *cvAggregateV2
 	ShareOutputs       []*cvScalarShareOutputV2
+	localScalarShares  map[int][]byte
 	PublicKey          bls12381.G1Affine
 	Timings            cvReferenceEpochTimingsV2
 }
@@ -357,18 +358,21 @@ func cvRunReferenceEpochV2(input cvReferenceEpochInputV2) (*cvReferenceEpochResu
 
 	phase = time.Now()
 	result.ShareOutputs = make([]*cvScalarShareOutputV2, len(input.Context.NewRoster))
+	result.localScalarShares = make(map[int][]byte, len(input.Context.NewRoster))
 	for i, receiverID := range input.Context.NewRoster {
 		secret, ok := input.Receivers.localEncryptionSecrets[receiverID]
 		if !ok {
 			return nil, fmt.Errorf("reference V2 receiver %d lacks decryption secret", receiverID)
 		}
-		output, err := cvDecryptAggregateShareV2(
+		scalar, output, err := cvDecryptAggregateShareV2(
 			recoveredAggregate, input.Context, input.Params, receiverID, i+1,
 			&input.Receivers.encryptionPublicKeys[i], secret,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("reference V2 receiver %d aggregate share: %w", receiverID, err)
 		}
+		encodedScalar := scalar.Bytes()
+		result.localScalarShares[receiverID] = append([]byte(nil), encodedScalar[:]...)
 		wire, err := cvScalarShareOutputV2CanonicalBytes(output)
 		if err != nil {
 			return nil, err

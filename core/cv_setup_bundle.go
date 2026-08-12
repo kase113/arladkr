@@ -11,12 +11,26 @@ import (
 // CVSetupBundleDigest identifies the public trusted-setup bundle shared by
 // every process. Owner-local secret contents are deliberately not included.
 func CVSetupBundleDigest(publicDir string) (string, error) {
+	return cvSetupBundleDigest(publicDir, "ARL-ADKR/CV-SETUP-BUNDLE/v1\x00", []string{
+		cvReceiverRegistryFilename, cvOldLockRegistryFilename, cvMVBACoinRegistryFilename,
+	})
+}
+
+// CVV2SetupBundleDigest identifies the three epoch-bound public registries
+// used by the scalar/group V2 protocol.
+func CVV2SetupBundleDigest(publicDir string) (string, error) {
+	return cvSetupBundleDigest(publicDir, "ARL-ADKR/CV-V2-SETUP-BUNDLE/v1\x00", []string{
+		cvReceiverRegistryV2Filename, cvValidatorRegistryV2Filename, cvOldCommitteeKeyBundleV2Filename,
+	})
+}
+
+func cvSetupBundleDigest(publicDir, domain string, names []string) (string, error) {
 	if publicDir == "" {
 		return "", fmt.Errorf("CV setup public directory is empty")
 	}
 	h := sha256.New()
-	_, _ = h.Write([]byte("ARL-ADKR/CV-SETUP-BUNDLE/v1\x00"))
-	for _, name := range []string{cvReceiverRegistryFilename, cvOldLockRegistryFilename, cvMVBACoinRegistryFilename} {
+	_, _ = h.Write([]byte(domain))
+	for _, name := range names {
 		path := filepath.Join(publicDir, name)
 		info, err := os.Lstat(path)
 		if err != nil {

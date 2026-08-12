@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	cvAgreementObjectV2Domain   = "ARL-CV-sAPVSS/v2/agreement-object"
+	cvAgreementObjectV2Domain   = "ARL-CV-sAPVSS/v2-scalar-group/agreement-object"
 	cvMaxAgreementObjectV2Bytes = cvMaxNetworkPayloadBytes
 )
 

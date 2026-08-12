@@ -14,8 +14,8 @@ const (
 	cvNetworkAuthV2Version      = byte(2)
 	cvNetworkAuthV2OldAlgorithm = byte(1)
 	cvNetworkAuthV2NewAlgorithm = byte(2)
-	cvNetworkAuthV2Domain       = "ARL-CV-sAPVSS/v2/network-auth"
-	cvNetworkAuthV2OldBLSDomain = "ARL-CV-sAPVSS/v2/network-auth/old-bls"
+	cvNetworkAuthV2Domain       = "ARL-CV-sAPVSS/v2-scalar-group/network-auth"
+	cvNetworkAuthV2OldBLSDomain = "ARL-CV-sAPVSS/v2-scalar-group/network-auth/old-bls"
 	cvNetworkAuthV2HeaderBytes  = 1 + 1 + 4
 )
 
@@ -153,7 +153,7 @@ func cvNetworkAuthDigestV2(sid string, epoch uint64, from, to int, tag string, e
 
 func cvV2ReceiverOriginatedTag(tag string) bool {
 	switch tag {
-	case apvssTagLaneACK, cvTagAggregateRecoverGetV2:
+	case apvssTagLaneACK, cvTagLaneACKV2, cvTagAggregateRecoverGetV2, cvTagAggregateShareV2:
 		return true
 	default:
 		return false

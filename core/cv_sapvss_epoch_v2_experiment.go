@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
@@ -42,7 +43,19 @@ type CVV2ReferenceExperimentResult struct {
 	AggregateDigest   string               `json:"aggregate_digest"`
 	HandoffDigest     string               `json:"handoff_digest"`
 	PublicKey         string               `json:"public_key"`
+	Metrics           CVV2ReferenceMetrics `json:"metrics"`
 	Timings           CVV2ReferenceTimings `json:"timings"`
+}
+
+type CVV2ReferenceMetrics struct {
+	ComponentScalarCiphertextBytes   int `json:"component_scalar_ciphertext_bytes"`
+	ComponentBlindingCiphertextBytes int `json:"component_blinding_ciphertext_bytes"`
+	ComponentOwnershipProofBytes     int `json:"component_ownership_proof_bytes"`
+	FallbackLinkProofBytes           int `json:"fallback_link_proof_bytes"`
+	FallbackRangeProofBytes          int `json:"fallback_range_proof_bytes"`
+	ComponentLeafWireBytes           int `json:"component_leaf_wire_bytes"`
+	AggregatePayloadBytes            int `json:"aggregate_payload_bytes"`
+	AggregateShareProofBytes         int `json:"aggregate_share_proof_bytes"`
 }
 
 // RunCVV2ReferenceExperiment builds and executes one all-ACK V2 epoch using
@@ -146,6 +159,10 @@ func RunCVV2ReferenceExperiment(cfg Config, scratchRoot string) (*CVV2ReferenceE
 		return nil, err
 	}
 	publicKey := epoch.PublicKey.Bytes()
+	metrics, err := cvReferenceMetricsV2(epoch, context)
+	if err != nil {
+		return nil, err
+	}
 	return &CVV2ReferenceExperimentResult{
 		Protocol: cvSAPVSSV2ProtocolVersion, SID: c.SID, Epoch: uint64(c.Epoch),
 		OldNodes: len(c.OldCommittee), OldFaults: params.oldFaults,
@@ -156,6 +173,7 @@ func RunCVV2ReferenceExperiment(cfg Config, scratchRoot string) (*CVV2ReferenceE
 		AggregateDigest:   hex.EncodeToString(epoch.Aggregate.Digest),
 		HandoffDigest:     hex.EncodeToString(handoffDigest),
 		PublicKey:         hex.EncodeToString(publicKey[:]),
+		Metrics:           metrics,
 		Timings: CVV2ReferenceTimings{
 			KeySetup: millisecondsV2(keySetup), LeafGeneration: millisecondsV2(leafGeneration),
 			Components: millisecondsV2(epoch.Timings.Components), Pool: millisecondsV2(epoch.Timings.Pool),
@@ -165,6 +183,57 @@ func RunCVV2ReferenceExperiment(cfg Config, scratchRoot string) (*CVV2ReferenceE
 			ReferenceEpoch: millisecondsV2(epoch.Timings.Total), Total: millisecondsV2(time.Since(started)),
 		},
 	}, nil
+}
+
+func cvReferenceMetricsV2(
+	epoch *cvReferenceEpochResultV2, context *cvLeafContextV2,
+) (CVV2ReferenceMetrics, error) {
+	if epoch == nil || context == nil {
+		return CVV2ReferenceMetrics{}, fmt.Errorf("invalid V2 reference metrics input")
+	}
+	var metrics CVV2ReferenceMetrics
+	const ciphertextBytes = 2 * bls12381.SizeOfG1AffineCompressed
+	for i := range epoch.Components {
+		component := &epoch.Components[i]
+		metrics.ComponentLeafWireBytes += len(component.Payload)
+		if component.Leaf == nil {
+			return CVV2ReferenceMetrics{}, fmt.Errorf("nil V2 reference metric component")
+		}
+		for j := range component.Leaf.Receivers {
+			receiver := &component.Leaf.Receivers[j]
+			metrics.ComponentScalarCiphertextBytes += len(receiver.Offer.ScalarChunks) * ciphertextBytes
+			metrics.ComponentBlindingCiphertextBytes += ciphertextBytes
+			if receiver.ACK != nil {
+				proofWire, err := cvOwnershipProofV2CanonicalBytes(&receiver.ACK.Ownership, context)
+				if err != nil {
+					return CVV2ReferenceMetrics{}, err
+				}
+				metrics.ComponentOwnershipProofBytes += len(proofWire)
+			}
+		}
+		if component.Leaf.Fallback != nil {
+			linkWire, err := cvFallbackLinkProofV2CanonicalBytes(
+				&component.Leaf.Fallback.Link, context, len(component.Leaf.Fallback.ReceiverIndices),
+			)
+			if err != nil {
+				return CVV2ReferenceMetrics{}, err
+			}
+			rangeWire, err := cvFallbackRangeProofV2CanonicalBytes(&component.Leaf.Fallback.Range)
+			if err != nil {
+				return CVV2ReferenceMetrics{}, err
+			}
+			metrics.FallbackLinkProofBytes += len(linkWire)
+			metrics.FallbackRangeProofBytes += len(rangeWire)
+		}
+	}
+	metrics.AggregatePayloadBytes = len(epoch.AggregatePayload)
+	for _, output := range epoch.ShareOutputs {
+		if output == nil || !cvValidAggregateShareProofV2(&output.Proof) {
+			return CVV2ReferenceMetrics{}, fmt.Errorf("invalid V2 reference aggregate-share metric")
+		}
+		metrics.AggregateShareProofBytes += 4*bls12381.SizeOfG1AffineCompressed + 2*fr.Bytes
+	}
+	return metrics, nil
 }
 
 func cvBuildReferenceAllACKLeafV2(

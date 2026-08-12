@@ -5,7 +5,7 @@ import (
 	"math/big"
 )
 
-const cvSAPVSSV2ProtocolVersion = "cv-sapvss-v2"
+const cvSAPVSSV2ProtocolVersion = "cv-sapvss-v2-scalar-group"
 
 // cvV2Params is the single source of derived CV V2 thresholds. New protocol
 // code must use this structure instead of reading the legacy FOld/FNew fields.

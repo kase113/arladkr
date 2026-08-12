@@ -293,12 +293,13 @@ func TestCVSAPVSSRouterEnforcesV2HandoffRecoveryDirections(t *testing.T) {
 	}
 	transport.inject(10, Message{From: 1, To: 10, Tag: cvTagHandoffV2, Body: envelope})
 	transport.inject(10, Message{From: 2, To: 10, Tag: cvTagAggregateRecoverStoreV2, Body: envelope})
+	transport.inject(10, Message{From: 11, To: 10, Tag: cvTagAggregateShareV2, Body: envelope})
 	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagAggregateRecoverGetV2, Body: envelope})
 	transport.inject(10, Message{From: 11, To: 10, Tag: cvTagHandoffV2, Body: envelope})
 	transport.inject(1, Message{From: 2, To: 1, Tag: cvTagAggregateRecoverGetV2, Body: envelope})
 	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagAggregateRecoverStoreV2, Body: envelope})
 
-	for _, expected := range []string{cvTagHandoffV2, cvTagAggregateRecoverStoreV2} {
+	for _, expected := range []string{cvTagHandoffV2, cvTagAggregateRecoverStoreV2, cvTagAggregateShareV2} {
 		select {
 		case msg := <-newInbox:
 			if msg.Tag != expected {

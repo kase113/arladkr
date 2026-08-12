@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestCVACKV2SignsOnlyAfterTwoLaneVerificationAndRoundTrips(t *testing.T) {
+func TestCVACKV2SignsOnlyAfterScalarGroupVerificationAndRoundTrips(t *testing.T) {
 	context, dealer, receiverID, receiverIndex, encryptionSecret, encryptionPublic, scalar, blinding :=
 		cvReceiverLanesV2Fixture(t)
 	offer, _, err := cvEncryptReceiverLanesV2(
@@ -25,8 +25,13 @@ func TestCVACKV2SignsOnlyAfterTwoLaneVerificationAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recoveredScalar.Equal(&scalar) || !recoveredBlinding.Equal(&blinding) {
-		t.Fatal("ACK path did not verify both decrypted lane openings")
+	h, err := cvPedersenBase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBlinding := cvPointTimes(&h, &blinding)
+	if !recoveredScalar.Equal(&scalar) || !recoveredBlinding.Equal(&wantBlinding) {
+		t.Fatal("ACK path did not verify scalar/group openings")
 	}
 	if err := cvVerifyACKV2(context, dealer, offer, &encryptionPublic, identityPublic, evidence); err != nil {
 		t.Fatalf("verify V2 ACK: %v", err)
@@ -98,15 +103,13 @@ func TestCVACKV2BindsCiphertextsOwnershipAndIdentityRegistry(t *testing.T) {
 	}
 	badOwnership := *evidence
 	badOwnership.Ownership = cvCloneOwnershipProofV2(&evidence.Ownership)
-	badOwnership.Ownership.CoinResponses[0].SetZero()
+	badOwnership.Ownership.ScalarCoinResponses[0].SetZero()
 	if err := cvVerifyACKV2(context, dealer, offer, &encryptionPublic, identityPublic, &badOwnership); err == nil {
 		t.Fatal("accepted ACK evidence carrying different ownership proof")
 	}
 
 	badOffer := *offer
-	badOffer.Lanes = offer.Lanes
-	badOffer.Lanes[1].Chunks = append([]cvElGamalCiphertext(nil), offer.Lanes[1].Chunks...)
-	badOffer.Lanes[1].Chunks[0].c.Add(&badOffer.Lanes[1].Chunks[0].c, &genG1)
+	badOffer.Blinding.c.Add(&badOffer.Blinding.c, &genG1)
 	if err := cvVerifyACKV2(context, dealer, &badOffer, &encryptionPublic, identityPublic, evidence); err == nil {
 		t.Fatal("accepted ACK after ciphertext mutation")
 	}
@@ -134,7 +137,7 @@ func TestCVACKV2RejectsEncryptionSecretAsIdentitySecretAndInvalidOfferBeforeSign
 	}
 	badOffer := *offer
 	badOffer.Ownership = cvCloneOwnershipProofV2(&offer.Ownership)
-	badOffer.Ownership.DigitResponses[0].SetZero()
+	badOffer.Ownership.ScalarDigitResponses[0].SetZero()
 	if _, _, _, err := cvVerifyDecryptAndSignACKV2(
 		context, dealer, &badOffer, &encryptionPublic, encryptionSecret,
 		identitySecret.Public().(ed25519.PublicKey), identitySecret,

@@ -37,6 +37,18 @@ const (
 	cvTagAPDBRecoverStoreV2      = "CV_V2_APDB_RECOVER_STORE"
 	cvTagAggregateRecoverGetV2   = "CV_V2_AGG_RECOVER_GET"
 	cvTagAggregateRecoverStoreV2 = "CV_V2_AGG_RECOVER_STORE"
+	cvTagCoinShareV2             = "CV_V2_COIN_SHARE"
+	cvTagPoolOfferV2             = "CV_V2_POOL_OFFER"
+	cvTagPoolCertShareV2         = "CV_V2_POOL_CERT_SHARE"
+	cvTagPoolCertV2              = "CV_V2_POOL_CERT"
+	cvTagValidationRequestV2     = "CV_V2_VALIDATION_REQUEST"
+	cvTagValidationSignatureV2   = "CV_V2_VALIDATION_SIGNATURE"
+	cvTagValidationResultV2      = "CV_V2_VALIDATION_RESULT"
+	cvTagDecisionShareV2         = "CV_V2_DECISION_SHARE"
+	cvTagAggregateShareV2        = "CV_V2_AGGREGATE_SHARE"
+	cvTagLaneOfferV2             = "CV_V2_LANE_OFFER"
+	cvTagLaneACKV2               = "CV_V2_LANE_ACK"
+	cvTagComponentRefV2          = "CV_V2_COMPONENT_REF"
 )
 
 func cvAllowedNetworkTag(tag string) bool {
@@ -64,7 +76,18 @@ func cvAllowedNetworkTag(tag string) bool {
 		cvTagAPDBRecoverGetV2,
 		cvTagAPDBRecoverStoreV2,
 		cvTagAggregateRecoverGetV2,
-		cvTagAggregateRecoverStoreV2:
+		cvTagAggregateRecoverStoreV2,
+		cvTagCoinShareV2,
+		cvTagPoolOfferV2,
+		cvTagPoolCertShareV2,
+		cvTagPoolCertV2,
+		cvTagValidationRequestV2,
+		cvTagValidationSignatureV2,
+		cvTagValidationResultV2,
+		cvTagDecisionShareV2,
+		cvTagAggregateShareV2:
+		return true
+	case cvTagLaneOfferV2, cvTagLaneACKV2, cvTagComponentRefV2:
 		return true
 	default:
 		return false
@@ -295,18 +318,22 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 		return Message{}, false
 	}
 	switch msg.Tag {
-	case apvssTagLaneOffer, cvTagHandoffV2, cvTagAggregateRecoverStoreV2:
+	case apvssTagLaneOffer, cvTagLaneOfferV2, cvTagHandoffV2, cvTagAggregateRecoverStoreV2:
 		if _, ok := r.oldNodes[msg.From]; !ok {
 			return Message{}, false
 		}
 		if _, ok := r.newNodes[msg.To]; !ok {
 			return Message{}, false
 		}
-	case apvssTagLaneACK, cvTagAggregateRecoverGetV2:
+	case apvssTagLaneACK, cvTagLaneACKV2, cvTagAggregateRecoverGetV2:
 		if _, ok := r.newNodes[msg.From]; !ok {
 			return Message{}, false
 		}
-		if _, ok := r.oldNodes[msg.To]; !ok {
+	case cvTagAggregateShareV2:
+		if _, ok := r.newNodes[msg.From]; !ok {
+			return Message{}, false
+		}
+		if _, ok := r.newNodes[msg.To]; !ok {
 			return Message{}, false
 		}
 	default:

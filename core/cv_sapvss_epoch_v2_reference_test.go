@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"path/filepath"
 	"testing"
+
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
 func TestCVReferenceEpochV2EndToEnd(t *testing.T) {
@@ -54,8 +57,22 @@ func TestCVReferenceEpochV2EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(result.Components) != params.poolSize || len(result.SelectedIndices) != params.componentCount ||
-		len(result.ShareOutputs) != len(context.NewRoster) || result.PublicKey.IsInfinity() {
+		len(result.ShareOutputs) != len(context.NewRoster) ||
+		len(result.localScalarShares) != len(context.NewRoster) || result.PublicKey.IsInfinity() {
 		t.Fatal("reference V2 epoch returned incomplete artifacts")
+	}
+	for i, receiverID := range context.NewRoster {
+		encoded := result.localScalarShares[receiverID]
+		if len(encoded) != fr.Bytes {
+			t.Fatalf("receiver %d scalar length = %d, want %d", receiverID, len(encoded), fr.Bytes)
+		}
+		var scalar fr.Element
+		if err := scalar.SetBytesCanonical(encoded); err != nil {
+			t.Fatalf("receiver %d stored non-canonical scalar: %v", receiverID, err)
+		}
+		if publicShare := cvPointTimes(&genG1, &scalar); !publicShare.Equal(&result.ShareOutputs[i].Y) {
+			t.Fatalf("receiver %d stored scalar does not match public output", receiverID)
+		}
 	}
 	if !bytes.Equal(result.Aggregate.Digest, result.RecoveredAggregate.Digest) {
 		t.Fatal("reference V2 aggregate recovery changed the aggregate digest")
@@ -73,6 +90,23 @@ func TestCVReferenceEpochV2EndToEnd(t *testing.T) {
 	}
 	if !alternate.Equal(&result.PublicKey) {
 		t.Fatal("reference V2 threshold share subsets produced different public keys")
+	}
+	metrics, err := cvReferenceMetricsV2(result, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, chunks, err := cvProfile(context.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ciphertextBytes = 2 * bls12381.SizeOfG1AffineCompressed
+	wantScalarBytes := params.poolSize * len(context.NewRoster) * chunks * ciphertextBytes
+	wantBlindingBytes := params.poolSize * len(context.NewRoster) * ciphertextBytes
+	if metrics.ComponentScalarCiphertextBytes != wantScalarBytes ||
+		metrics.ComponentBlindingCiphertextBytes != wantBlindingBytes ||
+		metrics.AggregatePayloadBytes != len(result.AggregatePayload) ||
+		metrics.FallbackLinkProofBytes != 0 || metrics.FallbackRangeProofBytes != 0 {
+		t.Fatalf("unexpected V2 scalar/group metrics: %+v", metrics)
 	}
 	if result.Timings.Total <= 0 || result.Timings.Components <= 0 || result.Timings.Shares <= 0 {
 		t.Fatal("reference V2 epoch did not record experiment phase timings")

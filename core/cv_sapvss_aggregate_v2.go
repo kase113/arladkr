@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	cvAggregateHeaderV2Domain  = "ARL-CV-sAPVSS/v2/aggregate-header"
-	cvSelectionDigestV2Domain  = "ARL-CV-sAPVSS/v2/selection-digest"
-	cvAggregateWireV2Domain    = "ARL-CV-sAPVSS/v2/aggregate"
-	cvAggregateDigestV2Domain  = "ARL-CV-sAPVSS/v2/aggregate-digest"
-	cvAggregatePayloadV2Domain = "ARL-CV-sAPVSS/v2/aggregate-payload-digest"
+	cvAggregateHeaderV2Domain  = "ARL-CV-sAPVSS/v2-scalar-group/aggregate-header"
+	cvSelectionDigestV2Domain  = "ARL-CV-sAPVSS/v2-scalar-group/selection-digest"
+	cvAggregateWireV2Domain    = "ARL-CV-sAPVSS/v2-scalar-group/aggregate"
+	cvAggregateDigestV2Domain  = "ARL-CV-sAPVSS/v2-scalar-group/aggregate-digest"
+	cvAggregatePayloadV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/aggregate-payload-digest"
 )
 
 type cvAggregateComponentV2 struct {
@@ -24,7 +24,8 @@ type cvAggregateReceiverV2 struct {
 	ReceiverID    int
 	ReceiverIndex int
 	Evaluation    bls12381.G1Affine
-	Lanes         [2]cvCipherLaneV2
+	ScalarChunks  []cvElGamalCiphertext
+	Blinding      cvElGamalCiphertext
 }
 
 // cvAggregateV2 contains only the manifest and homomorphic aggregate.
@@ -73,9 +74,9 @@ func cvAggV2(
 		return nil, err
 	}
 	for i, receiverID := range context.NewRoster {
-		aggregate.Receivers[i] = cvAggregateReceiverV2{ReceiverID: receiverID, ReceiverIndex: i + 1}
-		for lane := 0; lane < 2; lane++ {
-			aggregate.Receivers[i].Lanes[lane].Chunks = make([]cvElGamalCiphertext, chunks)
+		aggregate.Receivers[i] = cvAggregateReceiverV2{
+			ReceiverID: receiverID, ReceiverIndex: i + 1,
+			ScalarChunks: make([]cvElGamalCiphertext, chunks),
 		}
 	}
 	dealers := make(map[int]struct{}, len(leaves))
@@ -99,16 +100,16 @@ func cvAggV2(
 			target := &aggregate.Receivers[receiverIndex]
 			source := &leaf.Receivers[receiverIndex].Offer
 			target.Evaluation.Add(&target.Evaluation, &source.Evaluation)
-			for lane := 0; lane < 2; lane++ {
-				for chunk := 0; chunk < chunks; chunk++ {
-					target.Lanes[lane].Chunks[chunk].r.Add(
-						&target.Lanes[lane].Chunks[chunk].r, &source.Lanes[lane].Chunks[chunk].r,
-					)
-					target.Lanes[lane].Chunks[chunk].c.Add(
-						&target.Lanes[lane].Chunks[chunk].c, &source.Lanes[lane].Chunks[chunk].c,
-					)
-				}
+			for chunk := 0; chunk < chunks; chunk++ {
+				target.ScalarChunks[chunk].r.Add(
+					&target.ScalarChunks[chunk].r, &source.ScalarChunks[chunk].r,
+				)
+				target.ScalarChunks[chunk].c.Add(
+					&target.ScalarChunks[chunk].c, &source.ScalarChunks[chunk].c,
+				)
 			}
+			target.Blinding.r.Add(&target.Blinding.r, &source.Blinding.r)
+			target.Blinding.c.Add(&target.Blinding.c, &source.Blinding.c)
 		}
 	}
 	unsigned, err := cvAggregateV2UnsignedCanonicalBytes(aggregate, context, params)
@@ -174,21 +175,20 @@ func cvAggregateV2UnsignedCanonicalBytes(
 		cvWriteUint64(&wire, uint64(receiver.ReceiverID))
 		cvWriteUint64(&wire, uint64(receiver.ReceiverIndex))
 		cvWritePoint(&wire, &receiver.Evaluation)
-		for lane := 0; lane < 2; lane++ {
-			if len(receiver.Lanes[lane].Chunks) != chunks {
-				return nil, fmt.Errorf("invalid CV V2 aggregate lane length")
-			}
-			if err := cvWriteUint32(&wire, chunks); err != nil {
-				return nil, err
-			}
-			for chunk := range receiver.Lanes[lane].Chunks {
-				ciphertext := &receiver.Lanes[lane].Chunks[chunk]
-				if !cvValidCiphertext(ciphertext) {
-					return nil, fmt.Errorf("invalid CV V2 aggregate ciphertext")
-				}
-				cvWriteCiphertext(&wire, ciphertext)
-			}
+		if len(receiver.ScalarChunks) != chunks || !cvValidCiphertext(&receiver.Blinding) {
+			return nil, fmt.Errorf("invalid CV V2 aggregate ciphertext shape")
 		}
+		if err := cvWriteUint32(&wire, chunks); err != nil {
+			return nil, err
+		}
+		for chunk := range receiver.ScalarChunks {
+			ciphertext := &receiver.ScalarChunks[chunk]
+			if !cvValidCiphertext(ciphertext) {
+				return nil, fmt.Errorf("invalid CV V2 aggregate scalar ciphertext")
+			}
+			cvWriteCiphertext(&wire, ciphertext)
+		}
+		cvWriteCiphertext(&wire, &receiver.Blinding)
 	}
 	return wire.Bytes(), nil
 }
@@ -280,25 +280,27 @@ func cvDecodeAggregateV2(wire []byte, context *cvLeafContextV2, params cvV2Param
 		}
 		receiver := &aggregate.Receivers[i]
 		receiver.ReceiverID, receiver.ReceiverIndex, receiver.Evaluation = int(receiverID), int(receiverIndex), evaluation
-		for lane := 0; lane < 2; lane++ {
-			if err := cvReadExactCount(unsigned, chunks, "V2 aggregate lane"); err != nil {
-				return nil, err
+		if err := cvReadExactCount(unsigned, chunks, "V2 aggregate scalar chunks"); err != nil {
+			return nil, err
+		}
+		if err := cvRequireRemaining(unsigned, chunks+1, 2*bls12381.SizeOfG1AffineCompressed, "V2 aggregate ciphertexts"); err != nil {
+			return nil, err
+		}
+		receiver.ScalarChunks = make([]cvElGamalCiphertext, chunks)
+		for chunk := 0; chunk < chunks; chunk++ {
+			rPoint, pointErr := unsigned.point()
+			if pointErr != nil {
+				return nil, fmt.Errorf("invalid CV V2 aggregate scalar ciphertext R")
 			}
-			if err := cvRequireRemaining(unsigned, chunks, 2*bls12381.SizeOfG1AffineCompressed, "V2 aggregate ciphertexts"); err != nil {
-				return nil, err
+			cPoint, pointErr := unsigned.point()
+			if pointErr != nil {
+				return nil, fmt.Errorf("invalid CV V2 aggregate scalar ciphertext W")
 			}
-			receiver.Lanes[lane].Chunks = make([]cvElGamalCiphertext, chunks)
-			for chunk := 0; chunk < chunks; chunk++ {
-				rPoint, pointErr := unsigned.point()
-				if pointErr != nil {
-					return nil, fmt.Errorf("invalid CV V2 aggregate ciphertext R")
-				}
-				cPoint, pointErr := unsigned.point()
-				if pointErr != nil {
-					return nil, fmt.Errorf("invalid CV V2 aggregate ciphertext W")
-				}
-				receiver.Lanes[lane].Chunks[chunk] = cvElGamalCiphertext{r: rPoint, c: cPoint}
-			}
+			receiver.ScalarChunks[chunk] = cvElGamalCiphertext{r: rPoint, c: cPoint}
+		}
+		receiver.Blinding, err = unsigned.ciphertext()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CV V2 aggregate blinding ciphertext")
 		}
 	}
 	if unsigned.reader.Len() != 0 {

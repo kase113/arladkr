@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	cvLaneOfferWireDomainV2      = "ARL-CV-sAPVSS/v2/lane-offer"
-	cvFallbackLaneWireDomainV2   = "ARL-CV-sAPVSS/v2/fallback-lane"
-	cvOwnershipProofWireDomainV2 = "ARL-CV-sAPVSS/v2/ownership-proof"
-	cvACKWireDomainV2            = "ARL-CV-sAPVSS/v2/ack"
-	cvACKStatementDomainV2       = "ARL-CV-sAPVSS/v2/ack-statement"
-	cvCiphertextDigestDomainV2   = "ARL-CV-sAPVSS/v2/ciphertexts"
+	cvLaneOfferWireDomainV2      = "ARL-CV-sAPVSS/v2-scalar-group/lane-offer"
+	cvFallbackLaneWireDomainV2   = "ARL-CV-sAPVSS/v2-scalar-group/fallback-lane"
+	cvOwnershipProofWireDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/ownership-proof"
+	cvACKWireDomainV2            = "ARL-CV-sAPVSS/v2-scalar-group/ack"
+	cvACKStatementDomainV2       = "ARL-CV-sAPVSS/v2-scalar-group/ack-statement"
+	cvCiphertextDigestDomainV2   = "ARL-CV-sAPVSS/v2-scalar-group/ciphertexts"
 )
 
 type cvACKEvidenceV2 struct {
@@ -43,14 +43,13 @@ func cvFallbackLaneOfferV2CanonicalBytes(
 		return nil, err
 	}
 	cvWritePoint(&wire, &offer.Evaluation)
-	for lane := 0; lane < 2; lane++ {
-		if err := cvWriteUint32(&wire, len(offer.Lanes[lane].Chunks)); err != nil {
-			return nil, err
-		}
-		for chunk := range offer.Lanes[lane].Chunks {
-			cvWriteCiphertext(&wire, &offer.Lanes[lane].Chunks[chunk])
-		}
+	if err := cvWriteUint32(&wire, len(offer.ScalarChunks)); err != nil {
+		return nil, err
 	}
+	for chunk := range offer.ScalarChunks {
+		cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
+	}
+	cvWriteCiphertext(&wire, &offer.Blinding)
 	return wire.Bytes(), nil
 }
 
@@ -88,19 +87,23 @@ func cvDecodeFallbackLaneOfferV2(
 	if err != nil {
 		return nil, err
 	}
-	offer := &cvReceiverLaneOfferV2{ReceiverID: expectedReceiverID, ReceiverIndex: expectedReceiverIndex, Evaluation: evaluation}
-	for lane := 0; lane < 2; lane++ {
-		count, readErr := r.uint32()
-		if readErr != nil || count != chunks {
-			return nil, fmt.Errorf("invalid CV V2 fallback lane chunk count")
+	count, err := r.uint32()
+	if err != nil || count != chunks {
+		return nil, fmt.Errorf("invalid CV V2 fallback scalar chunk count")
+	}
+	offer := &cvReceiverLaneOfferV2{
+		ReceiverID: expectedReceiverID, ReceiverIndex: expectedReceiverIndex, Evaluation: evaluation,
+		ScalarChunks: make([]cvElGamalCiphertext, chunks),
+	}
+	for chunk := 0; chunk < chunks; chunk++ {
+		offer.ScalarChunks[chunk], err = r.ciphertext()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CV V2 fallback scalar ciphertext")
 		}
-		offer.Lanes[lane].Chunks = make([]cvElGamalCiphertext, chunks)
-		for chunk := 0; chunk < chunks; chunk++ {
-			offer.Lanes[lane].Chunks[chunk], err = r.ciphertext()
-			if err != nil {
-				return nil, fmt.Errorf("invalid CV V2 fallback lane ciphertext")
-			}
-		}
+	}
+	offer.Blinding, err = r.ciphertext()
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 fallback blinding ciphertext")
 	}
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV V2 fallback lane bytes")
@@ -116,20 +119,20 @@ func cvVerifyDecryptAndSignACKV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
 	identityPublicKey ed25519.PublicKey, identitySecret ed25519.PrivateKey,
-) (*cvACKEvidenceV2, fr.Element, fr.Element, error) {
+) (*cvACKEvidenceV2, fr.Element, bls12381.G1Affine, error) {
 	if len(identityPublicKey) != ed25519.PublicKeySize || len(identitySecret) != ed25519.PrivateKeySize ||
 		!bytes.Equal(identitySecret.Public().(ed25519.PublicKey), identityPublicKey) {
-		return nil, fr.Element{}, fr.Element{}, fmt.Errorf("invalid CV V2 receiver identity secret")
+		return nil, fr.Element{}, bls12381.G1Affine{}, fmt.Errorf("invalid CV V2 receiver identity secret")
 	}
 	scalar, blinding, err := cvVerifyAndDecryptReceiverLanesV2(
 		context, dealerID, offer, receiverPublicKey, receiverSecret,
 	)
 	if err != nil {
-		return nil, fr.Element{}, fr.Element{}, err
+		return nil, fr.Element{}, bls12381.G1Affine{}, err
 	}
 	statement, err := cvACKStatementV2(context, dealerID, offer)
 	if err != nil {
-		return nil, fr.Element{}, fr.Element{}, err
+		return nil, fr.Element{}, bls12381.G1Affine{}, err
 	}
 	evidence := &cvACKEvidenceV2{
 		Ownership: cvCloneOwnershipProofV2(&offer.Ownership),
@@ -181,6 +184,11 @@ func cvACKStatementV2(
 	_ = cvWriteBytes(&wire, context.ReceiverRegistryDigest)
 	cvWritePoint(&wire, &offer.Evaluation)
 	_ = cvWriteBytes(&wire, ciphertextDigest)
+	ownershipWire, err := cvOwnershipProofV2CanonicalBytes(&offer.Ownership, context)
+	if err != nil {
+		return nil, err
+	}
+	_ = cvWriteBytes(&wire, ownershipWire)
 	return hashBytes([]byte(cvACKStatementDomainV2), wire.Bytes()), nil
 }
 
@@ -194,17 +202,19 @@ func cvCiphertextDigestV2(context *cvLeafContextV2, offer *cvReceiverLaneOfferV2
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvCiphertextDigestDomainV2))
-	for lane := 0; lane < 2; lane++ {
-		if len(offer.Lanes[lane].Chunks) != chunks {
-			return nil, fmt.Errorf("invalid CV V2 ciphertext digest dimensions")
-		}
-		for chunk := range offer.Lanes[lane].Chunks {
-			if !cvValidCiphertext(&offer.Lanes[lane].Chunks[chunk]) {
-				return nil, fmt.Errorf("invalid CV V2 ciphertext")
-			}
-			cvWriteCiphertext(&wire, &offer.Lanes[lane].Chunks[chunk])
-		}
+	if len(offer.ScalarChunks) != chunks || !cvValidCiphertext(&offer.Blinding) {
+		return nil, fmt.Errorf("invalid CV V2 ciphertext digest dimensions")
 	}
+	if err := cvWriteUint32(&wire, len(offer.ScalarChunks)); err != nil {
+		return nil, err
+	}
+	for chunk := range offer.ScalarChunks {
+		if !cvValidCiphertext(&offer.ScalarChunks[chunk]) {
+			return nil, fmt.Errorf("invalid CV V2 scalar ciphertext")
+		}
+		cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
+	}
+	cvWriteCiphertext(&wire, &offer.Blinding)
 	return hashBytes([]byte(cvCiphertextDigestDomainV2), wire.Bytes()), nil
 }
 
@@ -232,17 +242,13 @@ func cvReceiverLaneOfferV2CanonicalBytes(
 		return nil, err
 	}
 	cvWritePoint(&wire, &offer.Evaluation)
-	if err := cvWriteUint32(&wire, 2); err != nil {
+	if err := cvWriteUint32(&wire, len(offer.ScalarChunks)); err != nil {
 		return nil, err
 	}
-	for lane := 0; lane < 2; lane++ {
-		if err := cvWriteUint32(&wire, len(offer.Lanes[lane].Chunks)); err != nil {
-			return nil, err
-		}
-		for chunk := range offer.Lanes[lane].Chunks {
-			cvWriteCiphertext(&wire, &offer.Lanes[lane].Chunks[chunk])
-		}
+	for chunk := range offer.ScalarChunks {
+		cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
 	}
+	cvWriteCiphertext(&wire, &offer.Blinding)
 	_ = cvWriteBytes(&wire, proofWire)
 	return wire.Bytes(), nil
 }
@@ -282,29 +288,27 @@ func cvDecodeReceiverLaneOfferV2(
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 lane offer evaluation")
 	}
-	laneCount, err := r.uint32()
-	if err != nil || laneCount != 2 {
-		return nil, fmt.Errorf("invalid CV V2 lane count")
-	}
 	chunks, err := cvChunkCount(context.Profile)
 	if err != nil {
 		return nil, err
 	}
 	offer := &cvReceiverLaneOfferV2{
 		ReceiverID: expectedReceiverID, ReceiverIndex: expectedReceiverIndex, Evaluation: evaluation,
+		ScalarChunks: make([]cvElGamalCiphertext, chunks),
 	}
-	for lane := 0; lane < 2; lane++ {
-		count, err := r.uint32()
-		if err != nil || count != chunks {
-			return nil, fmt.Errorf("invalid CV V2 lane chunk count")
+	count, err := r.uint32()
+	if err != nil || count != chunks {
+		return nil, fmt.Errorf("invalid CV V2 scalar chunk count")
+	}
+	for chunk := 0; chunk < chunks; chunk++ {
+		offer.ScalarChunks[chunk], err = r.ciphertext()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CV V2 scalar ciphertext")
 		}
-		offer.Lanes[lane].Chunks = make([]cvElGamalCiphertext, chunks)
-		for chunk := 0; chunk < chunks; chunk++ {
-			offer.Lanes[lane].Chunks[chunk], err = r.ciphertext()
-			if err != nil {
-				return nil, fmt.Errorf("invalid CV V2 lane ciphertext")
-			}
-		}
+	}
+	offer.Blinding, err = r.ciphertext()
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 blinding ciphertext")
 	}
 	proofWire, err := r.bytes(cvMaxLeafProofWireBytes)
 	if err != nil || r.reader.Len() != 0 {
@@ -330,25 +334,32 @@ func cvOwnershipProofV2CanonicalBytes(proof *cvOwnershipProofV2, context *cvLeaf
 	if err != nil {
 		return nil, err
 	}
-	total := 2 * chunks
-	if len(proof.CoinCommitments) != total || len(proof.CipherCommitments) != total ||
-		len(proof.CoinResponses) != total || len(proof.DigitResponses) != total {
+	if len(proof.ScalarCoinCommitments) != chunks || len(proof.ScalarCipherCommitments) != chunks ||
+		len(proof.ScalarCoinResponses) != chunks || len(proof.ScalarDigitResponses) != chunks ||
+		!cvValidG1(&proof.BlindingCoinCommitment, true) ||
+		!cvValidG1(&proof.BlindingCipherCommitment, true) ||
+		!cvValidG1(&proof.EvaluationCommitment, true) {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof dimensions")
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvOwnershipProofWireDomainV2))
-	if err := cvWritePointVector(&wire, proof.CoinCommitments); err != nil {
+	if err := cvWritePointVector(&wire, proof.ScalarCoinCommitments); err != nil {
 		return nil, err
 	}
-	if err := cvWritePointVector(&wire, proof.CipherCommitments); err != nil {
+	if err := cvWritePointVector(&wire, proof.ScalarCipherCommitments); err != nil {
 		return nil, err
 	}
-	if err := cvWriteScalarVector(&wire, proof.CoinResponses); err != nil {
+	cvWritePoint(&wire, &proof.BlindingCoinCommitment)
+	cvWritePoint(&wire, &proof.BlindingCipherCommitment)
+	cvWritePoint(&wire, &proof.EvaluationCommitment)
+	if err := cvWriteScalarVector(&wire, proof.ScalarCoinResponses); err != nil {
 		return nil, err
 	}
-	if err := cvWriteScalarVector(&wire, proof.DigitResponses); err != nil {
+	if err := cvWriteScalarVector(&wire, proof.ScalarDigitResponses); err != nil {
 		return nil, err
 	}
+	cvWriteScalar(&wire, &proof.BlindingCoinResponse)
+	cvWriteScalar(&wire, &proof.BlindingShareResponse)
 	return wire.Bytes(), nil
 }
 
@@ -360,31 +371,53 @@ func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnersh
 	if err != nil {
 		return nil, err
 	}
-	total := 2 * chunks
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(cvOwnershipProofWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvOwnershipProofWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof domain")
 	}
-	coinCommitments, err := cvReadExactPointVector(r, total, "V2 ownership coin commitments")
+	coinCommitments, err := cvReadExactPointVector(r, chunks, "V2 ownership scalar coin commitments")
 	if err != nil {
 		return nil, err
 	}
-	cipherCommitments, err := cvReadExactPointVector(r, total, "V2 ownership ciphertext commitments")
+	cipherCommitments, err := cvReadExactPointVector(r, chunks, "V2 ownership scalar ciphertext commitments")
 	if err != nil {
 		return nil, err
 	}
-	coinResponses, err := cvReadExactScalarVectorV2(r, total)
+	blindingCoinCommitment, err := r.point()
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 ownership blinding coin commitment")
+	}
+	blindingCipherCommitment, err := r.point()
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 ownership blinding ciphertext commitment")
+	}
+	evaluationCommitment, err := r.point()
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 ownership evaluation commitment")
+	}
+	coinResponses, err := cvReadExactScalarVectorV2(r, chunks)
 	if err != nil {
 		return nil, err
 	}
-	digitResponses, err := cvReadExactScalarVectorV2(r, total)
-	if err != nil || r.reader.Len() != 0 {
+	digitResponses, err := cvReadExactScalarVectorV2(r, chunks)
+	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof response framing")
 	}
+	blindingCoinResponse, err := r.scalar()
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 ownership blinding coin response")
+	}
+	blindingShareResponse, err := r.scalar()
+	if err != nil || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid CV V2 ownership blinding share response")
+	}
 	proof := &cvOwnershipProofV2{
-		CoinCommitments: coinCommitments, CipherCommitments: cipherCommitments,
-		CoinResponses: coinResponses, DigitResponses: digitResponses,
+		ScalarCoinCommitments: coinCommitments, ScalarCipherCommitments: cipherCommitments,
+		BlindingCoinCommitment: blindingCoinCommitment, BlindingCipherCommitment: blindingCipherCommitment,
+		EvaluationCommitment: evaluationCommitment, ScalarCoinResponses: coinResponses,
+		ScalarDigitResponses: digitResponses, BlindingCoinResponse: blindingCoinResponse,
+		BlindingShareResponse: blindingShareResponse,
 	}
 	canonical, err := cvOwnershipProofV2CanonicalBytes(proof, context)
 	if err != nil || !bytes.Equal(canonical, wire) {
@@ -439,37 +472,47 @@ func cvCloneOwnershipProofV2(proof *cvOwnershipProofV2) cvOwnershipProofV2 {
 		return cvOwnershipProofV2{}
 	}
 	return cvOwnershipProofV2{
-		CoinCommitments:   append([]bls12381.G1Affine(nil), proof.CoinCommitments...),
-		CipherCommitments: append([]bls12381.G1Affine(nil), proof.CipherCommitments...),
-		CoinResponses:     append([]fr.Element(nil), proof.CoinResponses...),
-		DigitResponses:    append([]fr.Element(nil), proof.DigitResponses...),
+		ScalarCoinCommitments:    append([]bls12381.G1Affine(nil), proof.ScalarCoinCommitments...),
+		ScalarCipherCommitments:  append([]bls12381.G1Affine(nil), proof.ScalarCipherCommitments...),
+		BlindingCoinCommitment:   proof.BlindingCoinCommitment,
+		BlindingCipherCommitment: proof.BlindingCipherCommitment,
+		EvaluationCommitment:     proof.EvaluationCommitment,
+		ScalarCoinResponses:      append([]fr.Element(nil), proof.ScalarCoinResponses...),
+		ScalarDigitResponses:     append([]fr.Element(nil), proof.ScalarDigitResponses...),
+		BlindingCoinResponse:     proof.BlindingCoinResponse,
+		BlindingShareResponse:    proof.BlindingShareResponse,
 	}
 }
 
 func cvEqualOwnershipProofV2(left, right *cvOwnershipProofV2) bool {
-	if left == nil || right == nil || len(left.CoinCommitments) != len(right.CoinCommitments) ||
-		len(left.CipherCommitments) != len(right.CipherCommitments) ||
-		len(left.CoinResponses) != len(right.CoinResponses) ||
-		len(left.DigitResponses) != len(right.DigitResponses) {
+	if left == nil || right == nil || len(left.ScalarCoinCommitments) != len(right.ScalarCoinCommitments) ||
+		len(left.ScalarCipherCommitments) != len(right.ScalarCipherCommitments) ||
+		len(left.ScalarCoinResponses) != len(right.ScalarCoinResponses) ||
+		len(left.ScalarDigitResponses) != len(right.ScalarDigitResponses) ||
+		!left.BlindingCoinCommitment.Equal(&right.BlindingCoinCommitment) ||
+		!left.BlindingCipherCommitment.Equal(&right.BlindingCipherCommitment) ||
+		!left.EvaluationCommitment.Equal(&right.EvaluationCommitment) ||
+		!left.BlindingCoinResponse.Equal(&right.BlindingCoinResponse) ||
+		!left.BlindingShareResponse.Equal(&right.BlindingShareResponse) {
 		return false
 	}
-	for i := range left.CoinCommitments {
-		if !left.CoinCommitments[i].Equal(&right.CoinCommitments[i]) {
+	for i := range left.ScalarCoinCommitments {
+		if !left.ScalarCoinCommitments[i].Equal(&right.ScalarCoinCommitments[i]) {
 			return false
 		}
 	}
-	for i := range left.CipherCommitments {
-		if !left.CipherCommitments[i].Equal(&right.CipherCommitments[i]) {
+	for i := range left.ScalarCipherCommitments {
+		if !left.ScalarCipherCommitments[i].Equal(&right.ScalarCipherCommitments[i]) {
 			return false
 		}
 	}
-	for i := range left.CoinResponses {
-		if !left.CoinResponses[i].Equal(&right.CoinResponses[i]) {
+	for i := range left.ScalarCoinResponses {
+		if !left.ScalarCoinResponses[i].Equal(&right.ScalarCoinResponses[i]) {
 			return false
 		}
 	}
-	for i := range left.DigitResponses {
-		if !left.DigitResponses[i].Equal(&right.DigitResponses[i]) {
+	for i := range left.ScalarDigitResponses {
+		if !left.ScalarDigitResponses[i].Equal(&right.ScalarDigitResponses[i]) {
 			return false
 		}
 	}

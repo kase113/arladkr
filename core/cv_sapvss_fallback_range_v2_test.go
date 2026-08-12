@@ -26,13 +26,11 @@ func TestCVFallbackRangeV2UsesExactLinkCommitmentsAndStrictCodec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for lane := 0; lane < 2; lane++ {
-		for chunk := 0; chunk < chunks; chunk++ {
-			position := cvFallbackLinkPositionV2(0, lane, chunk, chunks)
-			want, err := apvssCompactRangeCommitment(dealerWitness.Digits[lane][chunk], linkWitness.Blindings[position])
-			if err != nil || !want.Equal(&linkProof.DigitCommitments[position]) {
-				t.Fatalf("range/link commitment mismatch at %d: %v", position, err)
-			}
+	for chunk := 0; chunk < chunks; chunk++ {
+		position := cvFallbackLinkPositionV2(0, chunk, chunks)
+		want, err := apvssCompactRangeCommitment(dealerWitness.ScalarDigits[chunk], linkWitness.Blindings[position])
+		if err != nil || !want.Equal(&linkProof.DigitCommitments[position]) {
+			t.Fatalf("range/link commitment mismatch at %d: %v", position, err)
 		}
 	}
 	rangeProof, err := cvProveFallbackRangeV2(
@@ -43,6 +41,9 @@ func TestCVFallbackRangeV2UsesExactLinkCommitmentsAndStrictCodec(t *testing.T) {
 	}
 	if err := cvVerifyFallbackRangeV2(context, dealer, offers, publicKeys, linkProof, rangeProof); err != nil {
 		t.Fatal(err)
+	}
+	if rangeProof.proof.valueCount != chunks {
+		t.Fatalf("fallback range value count = %d, want scalar chunks %d", rangeProof.proof.valueCount, chunks)
 	}
 	if err := cvRequireV2FallbackBackend(); err != nil {
 		t.Fatalf("V2 fallback backend gate remained closed: %v", err)
@@ -85,7 +86,7 @@ func TestCVFallbackRangeV2UsesExactLinkCommitmentsAndStrictCodec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dealerWitness.Digits[0][0] = base
+	dealerWitness.ScalarDigits[0] = base
 	if _, err := cvProveFallbackRangeV2(
 		context, dealer, offers, publicKeys, witnesses, linkProof, linkWitness,
 	); err == nil {

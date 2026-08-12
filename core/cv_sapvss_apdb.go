@@ -7,12 +7,12 @@ import (
 )
 
 const (
-	cvAPDBInstanceDomain  = "ARL-CV-sAPVSS/v2/apdb-instance"
-	cvAPDBStoredDomain    = "ARL-CV-sAPVSS/v2/apdb-stored"
-	cvAPDBShardDomain     = "ARL-CV-sAPVSS/v2/apdb-shard"
-	cvAPDBNodeDomain      = "ARL-CV-sAPVSS/v2/apdb-node"
-	cvAPDBLockWireDomain  = "ARL-CV-sAPVSS/v2/apdb-lock"
-	cvAPDBStoreWireDomain = "ARL-CV-sAPVSS/v2/apdb-store"
+	cvAPDBInstanceDomain  = "ARL-CV-sAPVSS/v2-scalar-group/apdb-instance"
+	cvAPDBStoredDomain    = "ARL-CV-sAPVSS/v2-scalar-group/apdb-stored"
+	cvAPDBShardDomain     = "ARL-CV-sAPVSS/v2-scalar-group/apdb-shard"
+	cvAPDBNodeDomain      = "ARL-CV-sAPVSS/v2-scalar-group/apdb-node"
+	cvAPDBLockWireDomain  = "ARL-CV-sAPVSS/v2-scalar-group/apdb-lock"
+	cvAPDBStoreWireDomain = "ARL-CV-sAPVSS/v2-scalar-group/apdb-store"
 )
 
 // cvAPDBLockV2 is the compact public certificate of an immutable APDB
@@ -66,7 +66,19 @@ func cvAPDBEncodeV2(instanceDigest, payload []byte, dataShards, totalShards, max
 		dataShards <= 0 || totalShards < dataShards {
 		return nil, fmt.Errorf("invalid CV V2 APDB encoding parameters")
 	}
-	packed := make([]byte, 8+len(payload))
+	shardBytes := (8 + len(payload) + dataShards - 1) / dataShards
+	return cvAPDBEncodeSizedV2(instanceDigest, payload, dataShards, totalShards, shardBytes, maximumPayload)
+}
+
+func cvAPDBEncodeSizedV2(
+	instanceDigest, payload []byte, dataShards, totalShards, shardBytes, maximumPayload int,
+) (*cvAPDBEncodedV2, error) {
+	if len(instanceDigest) != 32 || len(payload) == 0 || maximumPayload <= 0 || len(payload) > maximumPayload ||
+		dataShards <= 0 || totalShards < dataShards || shardBytes <= 0 ||
+		8+len(payload) > dataShards*shardBytes {
+		return nil, fmt.Errorf("invalid CV V2 fixed-size APDB encoding parameters")
+	}
+	packed := make([]byte, dataShards*shardBytes)
 	binary.BigEndian.PutUint64(packed[:8], uint64(len(payload)))
 	copy(packed[8:], payload)
 	shards, err := cvErasureEncode(packed, dataShards, totalShards)
@@ -227,7 +239,9 @@ func cvRecoverAPDBV2(
 		return nil, fmt.Errorf("invalid recovered CV V2 APDB payload length")
 	}
 	payload := append([]byte(nil), packed[8:8+int(length)]...)
-	reencoded, err := cvAPDBEncodeV2(lock.InstanceDigest, payload, dataShards, totalShards, maximumPayload)
+	reencoded, err := cvAPDBEncodeSizedV2(
+		lock.InstanceDigest, payload, dataShards, totalShards, shardBytes, maximumPayload,
+	)
 	if err != nil || !bytes.Equal(reencoded.root, lock.Root) {
 		return nil, fmt.Errorf("CV V2 APDB deterministic re-encoding root mismatch")
 	}

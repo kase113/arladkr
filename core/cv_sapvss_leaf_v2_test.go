@@ -160,48 +160,9 @@ func TestCVAllACKLeafV2RejectsCryptographicMutations(t *testing.T) {
 }
 
 func TestCVLeafV2MixedACKFallbackBuildVerifyAndCodec(t *testing.T) {
-	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+	_, context, receivers, validators := cvAllACKLeafV2Fixture(t)
 	fallbackIndex := 1
-	receiverID := context.NewRoster[fallbackIndex-1]
-	scalar, blinding, err := cvVerifyAndDecryptReceiverLanesV2(
-		context, leaf.DealerID, &leaf.Receivers[fallbackIndex-1].Offer,
-		&receivers.encryptionPublicKeys[fallbackIndex-1], receivers.localEncryptionSecrets[receiverID],
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fallbackOffer, witness, err := cvEncryptReceiverLanesV2(
-		context, leaf.DealerID, receiverID, fallbackIndex, &receivers.encryptionPublicKeys[fallbackIndex-1],
-		scalar, blinding,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence, err := cvBuildFallbackEvidenceV2(
-		context, leaf.DealerID, []*cvReceiverLaneOfferV2{fallbackOffer},
-		[]bls12381.G1Affine{receivers.encryptionPublicKeys[fallbackIndex-1]},
-		[]*cvDealerReceiverWitnessV2{witness},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offers := make([]*cvReceiverLaneOfferV2, len(leaf.Receivers))
-	acks := make([]*cvACKEvidenceV2, len(leaf.Receivers))
-	for i := range leaf.Receivers {
-		offers[i] = &leaf.Receivers[i].Offer
-		acks[i] = leaf.Receivers[i].ACK
-	}
-	offers[fallbackIndex-1], acks[fallbackIndex-1] = fallbackOffer, nil
-	partition := &cvEvidencePartitionV2{
-		ACKReceiverIndices: []int{2, 3, 4}, FallbackReceiverIndices: []int{1},
-	}
-	mixed, err := cvBuildLeafV2(
-		context, leaf.DealerID, leaf.CoefficientCommitments, &leaf.CoreProof, offers, acks,
-		partition, evidence, receivers, validators,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mixed := cvBuildMixedLeafV2ForTest(t, context, receivers, validators, fallbackIndex)
 	if err := cvVerifyAPVSSV2(mixed, context, receivers, validators); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +175,7 @@ func TestCVLeafV2MixedACKFallbackBuildVerifyAndCodec(t *testing.T) {
 		t.Fatal(err)
 	}
 	if decoded.Receivers[fallbackIndex-1].ACK != nil ||
-		len(decoded.Receivers[fallbackIndex-1].Offer.Ownership.CoinResponses) != 0 {
+		len(decoded.Receivers[fallbackIndex-1].Offer.Ownership.ScalarCoinResponses) != 0 {
 		t.Fatal("fallback receiver wire retained redundant ownership/ACK evidence")
 	}
 	bad := *mixed
@@ -228,4 +189,79 @@ func TestCVLeafV2MixedACKFallbackBuildVerifyAndCodec(t *testing.T) {
 	if err := cvVerifyAPVSSV2(&bad, context, receivers, validators); err == nil {
 		t.Fatal("accepted mixed CV V2 leaf with mutated fallback range proof")
 	}
+}
+
+func cvBuildMixedLeafV2ForTest(
+	t *testing.T, context *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2,
+	validators *cvValidatorKeyMaterialV2, fallbackIndex int,
+) *cvLeafV2 {
+	t.Helper()
+	dealer := context.OldRoster[0]
+	count := context.SharingDegree + 1
+	scalarCoefficients := make([]fr.Element, count)
+	blindingCoefficients := make([]fr.Element, count)
+	for i := 0; i < count; i++ {
+		if _, err := scalarCoefficients[i].SetRandom(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := blindingCoefficients[i].SetRandom(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commitments, coreProof, err := cvProveCoreV2(context, dealer, scalarCoefficients, blindingCoefficients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers := make([]*cvReceiverLaneOfferV2, len(context.NewRoster))
+	acks := make([]*cvACKEvidenceV2, len(context.NewRoster))
+	var fallbackOffer *cvReceiverLaneOfferV2
+	var fallbackWitness *cvDealerReceiverWitnessV2
+	for i, receiverID := range context.NewRoster {
+		index := i + 1
+		scalar := cvEvaluateScalarPolynomialV2(scalarCoefficients, index)
+		blinding := cvEvaluateScalarPolynomialV2(blindingCoefficients, index)
+		var witness *cvDealerReceiverWitnessV2
+		offers[i], witness, err = cvEncryptReceiverLanesV2(
+			context, dealer, receiverID, index, &receivers.encryptionPublicKeys[i], scalar, blinding,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == fallbackIndex {
+			fallbackOffer = offers[i]
+			fallbackWitness = witness
+			continue
+		}
+		acks[i], _, _, err = cvVerifyDecryptAndSignACKV2(
+			context, dealer, offers[i], &receivers.encryptionPublicKeys[i],
+			receivers.localEncryptionSecrets[receiverID], receivers.identityPublicKeys[i],
+			receivers.localIdentitySecrets[receiverID],
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	evidence, err := cvBuildFallbackEvidenceV2(
+		context, dealer, []*cvReceiverLaneOfferV2{fallbackOffer},
+		[]bls12381.G1Affine{receivers.encryptionPublicKeys[fallbackIndex-1]},
+		[]*cvDealerReceiverWitnessV2{fallbackWitness},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackIndices := make([]int, 0, len(context.NewRoster)-1)
+	for index := 1; index <= len(context.NewRoster); index++ {
+		if index != fallbackIndex {
+			ackIndices = append(ackIndices, index)
+		}
+	}
+	leaf, err := cvBuildLeafV2(
+		context, dealer, commitments, coreProof, offers, acks,
+		&cvEvidencePartitionV2{ACKReceiverIndices: ackIndices, FallbackReceiverIndices: []int{fallbackIndex}},
+		evidence, receivers, validators,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
 }

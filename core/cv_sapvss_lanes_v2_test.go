@@ -27,7 +27,7 @@ func cvReceiverLanesV2Fixture(
 	return context, dealer, receiverID, receiverIndex, receiverSecret, receiverPublic, coefficients[0], blindings[0]
 }
 
-func TestCVReceiverLanesV2UseIndependentCoinsAndDecryptBothOpenings(t *testing.T) {
+func TestCVReceiverLanesV2UseScalarChunksAndGroupBlinding(t *testing.T) {
 	context, dealer, receiverID, receiverIndex, secret, publicKey, scalar, blinding := cvReceiverLanesV2Fixture(t)
 	offer, witness, err := cvEncryptReceiverLanesV2(
 		context, dealer, receiverID, receiverIndex, &publicKey, scalar, blinding,
@@ -44,22 +44,32 @@ func TestCVReceiverLanesV2UseIndependentCoinsAndDecryptBothOpenings(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recoveredScalar.Equal(&scalar) || !recoveredBlinding.Equal(&blinding) {
-		t.Fatal("two-lane decryption did not recover both Pedersen openings")
+	h, err := cvPedersenBase()
+	if err != nil {
+		t.Fatal(err)
 	}
-
+	wantBlinding := cvPointTimes(&h, &blinding)
+	if !recoveredScalar.Equal(&scalar) || !recoveredBlinding.Equal(&wantBlinding) {
+		t.Fatal("scalar/group decryption did not recover the Pedersen opening")
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offer.ScalarChunks) != chunks || len(witness.ScalarCoins) != chunks ||
+		!cvValidCiphertext(&offer.Blinding) {
+		t.Fatal("V2 offer is not exactly scalar chunks plus one blinding ciphertext")
+	}
 	seenCoins := make(map[[bls12381.SizeOfG1AffineCompressed]byte]struct{})
-	for lane := 0; lane < 2; lane++ {
-		if len(witness.Coins[lane]) != len(offer.Lanes[lane].Chunks) {
-			t.Fatal("V2 lane coin count mismatch")
+	for chunk := range offer.ScalarChunks {
+		key := cvPointKey(&offer.ScalarChunks[chunk].r)
+		if _, duplicate := seenCoins[key]; duplicate {
+			t.Fatal("V2 scalar chunks reused an encryption coin")
 		}
-		for chunk := range offer.Lanes[lane].Chunks {
-			key := cvPointKey(&offer.Lanes[lane].Chunks[chunk].r)
-			if _, duplicate := seenCoins[key]; duplicate {
-				t.Fatal("V2 lanes reused an encryption coin across lane or chunk")
-			}
-			seenCoins[key] = struct{}{}
-		}
+		seenCoins[key] = struct{}{}
+	}
+	if _, duplicate := seenCoins[cvPointKey(&offer.Blinding.r)]; duplicate {
+		t.Fatal("V2 blinding ciphertext reused a scalar encryption coin")
 	}
 }
 
@@ -73,11 +83,15 @@ func TestCVOwnershipProofV2RejectsCiphertextEvaluationAndBindingMutations(t *tes
 	}
 
 	badCiphertext := *offer
-	badCiphertext.Lanes = offer.Lanes
-	badCiphertext.Lanes[0].Chunks = append([]cvElGamalCiphertext(nil), offer.Lanes[0].Chunks...)
-	badCiphertext.Lanes[0].Chunks[0].c.Add(&badCiphertext.Lanes[0].Chunks[0].c, &genG1)
+	badCiphertext.ScalarChunks = append([]cvElGamalCiphertext(nil), offer.ScalarChunks...)
+	badCiphertext.ScalarChunks[0].c.Add(&badCiphertext.ScalarChunks[0].c, &genG1)
 	if err := cvVerifyOwnershipV2(context, dealer, &badCiphertext, &publicKey); err == nil {
 		t.Fatal("accepted ownership proof after ciphertext mutation")
+	}
+	badBlinding := *offer
+	badBlinding.Blinding.c.Add(&badBlinding.Blinding.c, &genG1)
+	if err := cvVerifyOwnershipV2(context, dealer, &badBlinding, &publicKey); err == nil {
+		t.Fatal("accepted ownership proof after blinding ciphertext mutation")
 	}
 
 	badEvaluation := *offer
@@ -92,6 +106,25 @@ func TestCVOwnershipProofV2RejectsCiphertextEvaluationAndBindingMutations(t *tes
 	badReceiver.ReceiverID = context.NewRoster[0]
 	if err := cvVerifyOwnershipV2(context, dealer, &badReceiver, &publicKey); err == nil {
 		t.Fatal("accepted ownership proof under a mismatched receiver binding")
+	}
+	badIndex := *offer
+	badIndex.ReceiverIndex = 1
+	if err := cvVerifyOwnershipV2(context, dealer, &badIndex, &publicKey); err == nil {
+		t.Fatal("accepted ownership proof under another receiver index")
+	}
+	badContext := *context
+	badContext.ReceiverRegistryDigest = append([]byte(nil), context.ReceiverRegistryDigest...)
+	badContext.ReceiverRegistryDigest[0] ^= 1
+	if err := cvVerifyOwnershipV2(&badContext, dealer, offer, &publicKey); err == nil {
+		t.Fatal("accepted ownership proof under another receiver registry")
+	}
+	badProof := *offer
+	badProof.Ownership = cvCloneOwnershipProofV2(&offer.Ownership)
+	var one fr.Element
+	one.SetOne()
+	badProof.Ownership.BlindingShareResponse.Add(&badProof.Ownership.BlindingShareResponse, &one)
+	if err := cvVerifyOwnershipV2(context, dealer, &badProof, &publicKey); err == nil {
+		t.Fatal("accepted mutated blinding-share ownership response")
 	}
 
 	var wrongSecret fr.Element
@@ -115,13 +148,18 @@ func TestCVReceiverLanesV2RejectOutOfRangeDigitAfterValidOwnershipProof(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	witness.Digits[0][0] = base
+	oldDigit := witness.ScalarDigits[0]
+	witness.ScalarDigits[0] = base
 	var outOfRangePoint bls12381.G1Affine
 	outOfRangePoint.ScalarMultiplication(&genG1, new(big.Int).SetUint64(base))
-	offer.Lanes[0].Chunks[0], err = cvEncryptPoint(&publicKey, &outOfRangePoint, witness.Coins[0][0])
+	offer.ScalarChunks[0], err = cvEncryptPoint(&publicKey, &outOfRangePoint, witness.ScalarCoins[0])
 	if err != nil {
 		t.Fatal(err)
 	}
+	delta := new(big.Int).SetUint64(base - oldDigit)
+	var deltaPoint bls12381.G1Affine
+	deltaPoint.ScalarMultiplication(&genG1, delta)
+	offer.Evaluation.Add(&offer.Evaluation, &deltaPoint)
 	proof, err := cvProveOwnershipV2(context, dealer, offer, &publicKey, witness)
 	if err != nil {
 		t.Fatal(err)

@@ -9,23 +9,27 @@ import (
 )
 
 const (
-	cvFallbackLinkWireDomainV2      = "ARL-CV-sAPVSS/v2/fallback-link"
-	cvFallbackLinkChallengeDomainV2 = "ARL-CV-sAPVSS/v2/fallback-link/challenge"
+	cvFallbackLinkWireDomainV2      = "ARL-CV-sAPVSS/v2-scalar-group/fallback-link"
+	cvFallbackLinkChallengeDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/fallback-link/challenge"
 )
 
 type cvFallbackLinkProofV2 struct {
-	DigitCommitments        []bls12381.G1Affine
-	DigitOpeningCommitments []bls12381.G1Affine
-	CoinCommitments         []bls12381.G1Affine
-	CipherCommitments       []bls12381.G1Affine
-	EvaluationCommitments   []bls12381.G1Affine
-	DigitResponses          []fr.Element
-	BlindingResponses       []fr.Element
-	CoinResponses           []fr.Element
+	DigitCommitments          []bls12381.G1Affine
+	DigitOpeningCommitments   []bls12381.G1Affine
+	ScalarCoinCommitments     []bls12381.G1Affine
+	ScalarCipherCommitments   []bls12381.G1Affine
+	BlindingCoinCommitments   []bls12381.G1Affine
+	BlindingCipherCommitments []bls12381.G1Affine
+	EvaluationCommitments     []bls12381.G1Affine
+	DigitResponses            []fr.Element
+	DigitBlindResponses       []fr.Element
+	ScalarCoinResponses       []fr.Element
+	BlindingCoinResponses     []fr.Element
+	BlindingShareResponses    []fr.Element
 }
 
-// cvFallbackDigitWitnessV2 stays local. A future range prover consumes these
-// blindings together with the dealer digits to prove the public commitments.
+// cvFallbackDigitWitnessV2 stays local and supplies the exact Pedersen
+// blindings consumed by the aggregated scalar-digit range proof.
 type cvFallbackDigitWitnessV2 struct {
 	Blindings []fr.Element
 }
@@ -38,83 +42,95 @@ func cvProveFallbackLinkV2(
 	if err != nil || len(witnesses) != len(offers) {
 		return nil, nil, fmt.Errorf("invalid CV V2 fallback-link witness")
 	}
+	receivers := len(offers)
 	proof := &cvFallbackLinkProofV2{
-		DigitCommitments: make([]bls12381.G1Affine, total), DigitOpeningCommitments: make([]bls12381.G1Affine, total),
-		CoinCommitments: make([]bls12381.G1Affine, total), CipherCommitments: make([]bls12381.G1Affine, total),
-		EvaluationCommitments: make([]bls12381.G1Affine, len(offers)), DigitResponses: make([]fr.Element, total),
-		BlindingResponses: make([]fr.Element, total), CoinResponses: make([]fr.Element, total),
+		DigitCommitments:          make([]bls12381.G1Affine, total),
+		DigitOpeningCommitments:   make([]bls12381.G1Affine, total),
+		ScalarCoinCommitments:     make([]bls12381.G1Affine, total),
+		ScalarCipherCommitments:   make([]bls12381.G1Affine, total),
+		BlindingCoinCommitments:   make([]bls12381.G1Affine, receivers),
+		BlindingCipherCommitments: make([]bls12381.G1Affine, receivers),
+		EvaluationCommitments:     make([]bls12381.G1Affine, receivers),
+		DigitResponses:            make([]fr.Element, total), DigitBlindResponses: make([]fr.Element, total),
+		ScalarCoinResponses:    make([]fr.Element, total),
+		BlindingCoinResponses:  make([]fr.Element, receivers),
+		BlindingShareResponses: make([]fr.Element, receivers),
 	}
 	local := &cvFallbackDigitWitnessV2{Blindings: make([]fr.Element, total)}
 	digitNonces := make([]fr.Element, total)
-	blindingNonces := make([]fr.Element, total)
-	coinNonces := make([]fr.Element, total)
+	digitBlindNonces := make([]fr.Element, total)
+	scalarCoinNonces := make([]fr.Element, total)
+	blindingCoinNonces := make([]fr.Element, receivers)
+	blindingShareNonces := make([]fr.Element, receivers)
 	h, err := cvPedersenBase()
 	if err != nil {
 		return nil, nil, err
 	}
-	bases := [2]bls12381.G1Affine{genG1, h}
-	base, _, _, err := cvProfile(context.Profile)
-	if err != nil {
-		return nil, nil, err
-	}
-	for receiver := range offers {
-		witness := witnesses[receiver]
-		if witness == nil {
-			return nil, nil, fmt.Errorf("nil CV V2 fallback-link witness")
+	for receiver, witness := range witnesses {
+		if witness == nil || len(witness.ScalarDigits) != chunks || len(witness.ScalarCoins) != chunks {
+			return nil, nil, fmt.Errorf("invalid CV V2 fallback-link witness dimensions")
 		}
-		for lane := 0; lane < 2; lane++ {
-			if len(witness.Digits[lane]) != chunks || len(witness.Coins[lane]) != chunks {
-				return nil, nil, fmt.Errorf("invalid CV V2 fallback-link witness dimensions")
+		for chunk := 0; chunk < chunks; chunk++ {
+			position := cvFallbackLinkPositionV2(receiver, chunk, chunks)
+			for _, nonce := range []*fr.Element{
+				&local.Blindings[position], &digitNonces[position],
+				&digitBlindNonces[position], &scalarCoinNonces[position],
+			} {
+				if _, err := nonce.SetRandom(); err != nil {
+					return nil, nil, err
+				}
 			}
-			for chunk := 0; chunk < chunks; chunk++ {
-				position := cvFallbackLinkPositionV2(receiver, lane, chunk, chunks)
-				if _, err := local.Blindings[position].SetRandom(); err != nil {
-					return nil, nil, err
-				}
-				if _, err := digitNonces[position].SetRandom(); err != nil {
-					return nil, nil, err
-				}
-				if _, err := blindingNonces[position].SetRandom(); err != nil {
-					return nil, nil, err
-				}
-				if _, err := coinNonces[position].SetRandom(); err != nil {
-					return nil, nil, err
-				}
-				var digit fr.Element
-				digit.SetUint64(witness.Digits[lane][chunk])
-				proof.DigitCommitments[position] = cvPointSum(
-					pointPtr(cvPointTimes(&genG1, &digit)), pointPtr(cvPointTimes(&h, &local.Blindings[position])),
-				)
-				proof.DigitOpeningCommitments[position] = cvPointSum(
-					pointPtr(cvPointTimes(&genG1, &digitNonces[position])),
-					pointPtr(cvPointTimes(&h, &blindingNonces[position])),
-				)
-				proof.CoinCommitments[position] = cvPointTimes(&genG1, &coinNonces[position])
-				proof.CipherCommitments[position] = cvPointSum(
-					pointPtr(cvPointTimes(&receiverPublicKeys[receiver], &coinNonces[position])),
-					pointPtr(cvPointTimes(&bases[lane], &digitNonces[position])),
-				)
-			}
+			var digit fr.Element
+			digit.SetUint64(witness.ScalarDigits[chunk])
+			proof.DigitCommitments[position] = cvPointSum(
+				pointPtr(cvPointTimes(&genG1, &digit)),
+				pointPtr(cvPointTimes(&h, &local.Blindings[position])),
+			)
+			proof.DigitOpeningCommitments[position] = cvPointSum(
+				pointPtr(cvPointTimes(&genG1, &digitNonces[position])),
+				pointPtr(cvPointTimes(&h, &digitBlindNonces[position])),
+			)
+			proof.ScalarCoinCommitments[position] = cvPointTimes(&genG1, &scalarCoinNonces[position])
+			proof.ScalarCipherCommitments[position] = cvPointSum(
+				pointPtr(cvPointTimes(&receiverPublicKeys[receiver], &scalarCoinNonces[position])),
+				pointPtr(cvPointTimes(&genG1, &digitNonces[position])),
+			)
 		}
-		proof.EvaluationCommitments[receiver] = cvFallbackEvaluationNonceV2(
-			receiver, chunks, base, digitNonces, &h,
+		if _, err := blindingCoinNonces[receiver].SetRandom(); err != nil {
+			return nil, nil, err
+		}
+		if _, err := blindingShareNonces[receiver].SetRandom(); err != nil {
+			return nil, nil, err
+		}
+		proof.BlindingCoinCommitments[receiver] = cvPointTimes(&genG1, &blindingCoinNonces[receiver])
+		proof.BlindingCipherCommitments[receiver] = cvPointSum(
+			pointPtr(cvPointTimes(&receiverPublicKeys[receiver], &blindingCoinNonces[receiver])),
+			pointPtr(cvPointTimes(&h, &blindingShareNonces[receiver])),
+		)
+		weighted, err := cvFallbackWeightedNoncesV2(receiver, chunks, context.Profile.chunkBits, digitNonces)
+		if err != nil {
+			return nil, nil, err
+		}
+		proof.EvaluationCommitments[receiver] = cvPointSum(
+			pointPtr(cvPointTimes(&genG1, &weighted)),
+			pointPtr(cvPointTimes(&h, &blindingShareNonces[receiver])),
 		)
 	}
 	challenge, err := cvFallbackLinkChallengeV2(context, dealerID, offers, receiverPublicKeys, proof)
 	if err != nil {
 		return nil, nil, err
 	}
-	for receiver := range offers {
-		for lane := 0; lane < 2; lane++ {
-			for chunk := 0; chunk < chunks; chunk++ {
-				position := cvFallbackLinkPositionV2(receiver, lane, chunk, chunks)
-				var digit fr.Element
-				digit.SetUint64(witnesses[receiver].Digits[lane][chunk])
-				proof.DigitResponses[position].Mul(&challenge, &digit).Add(&proof.DigitResponses[position], &digitNonces[position])
-				proof.BlindingResponses[position].Mul(&challenge, &local.Blindings[position]).Add(&proof.BlindingResponses[position], &blindingNonces[position])
-				proof.CoinResponses[position].Mul(&challenge, &witnesses[receiver].Coins[lane][chunk]).Add(&proof.CoinResponses[position], &coinNonces[position])
-			}
+	for receiver, witness := range witnesses {
+		for chunk := 0; chunk < chunks; chunk++ {
+			position := cvFallbackLinkPositionV2(receiver, chunk, chunks)
+			var digit fr.Element
+			digit.SetUint64(witness.ScalarDigits[chunk])
+			proof.DigitResponses[position].Mul(&challenge, &digit).Add(&proof.DigitResponses[position], &digitNonces[position])
+			proof.DigitBlindResponses[position].Mul(&challenge, &local.Blindings[position]).Add(&proof.DigitBlindResponses[position], &digitBlindNonces[position])
+			proof.ScalarCoinResponses[position].Mul(&challenge, &witness.ScalarCoins[chunk]).Add(&proof.ScalarCoinResponses[position], &scalarCoinNonces[position])
 		}
+		proof.BlindingCoinResponses[receiver].Mul(&challenge, &witness.BlindingCoin).Add(&proof.BlindingCoinResponses[receiver], &blindingCoinNonces[receiver])
+		proof.BlindingShareResponses[receiver].Mul(&challenge, &witness.Blinding).Add(&proof.BlindingShareResponses[receiver], &blindingShareNonces[receiver])
 	}
 	if err := cvVerifyFallbackLinkV2(context, dealerID, offers, receiverPublicKeys, proof); err != nil {
 		return nil, nil, err
@@ -138,50 +154,62 @@ func cvVerifyFallbackLinkV2(
 	if err != nil {
 		return err
 	}
-	bases := [2]bls12381.G1Affine{genG1, h}
-	base, _, _, err := cvProfile(context.Profile)
-	if err != nil {
-		return err
-	}
-	var baseScalar fr.Element
-	baseScalar.SetUint64(base)
-	powers := cvFrPowers(baseScalar, chunks)
-	for receiver := range offers {
-		var evaluationLeft bls12381.G1Affine
-		for lane := 0; lane < 2; lane++ {
-			for chunk := 0; chunk < chunks; chunk++ {
-				position := cvFallbackLinkPositionV2(receiver, lane, chunk, chunks)
-				ciphertext := &offers[receiver].Lanes[lane].Chunks[chunk]
-				left := cvPointSum(
-					pointPtr(cvPointTimes(&genG1, &proof.DigitResponses[position])),
-					pointPtr(cvPointTimes(&h, &proof.BlindingResponses[position])),
-				)
-				right := cvPointSum(&proof.DigitOpeningCommitments[position],
-					pointPtr(cvPointTimes(&proof.DigitCommitments[position], &challenge)))
-				if !left.Equal(&right) {
-					return fmt.Errorf("invalid CV V2 fallback digit-commitment equation")
-				}
-				left = cvPointTimes(&genG1, &proof.CoinResponses[position])
-				right = cvPointSum(&proof.CoinCommitments[position], pointPtr(cvPointTimes(&ciphertext.r, &challenge)))
-				if !left.Equal(&right) {
-					return fmt.Errorf("invalid CV V2 fallback coin equation")
-				}
-				left = cvPointSum(
-					pointPtr(cvPointTimes(&receiverPublicKeys[receiver], &proof.CoinResponses[position])),
-					pointPtr(cvPointTimes(&bases[lane], &proof.DigitResponses[position])),
-				)
-				right = cvPointSum(&proof.CipherCommitments[position], pointPtr(cvPointTimes(&ciphertext.c, &challenge)))
-				if !left.Equal(&right) {
-					return fmt.Errorf("invalid CV V2 fallback ciphertext equation")
-				}
-				weightedResponse := proof.DigitResponses[position]
-				weightedResponse.Mul(&weightedResponse, &powers[chunk])
-				evaluationLeft.Add(&evaluationLeft, pointPtr(cvPointTimes(&bases[lane], &weightedResponse)))
+	for receiver, offer := range offers {
+		for chunk := 0; chunk < chunks; chunk++ {
+			position := cvFallbackLinkPositionV2(receiver, chunk, chunks)
+			ciphertext := &offer.ScalarChunks[chunk]
+			left := cvPointSum(
+				pointPtr(cvPointTimes(&genG1, &proof.DigitResponses[position])),
+				pointPtr(cvPointTimes(&h, &proof.DigitBlindResponses[position])),
+			)
+			right := cvPointSum(&proof.DigitOpeningCommitments[position],
+				pointPtr(cvPointTimes(&proof.DigitCommitments[position], &challenge)))
+			if !left.Equal(&right) {
+				return fmt.Errorf("invalid CV V2 fallback digit-commitment equation")
+			}
+			left = cvPointTimes(&genG1, &proof.ScalarCoinResponses[position])
+			right = cvPointSum(&proof.ScalarCoinCommitments[position],
+				pointPtr(cvPointTimes(&ciphertext.r, &challenge)))
+			if !left.Equal(&right) {
+				return fmt.Errorf("invalid CV V2 fallback scalar coin equation")
+			}
+			left = cvPointSum(
+				pointPtr(cvPointTimes(&receiverPublicKeys[receiver], &proof.ScalarCoinResponses[position])),
+				pointPtr(cvPointTimes(&genG1, &proof.DigitResponses[position])),
+			)
+			right = cvPointSum(&proof.ScalarCipherCommitments[position],
+				pointPtr(cvPointTimes(&ciphertext.c, &challenge)))
+			if !left.Equal(&right) {
+				return fmt.Errorf("invalid CV V2 fallback scalar ciphertext equation")
 			}
 		}
-		evaluationRight := cvPointSum(&proof.EvaluationCommitments[receiver],
-			pointPtr(cvPointTimes(&offers[receiver].Evaluation, &challenge)))
-		if !evaluationLeft.Equal(&evaluationRight) {
+		leftBlindingCoin := cvPointTimes(&genG1, &proof.BlindingCoinResponses[receiver])
+		rightBlindingCoin := cvPointSum(&proof.BlindingCoinCommitments[receiver],
+			pointPtr(cvPointTimes(&offer.Blinding.r, &challenge)))
+		if !leftBlindingCoin.Equal(&rightBlindingCoin) {
+			return fmt.Errorf("invalid CV V2 fallback blinding coin equation")
+		}
+		leftBlindingCipher := cvPointSum(
+			pointPtr(cvPointTimes(&receiverPublicKeys[receiver], &proof.BlindingCoinResponses[receiver])),
+			pointPtr(cvPointTimes(&h, &proof.BlindingShareResponses[receiver])),
+		)
+		rightBlindingCipher := cvPointSum(&proof.BlindingCipherCommitments[receiver],
+			pointPtr(cvPointTimes(&offer.Blinding.c, &challenge)))
+		if !leftBlindingCipher.Equal(&rightBlindingCipher) {
+			return fmt.Errorf("invalid CV V2 fallback blinding ciphertext equation")
+		}
+		responses := proof.DigitResponses[receiver*chunks : (receiver+1)*chunks]
+		weighted, err := cvWeightedScalarV2(responses, context.Profile.chunkBits)
+		if err != nil {
+			return err
+		}
+		leftEvaluation := cvPointSum(
+			pointPtr(cvPointTimes(&genG1, &weighted)),
+			pointPtr(cvPointTimes(&h, &proof.BlindingShareResponses[receiver])),
+		)
+		rightEvaluation := cvPointSum(&proof.EvaluationCommitments[receiver],
+			pointPtr(cvPointTimes(&offer.Evaluation, &challenge)))
+		if !leftEvaluation.Equal(&rightEvaluation) {
 			return fmt.Errorf("invalid CV V2 fallback evaluation equation")
 		}
 	}
@@ -209,16 +237,13 @@ func cvFallbackLinkChallengeV2(
 		cvWriteUint64(&wire, uint64(offer.ReceiverIndex))
 		cvWritePoint(&wire, &receiverPublicKeys[i])
 		cvWritePoint(&wire, &offer.Evaluation)
-		for lane := 0; lane < 2; lane++ {
-			for chunk := range offer.Lanes[lane].Chunks {
-				cvWriteCiphertext(&wire, &offer.Lanes[lane].Chunks[chunk])
-			}
+		_ = cvWriteUint32(&wire, len(offer.ScalarChunks))
+		for chunk := range offer.ScalarChunks {
+			cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
 		}
+		cvWriteCiphertext(&wire, &offer.Blinding)
 	}
-	for _, points := range [][]bls12381.G1Affine{
-		proof.DigitCommitments, proof.DigitOpeningCommitments, proof.CoinCommitments,
-		proof.CipherCommitments, proof.EvaluationCommitments,
-	} {
+	for _, points := range cvFallbackLinkPointVectorsV2(proof) {
 		if err := cvWritePointVector(&wire, points); err != nil {
 			return fr.Element{}, err
 		}
@@ -231,9 +256,8 @@ func cvValidateFallbackLinkStatementV2(
 	receiverPublicKeys []bls12381.G1Affine,
 ) (int, int, error) {
 	if err := cvValidateLeafContextV2(context); err != nil || dealerID < 0 ||
-		!cvMemberInRosterV2(dealerID, context.OldRoster) ||
-		len(offers) == 0 || len(offers) != len(receiverPublicKeys) ||
-		len(offers) > cvNewFaultBoundFromContextV2(context) {
+		!cvMemberInRosterV2(dealerID, context.OldRoster) || len(offers) == 0 ||
+		len(offers) != len(receiverPublicKeys) || len(offers) > cvNewFaultBoundFromContextV2(context) {
 		return 0, 0, fmt.Errorf("invalid CV V2 fallback-link statement")
 	}
 	chunks, err := cvChunkCount(context.Profile)
@@ -248,43 +272,40 @@ func cvValidateFallbackLinkStatementV2(
 		}
 		previous = offer.ReceiverIndex
 	}
-	return chunks, len(offers) * 2 * chunks, nil
+	return chunks, len(offers) * chunks, nil
 }
 
-func cvFallbackEvaluationNonceV2(
-	receiver, chunks int, base uint64, digitNonces []fr.Element, h *bls12381.G1Affine,
-) bls12381.G1Affine {
-	var baseScalar fr.Element
-	baseScalar.SetUint64(base)
-	powers := cvFrPowers(baseScalar, chunks)
-	bases := [2]*bls12381.G1Affine{&genG1, h}
-	var result bls12381.G1Affine
-	for lane := 0; lane < 2; lane++ {
-		for chunk := 0; chunk < chunks; chunk++ {
-			position := cvFallbackLinkPositionV2(receiver, lane, chunk, chunks)
-			weighted := digitNonces[position]
-			weighted.Mul(&weighted, &powers[chunk])
-			result.Add(&result, pointPtr(cvPointTimes(bases[lane], &weighted)))
-		}
+func cvFallbackWeightedNoncesV2(receiver, chunks int, chunkBits uint, nonces []fr.Element) (fr.Element, error) {
+	start := receiver * chunks
+	if receiver < 0 || chunks <= 0 || start+chunks > len(nonces) {
+		return fr.Element{}, fmt.Errorf("invalid CV V2 fallback nonce dimensions")
 	}
-	return result
+	return cvWeightedScalarV2(nonces[start:start+chunks], chunkBits)
 }
 
-func cvFallbackLinkPositionV2(receiver, lane, chunk, chunks int) int {
-	return receiver*2*chunks + lane*chunks + chunk
+func cvFallbackLinkPositionV2(receiver, chunk, chunks int) int {
+	return receiver*chunks + chunk
+}
+
+func cvFallbackLinkPointVectorsV2(proof *cvFallbackLinkProofV2) [][]bls12381.G1Affine {
+	return [][]bls12381.G1Affine{
+		proof.DigitCommitments, proof.DigitOpeningCommitments,
+		proof.ScalarCoinCommitments, proof.ScalarCipherCommitments,
+		proof.BlindingCoinCommitments, proof.BlindingCipherCommitments, proof.EvaluationCommitments,
+	}
 }
 
 func cvValidFallbackLinkProofShapeV2(proof *cvFallbackLinkProofV2, total, receivers int) bool {
-	if proof == nil || total <= 0 || len(proof.DigitCommitments) != total ||
-		len(proof.DigitOpeningCommitments) != total || len(proof.CoinCommitments) != total ||
-		len(proof.CipherCommitments) != total || len(proof.EvaluationCommitments) != receivers ||
-		len(proof.DigitResponses) != total || len(proof.BlindingResponses) != total || len(proof.CoinResponses) != total {
+	if proof == nil || total <= 0 || receivers <= 0 || len(proof.DigitCommitments) != total ||
+		len(proof.DigitOpeningCommitments) != total || len(proof.ScalarCoinCommitments) != total ||
+		len(proof.ScalarCipherCommitments) != total || len(proof.BlindingCoinCommitments) != receivers ||
+		len(proof.BlindingCipherCommitments) != receivers || len(proof.EvaluationCommitments) != receivers ||
+		len(proof.DigitResponses) != total || len(proof.DigitBlindResponses) != total ||
+		len(proof.ScalarCoinResponses) != total || len(proof.BlindingCoinResponses) != receivers ||
+		len(proof.BlindingShareResponses) != receivers {
 		return false
 	}
-	for _, points := range [][]bls12381.G1Affine{
-		proof.DigitCommitments, proof.DigitOpeningCommitments, proof.CoinCommitments,
-		proof.CipherCommitments, proof.EvaluationCommitments,
-	} {
+	for _, points := range cvFallbackLinkPointVectorsV2(proof) {
 		for i := range points {
 			if !cvValidG1(&points[i], true) {
 				return false
@@ -294,26 +315,28 @@ func cvValidFallbackLinkProofShapeV2(proof *cvFallbackLinkProofV2, total, receiv
 	return true
 }
 
-func cvFallbackLinkProofV2CanonicalBytes(proof *cvFallbackLinkProofV2, context *cvLeafContextV2, fallbackCount int) ([]byte, error) {
+func cvFallbackLinkProofV2CanonicalBytes(
+	proof *cvFallbackLinkProofV2, context *cvLeafContextV2, fallbackCount int,
+) ([]byte, error) {
 	chunks, err := cvChunkCount(context.Profile)
 	if err != nil {
 		return nil, err
 	}
-	total := fallbackCount * 2 * chunks
+	total := fallbackCount * chunks
 	if fallbackCount <= 0 || !cvValidFallbackLinkProofShapeV2(proof, total, fallbackCount) {
 		return nil, fmt.Errorf("invalid CV V2 fallback-link wire")
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvFallbackLinkWireDomainV2))
-	for _, points := range [][]bls12381.G1Affine{
-		proof.DigitCommitments, proof.DigitOpeningCommitments, proof.CoinCommitments,
-		proof.CipherCommitments, proof.EvaluationCommitments,
-	} {
+	for _, points := range cvFallbackLinkPointVectorsV2(proof) {
 		if err := cvWritePointVector(&wire, points); err != nil {
 			return nil, err
 		}
 	}
-	for _, scalars := range [][]fr.Element{proof.DigitResponses, proof.BlindingResponses, proof.CoinResponses} {
+	for _, scalars := range [][]fr.Element{
+		proof.DigitResponses, proof.DigitBlindResponses, proof.ScalarCoinResponses,
+		proof.BlindingCoinResponses, proof.BlindingShareResponses,
+	} {
 		if err := cvWriteScalarVector(&wire, scalars); err != nil {
 			return nil, err
 		}
@@ -321,28 +344,31 @@ func cvFallbackLinkProofV2CanonicalBytes(proof *cvFallbackLinkProofV2, context *
 	return wire.Bytes(), nil
 }
 
-func cvDecodeFallbackLinkProofV2(wire []byte, context *cvLeafContextV2, fallbackCount int) (*cvFallbackLinkProofV2, error) {
+func cvDecodeFallbackLinkProofV2(
+	wire []byte, context *cvLeafContextV2, fallbackCount int,
+) (*cvFallbackLinkProofV2, error) {
 	chunks, err := cvChunkCount(context.Profile)
 	if err != nil || fallbackCount <= 0 || fallbackCount > cvNewFaultBoundFromContextV2(context) {
 		return nil, fmt.Errorf("invalid CV V2 fallback-link decode parameters")
 	}
-	total := fallbackCount * 2 * chunks
+	total := fallbackCount * chunks
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(cvFallbackLinkWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvFallbackLinkWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 fallback-link domain")
 	}
-	pointCounts := []int{total, total, total, total, fallbackCount}
-	pointVectors := make([][]bls12381.G1Affine, len(pointCounts))
+	pointCounts := []int{total, total, total, total, fallbackCount, fallbackCount, fallbackCount}
+	points := make([][]bls12381.G1Affine, len(pointCounts))
 	for i, count := range pointCounts {
-		pointVectors[i], err = cvReadExactPointVector(r, count, "V2 fallback-link points")
+		points[i], err = cvReadExactPointVector(r, count, "V2 fallback-link points")
 		if err != nil {
 			return nil, err
 		}
 	}
-	scalarVectors := make([][]fr.Element, 3)
-	for i := range scalarVectors {
-		scalarVectors[i], err = cvReadExactScalarVectorV2(r, total)
+	scalarCounts := []int{total, total, total, fallbackCount, fallbackCount}
+	scalars := make([][]fr.Element, len(scalarCounts))
+	for i, count := range scalarCounts {
+		scalars[i], err = cvReadExactScalarVectorV2(r, count)
 		if err != nil {
 			return nil, err
 		}
@@ -351,9 +377,11 @@ func cvDecodeFallbackLinkProofV2(wire []byte, context *cvLeafContextV2, fallback
 		return nil, fmt.Errorf("trailing CV V2 fallback-link bytes")
 	}
 	proof := &cvFallbackLinkProofV2{
-		DigitCommitments: pointVectors[0], DigitOpeningCommitments: pointVectors[1], CoinCommitments: pointVectors[2],
-		CipherCommitments: pointVectors[3], EvaluationCommitments: pointVectors[4], DigitResponses: scalarVectors[0],
-		BlindingResponses: scalarVectors[1], CoinResponses: scalarVectors[2],
+		DigitCommitments: points[0], DigitOpeningCommitments: points[1],
+		ScalarCoinCommitments: points[2], ScalarCipherCommitments: points[3],
+		BlindingCoinCommitments: points[4], BlindingCipherCommitments: points[5],
+		EvaluationCommitments: points[6], DigitResponses: scalars[0], DigitBlindResponses: scalars[1],
+		ScalarCoinResponses: scalars[2], BlindingCoinResponses: scalars[3], BlindingShareResponses: scalars[4],
 	}
 	canonical, err := cvFallbackLinkProofV2CanonicalBytes(proof, context, fallbackCount)
 	if err != nil || !bytes.Equal(canonical, wire) {

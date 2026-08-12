@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	cvLeafUnsignedWireDomainV2 = "ARL-CV-sAPVSS/v2/leaf-unsigned"
-	cvLeafWireDomainV2         = "ARL-CV-sAPVSS/v2/leaf"
-	cvLeafDigestDomainV2       = "ARL-CV-sAPVSS/v2/leaf-digest"
-	cvDealerSignatureDomainV2  = "ARL-CV-sAPVSS/v2/dealer-signature"
+	cvLeafUnsignedWireDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/leaf-unsigned"
+	cvLeafWireDomainV2         = "ARL-CV-sAPVSS/v2-scalar-group/leaf"
+	cvLeafDigestDomainV2       = "ARL-CV-sAPVSS/v2-scalar-group/leaf-digest"
+	cvDealerSignatureDomainV2  = "ARL-CV-sAPVSS/v2-scalar-group/dealer-signature"
 )
 
 type cvLeafReceiverV2 struct {
@@ -535,9 +535,8 @@ func cvCloneReceiverLaneOfferV2(offer *cvReceiverLaneOfferV2) *cvReceiverLaneOff
 		return nil
 	}
 	cloned := *offer
-	for lane := 0; lane < 2; lane++ {
-		cloned.Lanes[lane].Chunks = append([]cvElGamalCiphertext(nil), offer.Lanes[lane].Chunks...)
-	}
+	cloned.ScalarChunks = append([]cvElGamalCiphertext(nil), offer.ScalarChunks...)
+	cloned.Blinding = offer.Blinding
 	cloned.Ownership = cvCloneOwnershipProofV2(&offer.Ownership)
 	return &cloned
 }

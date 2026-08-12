@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const cvEvidencePartitionWireDomainV2 = "ARL-CV-sAPVSS/v2/evidence-partition"
+const cvEvidencePartitionWireDomainV2 = "ARL-CV-sAPVSS/v2-scalar-group/evidence-partition"
 
 type cvEvidencePartitionV2 struct {
 	ACKReceiverIndices      []int

@@ -2,9 +2,22 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"testing"
 )
+
+func TestCVRunAgreementV2RejectsInvalidCandidateBeforeNetwork(t *testing.T) {
+	object, public := cvAgreementObjectV2Fixture(t)
+	invalid := *object
+	invalid.Header.AggregateDigest = append([]byte(nil), object.Header.AggregateDigest...)
+	invalid.Header.AggregateDigest[0] ^= 1
+	cfg := cvV2ParamsTestConfig()
+	cfg.LocalNodeIDs = []int{cfg.OldCommittee[0]}
+	if _, _, _, err := cvRunAgreementV2(context.Background(), cfg, &invalid, public); err == nil {
+		t.Fatal("CV V2 agreement entered network with an invalid local candidate")
+	}
+}
 
 func cvRecoverThresholdCertificateV2ForTest(t *testing.T, signer *tblsThresholdSigner, members []int, domain string, digest []byte) []byte {
 	t.Helper()

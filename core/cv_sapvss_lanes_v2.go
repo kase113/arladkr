@@ -10,30 +10,34 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-const cvOwnershipProofChallengeV2 = "ARL-CV-sAPVSS/v2/ownership-proof/challenge"
-
-type cvCipherLaneV2 struct {
-	Chunks []cvElGamalCiphertext
-}
+const cvOwnershipProofChallengeV2 = "ARL-CV-sAPVSS/v2-scalar-group/ownership-proof/challenge"
 
 type cvOwnershipProofV2 struct {
-	CoinCommitments   []bls12381.G1Affine
-	CipherCommitments []bls12381.G1Affine
-	CoinResponses     []fr.Element
-	DigitResponses    []fr.Element
+	ScalarCoinCommitments    []bls12381.G1Affine
+	ScalarCipherCommitments  []bls12381.G1Affine
+	BlindingCoinCommitment   bls12381.G1Affine
+	BlindingCipherCommitment bls12381.G1Affine
+	EvaluationCommitment     bls12381.G1Affine
+	ScalarCoinResponses      []fr.Element
+	ScalarDigitResponses     []fr.Element
+	BlindingCoinResponse     fr.Element
+	BlindingShareResponse    fr.Element
 }
 
 type cvReceiverLaneOfferV2 struct {
 	ReceiverID    int
 	ReceiverIndex int
 	Evaluation    bls12381.G1Affine
-	Lanes         [2]cvCipherLaneV2
+	ScalarChunks  []cvElGamalCiphertext
+	Blinding      cvElGamalCiphertext
 	Ownership     cvOwnershipProofV2
 }
 
 type cvDealerReceiverWitnessV2 struct {
-	Digits [2][]uint64
-	Coins  [2][]fr.Element
+	ScalarDigits []uint64
+	ScalarCoins  []fr.Element
+	Blinding     fr.Element
+	BlindingCoin fr.Element
 }
 
 func cvEncryptReceiverLanesV2(
@@ -48,34 +52,37 @@ func cvEncryptReceiverLanesV2(
 	if err != nil {
 		return nil, nil, err
 	}
-	blindingDigits, err := cvScalarDigits(blinding, context.Profile)
-	if err != nil {
-		return nil, nil, err
-	}
 	h, err := cvPedersenBase()
 	if err != nil {
 		return nil, nil, err
 	}
-	bases := [2]bls12381.G1Affine{genG1, h}
-	offer := &cvReceiverLaneOfferV2{ReceiverID: receiverID, ReceiverIndex: receiverIndex}
-	witness := &cvDealerReceiverWitnessV2{}
-	witness.Digits[0] = scalarDigits
-	witness.Digits[1] = blindingDigits
-	for lane := 0; lane < 2; lane++ {
-		witness.Coins[lane] = make([]fr.Element, len(witness.Digits[lane]))
-		offer.Lanes[lane].Chunks = make([]cvElGamalCiphertext, len(witness.Digits[lane]))
-		for chunk, digit := range witness.Digits[lane] {
-			if _, err := witness.Coins[lane][chunk].SetRandom(); err != nil {
-				return nil, nil, err
-			}
-			var digitPoint bls12381.G1Affine
-			digitPoint.ScalarMultiplication(&bases[lane], new(big.Int).SetUint64(digit))
-			ciphertext, err := cvEncryptPoint(receiverPublicKey, &digitPoint, witness.Coins[lane][chunk])
-			if err != nil {
-				return nil, nil, err
-			}
-			offer.Lanes[lane].Chunks[chunk] = ciphertext
+	offer := &cvReceiverLaneOfferV2{
+		ReceiverID: receiverID, ReceiverIndex: receiverIndex,
+		ScalarChunks: make([]cvElGamalCiphertext, len(scalarDigits)),
+	}
+	witness := &cvDealerReceiverWitnessV2{
+		ScalarDigits: scalarDigits, ScalarCoins: make([]fr.Element, len(scalarDigits)), Blinding: blinding,
+	}
+	for chunk, digit := range witness.ScalarDigits {
+		if _, err := witness.ScalarCoins[chunk].SetRandom(); err != nil {
+			return nil, nil, err
 		}
+		var digitPoint bls12381.G1Affine
+		digitPoint.ScalarMultiplication(&genG1, new(big.Int).SetUint64(digit))
+		offer.ScalarChunks[chunk], err = cvEncryptPoint(
+			receiverPublicKey, &digitPoint, witness.ScalarCoins[chunk],
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if _, err := witness.BlindingCoin.SetRandom(); err != nil {
+		return nil, nil, err
+	}
+	blindingPoint := cvPointTimes(&h, &blinding)
+	offer.Blinding, err = cvEncryptPoint(receiverPublicKey, &blindingPoint, witness.BlindingCoin)
+	if err != nil {
+		return nil, nil, err
 	}
 	offer.Evaluation = cvPointSum(
 		pointPtr(cvPointTimes(&genG1, &scalar)),
@@ -100,52 +107,69 @@ func cvProveOwnershipV2(
 	if err != nil {
 		return nil, err
 	}
-	total := 2 * chunks
 	proof := &cvOwnershipProofV2{
-		CoinCommitments: make([]bls12381.G1Affine, total), CipherCommitments: make([]bls12381.G1Affine, total),
-		CoinResponses: make([]fr.Element, total), DigitResponses: make([]fr.Element, total),
+		ScalarCoinCommitments:   make([]bls12381.G1Affine, chunks),
+		ScalarCipherCommitments: make([]bls12381.G1Affine, chunks),
+		ScalarCoinResponses:     make([]fr.Element, chunks), ScalarDigitResponses: make([]fr.Element, chunks),
 	}
-	coinNonces := make([]fr.Element, total)
-	digitNonces := make([]fr.Element, total)
+	coinNonces := make([]fr.Element, chunks)
+	digitNonces := make([]fr.Element, chunks)
+	var blindingCoinNonce, blindingShareNonce fr.Element
 	h, err := cvPedersenBase()
 	if err != nil {
 		return nil, err
 	}
-	bases := [2]bls12381.G1Affine{genG1, h}
-	for lane := 0; lane < 2; lane++ {
-		if len(witness.Digits[lane]) != chunks || len(witness.Coins[lane]) != chunks {
-			return nil, fmt.Errorf("invalid CV V2 ownership witness dimensions")
-		}
-		for chunk := 0; chunk < chunks; chunk++ {
-			position := lane*chunks + chunk
-			if _, err := coinNonces[position].SetRandom(); err != nil {
-				return nil, err
-			}
-			if _, err := digitNonces[position].SetRandom(); err != nil {
-				return nil, err
-			}
-			proof.CoinCommitments[position] = cvPointTimes(&genG1, &coinNonces[position])
-			proof.CipherCommitments[position] = cvPointSum(
-				pointPtr(cvPointTimes(receiverPublicKey, &coinNonces[position])),
-				pointPtr(cvPointTimes(&bases[lane], &digitNonces[position])),
-			)
-		}
+	if len(witness.ScalarDigits) != chunks || len(witness.ScalarCoins) != chunks {
+		return nil, fmt.Errorf("invalid CV V2 ownership witness dimensions")
 	}
+	for chunk := 0; chunk < chunks; chunk++ {
+		if _, err := coinNonces[chunk].SetRandom(); err != nil {
+			return nil, err
+		}
+		if _, err := digitNonces[chunk].SetRandom(); err != nil {
+			return nil, err
+		}
+		proof.ScalarCoinCommitments[chunk] = cvPointTimes(&genG1, &coinNonces[chunk])
+		proof.ScalarCipherCommitments[chunk] = cvPointSum(
+			pointPtr(cvPointTimes(receiverPublicKey, &coinNonces[chunk])),
+			pointPtr(cvPointTimes(&genG1, &digitNonces[chunk])),
+		)
+	}
+	if _, err := blindingCoinNonce.SetRandom(); err != nil {
+		return nil, err
+	}
+	if _, err := blindingShareNonce.SetRandom(); err != nil {
+		return nil, err
+	}
+	proof.BlindingCoinCommitment = cvPointTimes(&genG1, &blindingCoinNonce)
+	proof.BlindingCipherCommitment = cvPointSum(
+		pointPtr(cvPointTimes(receiverPublicKey, &blindingCoinNonce)),
+		pointPtr(cvPointTimes(&h, &blindingShareNonce)),
+	)
+	weightedDigitNonce, err := cvWeightedScalarV2(digitNonces, context.Profile.chunkBits)
+	if err != nil {
+		return nil, err
+	}
+	proof.EvaluationCommitment = cvPointSum(
+		pointPtr(cvPointTimes(&genG1, &weightedDigitNonce)),
+		pointPtr(cvPointTimes(&h, &blindingShareNonce)),
+	)
 	challenge, err := cvOwnershipChallengeScalarV2(context, dealerID, offer, receiverPublicKey, proof)
 	if err != nil {
 		return nil, err
 	}
-	for lane := 0; lane < 2; lane++ {
-		for chunk := 0; chunk < chunks; chunk++ {
-			position := lane*chunks + chunk
-			var digit fr.Element
-			digit.SetUint64(witness.Digits[lane][chunk])
-			proof.CoinResponses[position].Mul(&challenge, &witness.Coins[lane][chunk]).
-				Add(&proof.CoinResponses[position], &coinNonces[position])
-			proof.DigitResponses[position].Mul(&challenge, &digit).
-				Add(&proof.DigitResponses[position], &digitNonces[position])
-		}
+	for chunk := 0; chunk < chunks; chunk++ {
+		var digit fr.Element
+		digit.SetUint64(witness.ScalarDigits[chunk])
+		proof.ScalarCoinResponses[chunk].Mul(&challenge, &witness.ScalarCoins[chunk]).
+			Add(&proof.ScalarCoinResponses[chunk], &coinNonces[chunk])
+		proof.ScalarDigitResponses[chunk].Mul(&challenge, &digit).
+			Add(&proof.ScalarDigitResponses[chunk], &digitNonces[chunk])
 	}
+	proof.BlindingCoinResponse.Mul(&challenge, &witness.BlindingCoin).
+		Add(&proof.BlindingCoinResponse, &blindingCoinNonce)
+	proof.BlindingShareResponse.Mul(&challenge, &witness.Blinding).
+		Add(&proof.BlindingShareResponse, &blindingShareNonce)
 	return proof, nil
 }
 
@@ -164,15 +188,20 @@ func cvVerifyOwnershipV2(
 		return err
 	}
 	proof := &offer.Ownership
-	total := 2 * chunks
-	if len(proof.CoinCommitments) != total || len(proof.CipherCommitments) != total ||
-		len(proof.CoinResponses) != total || len(proof.DigitResponses) != total {
+	if len(proof.ScalarCoinCommitments) != chunks || len(proof.ScalarCipherCommitments) != chunks ||
+		len(proof.ScalarCoinResponses) != chunks || len(proof.ScalarDigitResponses) != chunks {
 		return fmt.Errorf("invalid CV V2 ownership proof dimensions")
 	}
-	for i := 0; i < total; i++ {
-		if !cvValidG1(&proof.CoinCommitments[i], true) || !cvValidG1(&proof.CipherCommitments[i], true) {
+	for i := 0; i < chunks; i++ {
+		if !cvValidG1(&proof.ScalarCoinCommitments[i], true) ||
+			!cvValidG1(&proof.ScalarCipherCommitments[i], true) {
 			return fmt.Errorf("invalid CV V2 ownership proof point")
 		}
+	}
+	if !cvValidG1(&proof.BlindingCoinCommitment, true) ||
+		!cvValidG1(&proof.BlindingCipherCommitment, true) ||
+		!cvValidG1(&proof.EvaluationCommitment, true) {
+		return fmt.Errorf("invalid CV V2 ownership proof point")
 	}
 	challenge, err := cvOwnershipChallengeScalarV2(context, dealerID, offer, receiverPublicKey, proof)
 	if err != nil {
@@ -182,27 +211,51 @@ func cvVerifyOwnershipV2(
 	if err != nil {
 		return err
 	}
-	bases := [2]bls12381.G1Affine{genG1, h}
-	for lane := 0; lane < 2; lane++ {
-		for chunk := 0; chunk < chunks; chunk++ {
-			position := lane*chunks + chunk
-			ciphertext := &offer.Lanes[lane].Chunks[chunk]
-			leftCoin := cvPointTimes(&genG1, &proof.CoinResponses[position])
-			rightCoin := cvPointSum(&proof.CoinCommitments[position],
-				pointPtr(cvPointTimes(&ciphertext.r, &challenge)))
-			if !leftCoin.Equal(&rightCoin) {
-				return fmt.Errorf("invalid CV V2 ownership coin equation")
-			}
-			leftCipher := cvPointSum(
-				pointPtr(cvPointTimes(receiverPublicKey, &proof.CoinResponses[position])),
-				pointPtr(cvPointTimes(&bases[lane], &proof.DigitResponses[position])),
-			)
-			rightCipher := cvPointSum(&proof.CipherCommitments[position],
-				pointPtr(cvPointTimes(&ciphertext.c, &challenge)))
-			if !leftCipher.Equal(&rightCipher) {
-				return fmt.Errorf("invalid CV V2 ownership ciphertext equation")
-			}
+	for chunk := 0; chunk < chunks; chunk++ {
+		ciphertext := &offer.ScalarChunks[chunk]
+		leftCoin := cvPointTimes(&genG1, &proof.ScalarCoinResponses[chunk])
+		rightCoin := cvPointSum(&proof.ScalarCoinCommitments[chunk],
+			pointPtr(cvPointTimes(&ciphertext.r, &challenge)))
+		if !leftCoin.Equal(&rightCoin) {
+			return fmt.Errorf("invalid CV V2 ownership scalar coin equation")
 		}
+		leftCipher := cvPointSum(
+			pointPtr(cvPointTimes(receiverPublicKey, &proof.ScalarCoinResponses[chunk])),
+			pointPtr(cvPointTimes(&genG1, &proof.ScalarDigitResponses[chunk])),
+		)
+		rightCipher := cvPointSum(&proof.ScalarCipherCommitments[chunk],
+			pointPtr(cvPointTimes(&ciphertext.c, &challenge)))
+		if !leftCipher.Equal(&rightCipher) {
+			return fmt.Errorf("invalid CV V2 ownership scalar ciphertext equation")
+		}
+	}
+	leftBlindingCoin := cvPointTimes(&genG1, &proof.BlindingCoinResponse)
+	rightBlindingCoin := cvPointSum(&proof.BlindingCoinCommitment,
+		pointPtr(cvPointTimes(&offer.Blinding.r, &challenge)))
+	if !leftBlindingCoin.Equal(&rightBlindingCoin) {
+		return fmt.Errorf("invalid CV V2 ownership blinding coin equation")
+	}
+	leftBlindingCipher := cvPointSum(
+		pointPtr(cvPointTimes(receiverPublicKey, &proof.BlindingCoinResponse)),
+		pointPtr(cvPointTimes(&h, &proof.BlindingShareResponse)),
+	)
+	rightBlindingCipher := cvPointSum(&proof.BlindingCipherCommitment,
+		pointPtr(cvPointTimes(&offer.Blinding.c, &challenge)))
+	if !leftBlindingCipher.Equal(&rightBlindingCipher) {
+		return fmt.Errorf("invalid CV V2 ownership blinding ciphertext equation")
+	}
+	weightedResponse, err := cvWeightedScalarV2(proof.ScalarDigitResponses, context.Profile.chunkBits)
+	if err != nil {
+		return err
+	}
+	leftEvaluation := cvPointSum(
+		pointPtr(cvPointTimes(&genG1, &weightedResponse)),
+		pointPtr(cvPointTimes(&h, &proof.BlindingShareResponse)),
+	)
+	rightEvaluation := cvPointSum(&proof.EvaluationCommitment,
+		pointPtr(cvPointTimes(&offer.Evaluation, &challenge)))
+	if !leftEvaluation.Equal(&rightEvaluation) {
+		return fmt.Errorf("invalid CV V2 ownership evaluation equation")
 	}
 	return nil
 }
@@ -210,52 +263,46 @@ func cvVerifyOwnershipV2(
 func cvVerifyAndDecryptReceiverLanesV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
-) (fr.Element, fr.Element, error) {
+) (fr.Element, bls12381.G1Affine, error) {
 	// Ownership is intentionally verified before the receiver secret is used.
 	if err := cvVerifyOwnershipV2(context, dealerID, offer, receiverPublicKey); err != nil {
-		return fr.Element{}, fr.Element{}, err
+		return fr.Element{}, bls12381.G1Affine{}, err
 	}
 	expectedPublic, err := cvReceiverPublicKey(receiverSecret)
 	if err != nil || !expectedPublic.Equal(receiverPublicKey) {
-		return fr.Element{}, fr.Element{}, fmt.Errorf("CV V2 receiver secret does not match registry key")
+		return fr.Element{}, bls12381.G1Affine{}, fmt.Errorf("CV V2 receiver secret does not match registry key")
 	}
 	base, _, chunks, err := cvProfile(context.Profile)
 	if err != nil {
-		return fr.Element{}, fr.Element{}, err
+		return fr.Element{}, bls12381.G1Affine{}, err
 	}
-	h, err := cvPedersenBase()
+	digits := make([]uint64, chunks)
+	solver := cvNewBoundedDLogSolverForBaseV2(&genG1, base-1)
+	for chunk := 0; chunk < chunks; chunk++ {
+		plaintext := cvDecryptGroupCiphertextV2(&offer.ScalarChunks[chunk], receiverSecret)
+		digit, ok := solver.solve(&plaintext)
+		if !ok {
+			return fr.Element{}, bls12381.G1Affine{}, fmt.Errorf("CV V2 scalar chunk %d digit is out of range", chunk)
+		}
+		digits[chunk] = digit
+	}
+	scalar, err := cvDigitsToScalarV2(digits, context.Profile.chunkBits)
 	if err != nil {
-		return fr.Element{}, fr.Element{}, err
+		return fr.Element{}, bls12381.G1Affine{}, err
 	}
-	bases := [2]bls12381.G1Affine{genG1, h}
-	var recovered [2]fr.Element
-	for lane := 0; lane < 2; lane++ {
-		digits := make([]uint64, chunks)
-		solver := cvNewBoundedDLogSolverForBaseV2(&bases[lane], base-1)
-		for chunk := 0; chunk < chunks; chunk++ {
-			ciphertext := &offer.Lanes[lane].Chunks[chunk]
-			var shared, plaintext bls12381.G1Affine
-			shared.ScalarMultiplication(&ciphertext.r, receiverSecret.BigInt(new(big.Int)))
-			plaintext.Sub(&ciphertext.c, &shared)
-			digit, ok := solver.solve(&plaintext)
-			if !ok {
-				return fr.Element{}, fr.Element{}, fmt.Errorf("CV V2 lane %d chunk %d digit is out of range", lane, chunk)
-			}
-			digits[chunk] = digit
-		}
-		recovered[lane], err = cvDigitsToScalarV2(digits, context.Profile.chunkBits)
-		if err != nil {
-			return fr.Element{}, fr.Element{}, err
-		}
-	}
-	evaluation := cvPointSum(
-		pointPtr(cvPointTimes(&genG1, &recovered[0])),
-		pointPtr(cvPointTimes(&h, &recovered[1])),
-	)
+	blindingOpening := cvDecryptGroupCiphertextV2(&offer.Blinding, receiverSecret)
+	evaluation := cvPointSum(pointPtr(cvPointTimes(&genG1, &scalar)), &blindingOpening)
 	if !evaluation.Equal(&offer.Evaluation) {
-		return fr.Element{}, fr.Element{}, fmt.Errorf("CV V2 decrypted lanes do not open receiver evaluation")
+		return fr.Element{}, bls12381.G1Affine{}, fmt.Errorf("CV V2 decrypted ciphertexts do not open receiver evaluation")
 	}
-	return recovered[0], recovered[1], nil
+	return scalar, blindingOpening, nil
+}
+
+func cvDecryptGroupCiphertextV2(ciphertext *cvElGamalCiphertext, secret fr.Element) bls12381.G1Affine {
+	var shared, plaintext bls12381.G1Affine
+	shared.ScalarMultiplication(&ciphertext.r, secret.BigInt(new(big.Int)))
+	plaintext.Sub(&ciphertext.c, &shared)
+	return plaintext
 }
 
 func cvValidateReceiverBindingV2(
@@ -280,14 +327,12 @@ func cvValidateLaneOfferShapeV2(
 	if err != nil {
 		return err
 	}
-	for lane := 0; lane < 2; lane++ {
-		if len(offer.Lanes[lane].Chunks) != chunks {
-			return fmt.Errorf("invalid CV V2 receiver lane chunk count")
-		}
-		for chunk := range offer.Lanes[lane].Chunks {
-			if !cvValidCiphertext(&offer.Lanes[lane].Chunks[chunk]) {
-				return fmt.Errorf("invalid CV V2 receiver ciphertext")
-			}
+	if len(offer.ScalarChunks) != chunks || !cvValidCiphertext(&offer.Blinding) {
+		return fmt.Errorf("invalid CV V2 receiver ciphertext shape")
+	}
+	for chunk := range offer.ScalarChunks {
+		if !cvValidCiphertext(&offer.ScalarChunks[chunk]) {
+			return fmt.Errorf("invalid CV V2 receiver scalar ciphertext")
 		}
 	}
 	return nil
@@ -312,18 +357,39 @@ func cvOwnershipChallengeScalarV2(
 	_ = cvWriteBytes(&wire, context.ReceiverRegistryDigest)
 	cvWritePoint(&wire, receiverPublicKey)
 	cvWritePoint(&wire, &offer.Evaluation)
-	for lane := 0; lane < 2; lane++ {
-		for chunk := range offer.Lanes[lane].Chunks {
-			cvWriteCiphertext(&wire, &offer.Lanes[lane].Chunks[chunk])
-		}
-	}
-	if err := cvWritePointVector(&wire, proof.CoinCommitments); err != nil {
+	if err := cvWriteUint32(&wire, len(offer.ScalarChunks)); err != nil {
 		return fr.Element{}, err
 	}
-	if err := cvWritePointVector(&wire, proof.CipherCommitments); err != nil {
+	for chunk := range offer.ScalarChunks {
+		cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
+	}
+	cvWriteCiphertext(&wire, &offer.Blinding)
+	if err := cvWritePointVector(&wire, proof.ScalarCoinCommitments); err != nil {
 		return fr.Element{}, err
 	}
+	if err := cvWritePointVector(&wire, proof.ScalarCipherCommitments); err != nil {
+		return fr.Element{}, err
+	}
+	cvWritePoint(&wire, &proof.BlindingCoinCommitment)
+	cvWritePoint(&wire, &proof.BlindingCipherCommitment)
+	cvWritePoint(&wire, &proof.EvaluationCommitment)
 	return cvHashToFr(cvOwnershipProofChallengeV2, wire.Bytes())
+}
+
+func cvWeightedScalarV2(values []fr.Element, chunkBits uint) (fr.Element, error) {
+	if len(values) == 0 || chunkBits == 0 || chunkBits > cvMaxChunkBits {
+		return fr.Element{}, fmt.Errorf("invalid CV V2 weighted scalar input")
+	}
+	var base fr.Element
+	base.SetUint64(uint64(1) << chunkBits)
+	powers := cvFrPowers(base, len(values))
+	var result fr.Element
+	for i := range values {
+		var term fr.Element
+		term.Mul(&values[i], &powers[i])
+		result.Add(&result, &term)
+	}
+	return result, nil
 }
 
 type cvBoundedDLogSolverV2 struct {
