@@ -131,6 +131,12 @@ func (m *DumboMVBA) runEquivalent(ctx context.Context, input ProposalValue) (Pro
 			if err != nil {
 				return ProposalValue{}, fmt.Errorf("rc-subprotocol leader=%d failed: %w", l, err)
 			}
+			// RC already binds the decoded bytes to the certified Merkle root.
+			// Application validity is deterministic, so all honest nodes skip the
+			// same invalid recovered leader and advance in the common permutation.
+			if !m.payloadValid(dec) {
+				continue
+			}
 			return ProposalValue{
 				Payload: dec,
 				Round:   r,
@@ -204,8 +210,8 @@ func (m *DumboMVBA) runQuitPD(ctx context.Context, sid string, recv <-chan Recei
 	readyShares := make(map[int][]byte, n)
 	finishSent := false
 
-	sendFinish := func(proof []SigShare) {
-		msg := quitFinishMsg{SID: sid, Proof: cloneShares(proof)}
+	sendFinish := func(certificate []byte) {
+		msg := quitFinishMsg{SID: sid, Certificate: append([]byte(nil), certificate...)}
 		for i := 0; i < n; i++ {
 			_ = m.net.Send(i, ProtocolMessage{
 				Tag:    TagMVBAPDFinish,
@@ -243,14 +249,17 @@ func (m *DumboMVBA) runQuitPD(ctx context.Context, sid string, recv <-chan Recei
 		case in := <-recv:
 			switch msg := in.Msg.Body.(type) {
 			case pdDoneMsg:
-				if _, seen := seenDone[in.From]; seen {
+				if msg.Leader < 0 || msg.Leader >= n || msg.SID != sid+"PD"+itoa(msg.Leader) {
 					continue
 				}
-				dig := digestDomain("PD_LOCKED", msg.SID, msg.Root)
-				if !verifyShareSet(m.signer, "PD_LOCKED", dig, msg.Proof, provenThreshold) {
+				if _, seen := seenDone[msg.Leader]; seen {
 					continue
 				}
-				seenDone[in.From] = struct{}{}
+				dig := pdCertificateDigest("PD_LOCKED", msg.SID, msg.Leader, msg.Root)
+				if !verifyThresholdCertificate(m.signer, "PD_LOCKED", dig, msg.Certificate, provenThreshold) {
+					continue
+				}
+				seenDone[msg.Leader] = struct{}{}
 				provens++
 				if provens == provenThreshold {
 					if err := sendReady(); err != nil {
@@ -271,7 +280,13 @@ func (m *DumboMVBA) runQuitPD(ctx context.Context, sid string, recv <-chan Recei
 				seenReady[in.From] = struct{}{}
 				readyShares[in.From] = append([]byte(nil), msg.Share...)
 				if len(readyShares) >= readyThreshold && !finishSent {
-					sendFinish(collectShares(readyShares, readyThreshold))
+					certificate, err := recoverThresholdCertificate(
+						m.signer, "PD_QUIT_READY", dig, readyShares, readyThreshold,
+					)
+					if err != nil {
+						return -1, err
+					}
+					sendFinish(certificate)
 					finishSent = true
 				}
 			case quitFinishMsg:
@@ -283,11 +298,11 @@ func (m *DumboMVBA) runQuitPD(ctx context.Context, sid string, recv <-chan Recei
 				}
 				seenFinish[in.From] = struct{}{}
 				dig := hashBytes([]byte("PD_QUIT_READY"), []byte(sid))
-				if !verifyShareSet(m.signer, "PD_QUIT_READY", dig, msg.Proof, readyThreshold) {
+				if !verifyThresholdCertificate(m.signer, "PD_QUIT_READY", dig, msg.Certificate, readyThreshold) {
 					continue
 				}
 				if !finishSent {
-					sendFinish(msg.Proof)
+					sendFinish(msg.Certificate)
 					finishSent = true
 				}
 				return in.From, nil
@@ -315,8 +330,10 @@ func (m *DumboMVBA) runRCPrepare(ctx context.Context, sid string, leader int, re
 			}
 			rcSeen[in.From] = struct{}{}
 			if msg.Lock != nil {
-				dig := digestDomain("PD_STORED", sid+"PD"+itoa(leader), msg.Lock.Root)
-				if verifyShareSet(m.signer, "PD_STORED", dig, msg.Lock.Proof, m.cfg.N-m.cfg.F) {
+				dig := pdCertificateDigest("PD_STORED", sid+"PD"+itoa(leader), leader, msg.Lock.Root)
+				if msg.Lock.Leader == leader && verifyThresholdCertificate(
+					m.signer, "PD_STORED", dig, msg.Lock.Certificate, m.cfg.N-m.cfg.F,
+				) {
 					hasValidLock = true
 				}
 			}
@@ -349,9 +366,8 @@ func cloneLock(in *pdLockMsg) *pdLockMsg {
 		return nil
 	}
 	return &pdLockMsg{
-		SID:   in.SID,
-		Root:  append([]byte(nil), in.Root...),
-		Proof: cloneShares(in.Proof),
+		SID: in.SID, Leader: in.Leader, Root: append([]byte(nil), in.Root...),
+		Certificate: append([]byte(nil), in.Certificate...),
 	}
 }
 

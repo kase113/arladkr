@@ -28,6 +28,12 @@ type runtimeCrypto struct {
 	phaseRecvBytes map[string]uint64
 }
 
+func newRuntimeCommMetrics(enabled bool) *runtimeCrypto {
+	return &runtimeCrypto{
+		commMetrics: enabled, phaseSentBytes: make(map[string]uint64), phaseRecvBytes: make(map[string]uint64),
+	}
+}
+
 func ensureRuntime(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("nil config")
@@ -149,6 +155,24 @@ func (r *runtimeCrypto) recordRecvBytes(n int) {
 	if r.commPhase != "" {
 		r.phaseRecvBytes[r.commPhase] += uint64(n)
 	}
+	r.commMu.Unlock()
+}
+
+func (r *runtimeCrypto) recordNamedSentBytes(name string, n int) {
+	if r == nil || !r.commMetrics || name == "" || n <= 0 {
+		return
+	}
+	r.commMu.Lock()
+	r.phaseSentBytes[name] += uint64(n)
+	r.commMu.Unlock()
+}
+
+func (r *runtimeCrypto) recordNamedRecvBytes(name string, n int) {
+	if r == nil || !r.commMetrics || name == "" || n <= 0 {
+		return
+	}
+	r.commMu.Lock()
+	r.phaseRecvBytes[name] += uint64(n)
 	r.commMu.Unlock()
 }
 
@@ -338,29 +362,57 @@ func newTBLSThresholdSignerFromV2Material(material *cvV2ThresholdKeyMaterial) (*
 	}, nil
 }
 
-type mvbaCoinSigner struct {
+type mvbaDomainSigner struct {
 	member int
-	signer *tblsThresholdSigner
+	high   *tblsThresholdSigner
+	low    *tblsThresholdSigner
 }
 
-func (s *mvbaCoinSigner) ID() int { return s.member }
+func (s *mvbaDomainSigner) ID() int { return s.member }
 
-func (s *mvbaCoinSigner) Sign(domain string, digest []byte) ([]byte, error) {
-	return s.signer.SignShare(s.member, domain, digest)
+func (s *mvbaDomainSigner) signerForDomain(domain string) (*tblsThresholdSigner, bool) {
+	switch strings.ToUpper(domain) {
+	case "PD_STORED", "PD_LOCKED", "ACS_DIFFUSE":
+		return s.high, s.high != nil
+	case "PD_QUIT_READY", "EQ_COIN_SHARE":
+		return s.low, s.low != nil
+	default:
+		return nil, false
+	}
 }
 
-func (s *mvbaCoinSigner) Verify(from int, domain string, digest, signature []byte) bool {
-	return s.signer.VerifyShare(from, domain, digest, signature)
+func (s *mvbaDomainSigner) Sign(domain string, digest []byte) ([]byte, error) {
+	signer, ok := s.signerForDomain(domain)
+	if !ok {
+		return nil, fmt.Errorf("missing MVBA signer for domain %s", domain)
+	}
+	return signer.SignShare(s.member, domain, digest)
 }
 
-func (s *mvbaCoinSigner) Threshold(string) int { return s.signer.Threshold() }
-
-func (s *mvbaCoinSigner) Recover(domain string, digest []byte, shares map[int][]byte) ([]byte, error) {
-	return s.signer.Recover(domain, digest, shares)
+func (s *mvbaDomainSigner) Verify(from int, domain string, digest, signature []byte) bool {
+	signer, ok := s.signerForDomain(domain)
+	return ok && signer.VerifyShare(from, domain, digest, signature)
 }
 
-func (s *mvbaCoinSigner) VerifyRecovered(domain string, digest, signature []byte) bool {
-	return s.signer.VerifyRecovered(domain, digest, signature)
+func (s *mvbaDomainSigner) Threshold(domain string) int {
+	signer, ok := s.signerForDomain(domain)
+	if !ok {
+		return 0
+	}
+	return signer.Threshold()
+}
+
+func (s *mvbaDomainSigner) Recover(domain string, digest []byte, shares map[int][]byte) ([]byte, error) {
+	signer, ok := s.signerForDomain(domain)
+	if !ok {
+		return nil, fmt.Errorf("missing MVBA signer for domain %s", domain)
+	}
+	return signer.Recover(domain, digest, shares)
+}
+
+func (s *mvbaDomainSigner) VerifyRecovered(domain string, digest, signature []byte) bool {
+	signer, ok := s.signerForDomain(domain)
+	return ok && signer.VerifyRecovered(domain, digest, signature)
 }
 
 func materialMemberIDs(shares map[int]fr.Element) []int {

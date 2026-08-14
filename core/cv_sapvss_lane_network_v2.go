@@ -24,6 +24,8 @@ type cvPendingLaneACKsV2 struct {
 	offers    []*cvReceiverLaneOfferV2
 	witnesses []*cvDealerReceiverWitnessV2
 	acks      map[int]*cvACKEvidenceV2
+	quorum    int
+	frozen    bool
 	ready     chan struct{}
 }
 
@@ -89,7 +91,7 @@ func cvLaneOfferDigestV2(wire []byte) []byte {
 	return hashBytes([]byte("ARL-CV-sAPVSS/v2-scalar-group/lane-offer-digest"), wire)
 }
 
-func (s *cvAPDBNetworkServiceV2) BuildAllACKLeafV2(ctx context.Context) (*cvLeafV2, error) {
+func (s *cvAPDBNetworkServiceV2) BuildLeafV2(ctx context.Context) (*cvLeafV2, error) {
 	if s == nil || ctx == nil || s.cfg.LeafContext == nil || s.cfg.Receivers == nil || s.cfg.Validators == nil ||
 		!cvMemberInRosterV2(s.cfg.LocalNode, s.cfg.OldRoster) {
 		return nil, fmt.Errorf("invalid CV V2 network leaf builder")
@@ -111,10 +113,14 @@ func (s *cvAPDBNetworkServiceV2) BuildAllACKLeafV2(ctx context.Context) (*cvLeaf
 	if err != nil {
 		return nil, err
 	}
+	quorum := len(s.cfg.NewRoster) - cvNewFaultBoundFromContextV2(s.cfg.LeafContext)
+	if quorum <= 0 || quorum > len(s.cfg.NewRoster) {
+		return nil, fmt.Errorf("invalid CV V2 lane ACK quorum")
+	}
 	pending := &cvPendingLaneACKsV2{
 		offers:    make([]*cvReceiverLaneOfferV2, len(s.cfg.NewRoster)),
 		witnesses: make([]*cvDealerReceiverWitnessV2, len(s.cfg.NewRoster)),
-		acks:      make(map[int]*cvACKEvidenceV2, len(s.cfg.NewRoster)), ready: make(chan struct{}, 1),
+		acks:      make(map[int]*cvACKEvidenceV2, quorum), quorum: quorum, ready: make(chan struct{}, 1),
 	}
 	offerWires := make([][]byte, len(s.cfg.NewRoster))
 	for i, receiverID := range s.cfg.NewRoster {
@@ -135,21 +141,25 @@ func (s *cvAPDBNetworkServiceV2) BuildAllACKLeafV2(ctx context.Context) (*cvLeaf
 			return nil, err
 		}
 	}
-	wireBytes, err := cvAllACKLeafWireSizeV2(
-		s.cfg.LeafContext, s.cfg.LocalNode, commitments, coreProof, pending.offers,
-		s.cfg.Receivers, s.cfg.Validators,
-	)
-	if err != nil {
-		return nil, err
-	}
-	shardBytes := (8 + wireBytes + s.cfg.DataShards - 1) / s.cfg.DataShards
 	s.mu.Lock()
-	if s.cfg.ShardBytes != 0 && s.cfg.ShardBytes != shardBytes {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("CV V2 all-ACK leaf shard size mismatch")
-	}
-	s.cfg.ShardBytes = shardBytes
+	shardBytes := s.cfg.ShardBytes
 	s.mu.Unlock()
+	if shardBytes == 0 {
+		shardBytes, err = cvEpochShardBytesUpperBoundV2(
+			s.cfg.LeafContext, s.cfg.Params, s.cfg.Receivers, s.cfg.Validators, s.cfg.DataShards,
+		)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.cfg.ShardBytes == 0 {
+			s.cfg.ShardBytes = shardBytes
+		} else if s.cfg.ShardBytes != shardBytes {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("CV V2 epoch shard size mismatch")
+		}
+		s.mu.Unlock()
+	}
 	s.mu.Lock()
 	if s.pendingLaneACKsV2 != nil {
 		s.mu.Unlock()
@@ -171,59 +181,59 @@ func (s *cvAPDBNetworkServiceV2) BuildAllACKLeafV2(ctx context.Context) (*cvLeaf
 	}
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("CV V2 all-ACK leaf incomplete: %w", ctx.Err())
+		return nil, fmt.Errorf("CV V2 lane ACK quorum incomplete: %w", ctx.Err())
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	case <-pending.ready:
 	}
 	acks := make([]*cvACKEvidenceV2, len(s.cfg.NewRoster))
+	partition := &cvEvidencePartitionV2{}
+	fallbackOffers := make([]*cvReceiverLaneOfferV2, 0, len(s.cfg.NewRoster)-quorum)
+	fallbackKeys := make([]bls12381.G1Affine, 0, len(s.cfg.NewRoster)-quorum)
+	fallbackWitnesses := make([]*cvDealerReceiverWitnessV2, 0, len(s.cfg.NewRoster)-quorum)
 	s.mu.Lock()
-	for index, ack := range pending.acks {
-		acks[index-1] = ack
+	for index := 1; index <= len(s.cfg.NewRoster); index++ {
+		if ack, ok := pending.acks[index]; ok {
+			acks[index-1] = ack
+			partition.ACKReceiverIndices = append(partition.ACKReceiverIndices, index)
+			continue
+		}
+		partition.FallbackReceiverIndices = append(partition.FallbackReceiverIndices, index)
+		fallbackOffers = append(fallbackOffers, pending.offers[index-1])
+		fallbackKeys = append(fallbackKeys, s.cfg.Receivers.encryptionPublicKeys[index-1])
+		fallbackWitnesses = append(fallbackWitnesses, pending.witnesses[index-1])
 	}
 	s.mu.Unlock()
-	return cvBuildAllACKLeafV2(
-		s.cfg.LeafContext, s.cfg.LocalNode, commitments, coreProof, pending.offers, acks,
+	var fallback *cvFallbackEvidenceV2
+	if len(fallbackOffers) > 0 {
+		fallback, err = cvBuildFallbackEvidenceV2(
+			s.cfg.LeafContext, s.cfg.LocalNode, fallbackOffers, fallbackKeys, fallbackWitnesses,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	leaf, err := cvBuildLeafV2(
+		s.cfg.LeafContext, s.cfg.LocalNode, commitments, coreProof, pending.offers, acks, partition, fallback,
 		s.cfg.Receivers, s.cfg.Validators,
 	)
-}
-
-func cvAllACKLeafWireSizeV2(
-	context *cvLeafContextV2, dealer int, commitments []bls12381.G1Affine, coreProof *cvCoreProofV2,
-	offers []*cvReceiverLaneOfferV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
-) (int, error) {
-	if context == nil || len(offers) != len(context.NewRoster) {
-		return 0, fmt.Errorf("invalid CV V2 all-ACK leaf sizing input")
-	}
-	leaf := &cvLeafV2{Context: *cvCloneLeafContextV2(context), DealerID: dealer,
-		CoefficientCommitments: append([]bls12381.G1Affine(nil), commitments...), CoreProof: cvCloneCoreProofV2(coreProof),
-		Receivers:       make([]cvLeafReceiverV2, len(offers)),
-		Partition:       cvEvidencePartitionV2{ACKReceiverIndices: make([]int, len(offers))},
-		DealerSignature: make([]byte, bls12381.SizeOfG1AffineCompressed),
-	}
-	for i, offer := range offers {
-		if offer == nil {
-			return 0, fmt.Errorf("missing CV V2 all-ACK sizing offer")
-		}
-		leaf.Partition.ACKReceiverIndices[i] = i + 1
-		leaf.Receivers[i].Offer = *cvCloneReceiverLaneOfferV2(offer)
-		leaf.Receivers[i].ACK = &cvACKEvidenceV2{
-			Ownership: cvCloneOwnershipProofV2(&offer.Ownership), Signature: make([]byte, ed25519.SignatureSize),
-		}
-	}
-	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return len(wire), nil
+	if err := cvVerifyAPVSSV2(leaf, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators); err != nil {
+		return nil, fmt.Errorf("verify locally built CV V2 leaf: %w", err)
+	}
+	return leaf, nil
 }
 
-func cvAllACKLeafShardBytesV2(
-	context *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
-	dataShards int,
+func cvEpochShardBytesUpperBoundV2(
+	context *cvLeafContextV2, params cvV2Params, receivers *cvReceiverKeyMaterialV2,
+	validators *cvValidatorKeyMaterialV2, dataShards int,
 ) (int, error) {
-	if context == nil || receivers == nil || validators == nil || dataShards <= 0 || len(context.OldRoster) == 0 {
-		return 0, fmt.Errorf("invalid CV V2 all-ACK shard sizing input")
+	if context == nil || receivers == nil || validators == nil || dataShards <= 0 || len(context.OldRoster) == 0 ||
+		params.componentCount <= 0 || params.componentCount > len(context.OldRoster) ||
+		params.newFaults != cvNewFaultBoundFromContextV2(context) || params.newShareDegree != context.SharingDegree {
+		return 0, fmt.Errorf("invalid CV V2 epoch shard sizing input")
 	}
 	count := context.SharingDegree + 1
 	scalarCoefficients := make([]fr.Element, count)
@@ -238,20 +248,99 @@ func cvAllACKLeafShardBytesV2(
 		return 0, err
 	}
 	offers := make([]*cvReceiverLaneOfferV2, len(context.NewRoster))
+	witnesses := make([]*cvDealerReceiverWitnessV2, len(context.NewRoster))
 	for i, receiverID := range context.NewRoster {
 		index := i + 1
 		scalar := cvEvaluateScalarPolynomialV2(scalarCoefficients, index)
 		blinding := cvEvaluateScalarPolynomialV2(blindingCoefficients, index)
-		offers[i], _, err = cvEncryptReceiverLanesV2(
+		offers[i], witnesses[i], err = cvEncryptReceiverLanesV2(
 			context, dealer, receiverID, index, &receivers.encryptionPublicKeys[i], scalar, blinding,
 		)
 		if err != nil {
 			return 0, err
 		}
 	}
-	wireBytes, err := cvAllACKLeafWireSizeV2(context, dealer, commitments, coreProof, offers, receivers, validators)
+	maxWireBytes := 0
+	newFaults := cvNewFaultBoundFromContextV2(context)
+	for fallbackCount := 0; fallbackCount <= newFaults; fallbackCount++ {
+		acks := make([]*cvACKEvidenceV2, len(offers))
+		partition := cvEvidencePartitionV2{}
+		fallbackOffers := make([]*cvReceiverLaneOfferV2, 0, fallbackCount)
+		fallbackKeys := make([]bls12381.G1Affine, 0, fallbackCount)
+		fallbackWitnesses := make([]*cvDealerReceiverWitnessV2, 0, fallbackCount)
+		for i, offer := range offers {
+			if i < fallbackCount {
+				partition.FallbackReceiverIndices = append(partition.FallbackReceiverIndices, i+1)
+				fallbackOffers = append(fallbackOffers, offer)
+				fallbackKeys = append(fallbackKeys, receivers.encryptionPublicKeys[i])
+				fallbackWitnesses = append(fallbackWitnesses, witnesses[i])
+				continue
+			}
+			partition.ACKReceiverIndices = append(partition.ACKReceiverIndices, i+1)
+			acks[i] = &cvACKEvidenceV2{
+				Ownership: cvCloneOwnershipProofV2(&offer.Ownership), Signature: make([]byte, ed25519.SignatureSize),
+			}
+		}
+		var fallback *cvFallbackEvidenceV2
+		if fallbackCount > 0 {
+			fallback, err = cvBuildFallbackEvidenceV2(
+				context, dealer, fallbackOffers, fallbackKeys, fallbackWitnesses,
+			)
+			if err != nil {
+				return 0, err
+			}
+		}
+		leaf := &cvLeafV2{
+			Context: *cvCloneLeafContextV2(context), DealerID: dealer,
+			CoefficientCommitments: append([]bls12381.G1Affine(nil), commitments...),
+			CoreProof:              cvCloneCoreProofV2(coreProof), Partition: partition, Fallback: fallback,
+			Receivers:       make([]cvLeafReceiverV2, len(offers)),
+			DealerSignature: make([]byte, bls12381.SizeOfG1AffineCompressed),
+		}
+		for i := range offers {
+			leaf.Receivers[i] = cvLeafReceiverV2{Offer: *cvCloneReceiverLaneOfferV2(offers[i]), ACK: acks[i]}
+		}
+		wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+		if err != nil {
+			return 0, err
+		}
+		if len(wire) > maxWireBytes {
+			maxWireBytes = len(wire)
+		}
+	}
+
+	contextDigest, err := cvLeafContextDigestV2(context)
 	if err != nil {
 		return 0, err
 	}
-	return (8 + wireBytes + dataShards - 1) / dataShards, nil
+	aggregate := &cvAggregateV2{
+		ContextDigest:          append([]byte(nil), contextDigest...),
+		Components:             make([]cvAggregateComponentV2, params.componentCount),
+		CoefficientCommitments: append([]bls12381.G1Affine(nil), commitments...),
+		Receivers:              make([]cvAggregateReceiverV2, len(offers)),
+	}
+	for i := range aggregate.Components {
+		aggregate.Components[i] = cvAggregateComponentV2{
+			DealerID: context.OldRoster[i], LeafDigest: make([]byte, 32),
+		}
+	}
+	for i, offer := range offers {
+		aggregate.Receivers[i] = cvAggregateReceiverV2{
+			ReceiverID: offer.ReceiverID, ReceiverIndex: offer.ReceiverIndex, Evaluation: offer.Evaluation,
+			ScalarChunks: append([]cvElGamalCiphertext(nil), offer.ScalarChunks...), Blinding: offer.Blinding,
+		}
+	}
+	unsigned, err := cvAggregateV2UnsignedCanonicalBytes(aggregate, context, params)
+	if err != nil {
+		return 0, err
+	}
+	aggregate.Digest = hashBytes([]byte(cvAggregateDigestV2Domain), unsigned)
+	aggregateWire, err := cvAggregateV2CanonicalBytes(aggregate, context, params)
+	if err != nil {
+		return 0, err
+	}
+	if len(aggregateWire) > maxWireBytes {
+		maxWireBytes = len(aggregateWire)
+	}
+	return (8 + maxWireBytes + dataShards - 1) / dataShards, nil
 }

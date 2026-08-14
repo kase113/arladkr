@@ -7,27 +7,27 @@ providers or legacy agreement/recovery modes.
 ## Protocol path
 
 ```text
-CV-sAPVSS ACK/I leaf
--> component RS shard availability lock
--> ReadyCert + optimistic primary + deterministic FirstKValid
--> holder-local aggregate verification and fresh RS dispersal
--> recovered ARC certificate
--> one predicate-capable common-subset MVBA
--> one aggregate recovery
--> scalar shares and public receipts
+scalar/group CV-sAPVSS V2 ACK/fallback leaf
+-> component APDB lock and verified catalog
+-> eligibility coin and sampled proposer/validator sets
+-> Pool/PoolCert and contributor-coin aggregate
+-> aggregate APDB lock and sampled VCert
+-> one direct predicate-bearing MVBA
+-> DecCert handoff and new-committee aggregate recovery
+-> persist scalar shares, exchange proofs, interpolate public key
 ```
 
-The APVSS transcript keeps every receiver ciphertext so the agreed aggregate
-is self-contained. Receivers that acknowledge a lane bind a signed statement;
-the complement set `I` carries an exact-lane proof or the experimental compact
-batch proof. The compact backend remains behind `-allow-experimental-apvss`
-pending proof alignment and independent cryptographic review.
+For each receiver, the V2 transcript contains radix ciphertexts for one scalar
+share and one group ElGamal ciphertext for its Pedersen blinding. ACK receivers
+provide an identity-bound ownership statement; the complement set carries the
+fixed aggregated range/link evidence. Aggregation combines ciphertexts and
+commitments homomorphically but never aggregates component proofs: every
+selected leaf is decoded and verified again.
 
-Component descriptors and aggregate locks carry recovered threshold
-certificates only. Individual signature shares stay at the collector and are
-discarded after certificate recovery. The final agreement object is a compact,
-materialized `AggRLO`; there is no fastlane/fallback agreement selector and no
-second MVBA.
+The agreement object binds the canonical Pool, selected contributors,
+aggregate APDB reference and VCert. Threshold-signature shares remain local to
+their collectors; only recovered certificates enter the public transcript.
+There is one V2 MVBA decision and one authorized aggregate recovery.
 
 ## Build and test
 
@@ -48,44 +48,46 @@ Run a local multi-process TCP cluster:
 ./scripts/run_cv_cluster.sh 4 1 /tmp/arladkr-cv 20000
 ```
 
-Relevant benchmark controls are `-f-old`, `-f-new`, `-kappa`, `-apvss-mode`,
-`-apvss-full-proof-profile`, `-apvss-fallback-profile`, `-apvss-forced-fallback-count`,
-`-apvss-wait-all-acks`, network timeouts, and CV key/store directories.
-`RLADKR_LEAF_VERIFY_WORKERS` independently bounds ordered leaf
-retrieval/verification (default: reserve one scheduler slot, cap at four).
-The local multi-process harness divides logical CPUs across node processes;
-the effective worker count is recorded through the benchmark environment and
-should be fixed explicitly for cross-machine comparisons.
-Benchmark output fixes the architecture labels to
-`agreement_path=single-mvba`, `apvss_provider=cv-sapvss`,
-`arc_mode=materialized`, and `derive_mode=scalar`.
+Relevant experiment controls are `-f-old`, `-f-new`, `-kappa`,
+`-cv-proposer-sample`, `-cv-validator-sample`, the explicit failure target,
+network timeouts, and V2 key/store directories. Secure sampling is derived
+against the fixed worst-case corruption fraction `f/n <= 1/3`; a committee too
+small for the requested bound is rejected instead of silently shrinking the
+sample. Benchmark output labels the network path as
+`cv-sapvss-v2-scalar-group` / `single-mvba-v2`; `cmd/cvv2ref` uses a distinct
+reference-only label.
 
-Aggregate candidate materialization rotates one deterministic primary per
-epoch. Other nodes independently verify its manifest, persist their fresh
-shard, and reuse the recovered ARC-certified AggRLO. If the primary does not
-complete, they activate the existing ReadyCert/reselection path after
-their local `FirstKValid` prewarm completes and
-`RLADKR_CV_PRIMARY_GRACE_MS` (default `10000`) then expires. Benchmark output records
-`cv_candidate_mode` and the effective grace. The primary waits up to
-`RLADKR_CV_PRIMARY_POOL_GRACE_MS` (default `250`) for an in-flight canonical
-prefix update, but starts immediately after all `n_o` certified descriptors
-arrive. This second timer only coalesces normal-network reselections.
+`cmd/cvv2ref` emits one `arladkr-cvv2-reference-report-v1` JSON object with a
+stable parameter-derived experiment ID, sampling manifest, ordered raw runs,
+and mean timing/size metrics. Smoke runs are labeled `functional-smoke` and
+carry no negligible-failure claim. Secure sampling points can be validated
+without executing a very large cryptographic reference epoch:
+
+```sh
+go run ./cmd/cvv2ref -old-n 4 -old-f 1 -new-n 4 -new-f 1 -runs 1
+go run ./cmd/cvv2ref -manifest-only -old-n 313 -old-f 104 \
+  -new-n 4 -new-f 1 -failure-target 1e-8
+go run ./cmd/cvv2ref -matrix-file experiments/cvv2_reference_matrix_v1.json \
+  -matrix-manifest-only
+```
+
+The versioned pilot matrix contains three executable functional reference
+points and four secure sampling-only points. Omitting `-matrix-manifest-only`
+runs only the functional points; secure points never trigger large-committee
+cryptographic execution.
 
 ## Security boundary
 
 - Static corruption is the current target; dynamic corruption and forward-secure
   encryption are outside this implementation scope.
-- Fallback `compact-batch`, full-public `compact-batch`, and full-public
-  `field-congruent` are experimental. The full profiles use separate
-  all-receiver statement scopes. `field-congruent` binds the decrypted radix
-  value modulo the scalar field and intentionally omits the canonical-integer
-  comparator. None may be reported as production-ready or used for headline
-  results before their stated proof obligations and independent review close.
+- The fixed V2 fallback adapter is research code. This repository tests its
+  canonical statement, range/link binding and cross-domain rejection; it does
+  not replace the paper's security proof or an independent implementation
+  review.
 - Component RS plus Merkle membership is a retrievability prototype, not a full
   Byzantine codeword proof. Recovered payload, leaf digest, and APVSS validity
   are still checked before aggregation.
-- The optimistic primary gives one candidate in a healthy timely execution;
-  it is not an asynchronous proof that only one header can exist. After the
-  bounded grace, ReadyCert reselection may materialize multiple valid
-  candidates. Safety, ARC thresholds, and the single final MVBA do not depend
-  on the timer or primary being honest.
+- The current experiment is a fresh single epoch with co-located old/new roles.
+  Physical role separation, multi-epoch key rotation and incomplete-epoch
+  restart are outside the claimed experimental boundary. Both `rladkrbench`
+  and `run_cv_cluster.sh` reject any `runs`/`epochs` shape other than `1/1`.

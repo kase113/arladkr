@@ -42,9 +42,10 @@ type Config struct {
 
 	// CVProposerSampleSize and CVValidatorSampleSize are explicit protocol
 	// parameters for the CV V2 eligibility coin. They intentionally have no
-	// hidden defaults: deployment tooling must record the chosen failure bounds.
-	CVProposerSampleSize  int
-	CVValidatorSampleSize int
+	// hidden defaults: experiment tooling must record the chosen failure bounds.
+	CVProposerSampleSize    int
+	CVValidatorSampleSize   int
+	CVSamplingFailureTarget string
 
 	Kappa int
 
@@ -104,6 +105,7 @@ type Config struct {
 	CVLocalReceiverIDs []int
 
 	runtime           *runtimeCrypto
+	cvRuntimeV2       *cvEpochRuntimeV2
 	protocolTransport agreementTransport
 }
 
@@ -188,6 +190,10 @@ func NormalizeConfig(cfg Config) Config {
 	if out.Kappa == 0 {
 		out.Kappa = out.OldFaults + 1
 	}
+	if strings.TrimSpace(out.CVSamplingFailureTarget) == "" {
+		out.CVSamplingFailureTarget = "smoke"
+	}
+	out.CVSamplingFailureTarget = strings.ToLower(strings.TrimSpace(out.CVSamplingFailureTarget))
 	if out.WaitSPBCTimeout <= 0 {
 		out.WaitSPBCTimeout = 2 * time.Second
 	}

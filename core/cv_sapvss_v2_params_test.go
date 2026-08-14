@@ -34,8 +34,15 @@ func TestCVDeriveV2ParamsUsesExplicitFaultBounds(t *testing.T) {
 		t.Fatalf("proposer failure probability = %s, want 0", params.proposerFailureBound)
 	}
 	wantValidatorFailure := big.NewRat(1, 7)
-	if params.validatorFailureBound.Cmp(wantValidatorFailure) != 0 {
-		t.Fatalf("validator failure probability = %s, want %s", params.validatorFailureBound, wantValidatorFailure)
+	for name, got := range map[string]*big.Rat{
+		"soundness": params.validatorSoundnessFailureBound,
+		"liveness":  params.validatorLivenessFailureBound,
+		"combined":  params.validatorCombinedFailureBound,
+		"alias":     params.validatorFailureBound,
+	} {
+		if got.Cmp(wantValidatorFailure) != 0 {
+			t.Fatalf("validator %s failure probability = %s, want %s", name, got, wantValidatorFailure)
+		}
 	}
 }
 
@@ -45,11 +52,37 @@ func TestCVDeriveV2ParamsRejectsImplicitSamplesAndConflictingFaultBounds(t *test
 	if _, err := cvDeriveV2Params(missingSamples); err == nil {
 		t.Fatal("accepted V2 parameters with an implicit proposer sample size")
 	}
+	evenValidators := cvV2ParamsTestConfig()
+	evenValidators.CVValidatorSampleSize = 2
+	if _, err := cvDeriveV2Params(evenValidators); err == nil {
+		t.Fatal("accepted an even CV V2 validator sample size")
+	}
 
 	conflict := cvV2ParamsTestConfig()
 	conflict.FOld = 1
 	if _, err := cvDeriveV2Params(conflict); err == nil {
 		t.Fatal("accepted conflicting legacy and V2 old fault bounds")
+	}
+}
+
+func TestCVDeriveV2ParamsRejectsSampleSizesThatMislabelSecureTarget(t *testing.T) {
+	cfg := Config{
+		SID: "cv-v2-secure-target", Epoch: 1,
+		OldCommittee: make([]int, 1024), NewCommittee: []int{2000, 2001, 2002, 2003},
+		OldFaults: 341, NewFaults: 1,
+		CVProposerSampleSize: 3, CVValidatorSampleSize: 3,
+		CVSamplingFailureTarget: "1e-8",
+	}
+	for i := range cfg.OldCommittee {
+		cfg.OldCommittee[i] = i
+	}
+	if _, err := cvDeriveV2Params(cfg); err == nil {
+		t.Fatal("accepted smoke sample sizes labeled with a 1e-8 failure target")
+	}
+	cfg.CVProposerSampleSize = 17
+	cfg.CVValidatorSampleSize = 313
+	if _, err := cvDeriveV2Params(cfg); err != nil {
+		t.Fatalf("rejected sample sizes resolved for the 1e-8 target: %v", err)
 	}
 }
 
@@ -89,11 +122,65 @@ func TestCVV2ProtocolVersionRejectsLegacyContextWire(t *testing.T) {
 }
 
 func TestCVV2ValidatorFailureBoundUsesExactIntegerArithmetic(t *testing.T) {
-	got, err := cvV2ValidatorFailureBound(7, 2, 3, 2)
+	soundness, liveness, combined, err := cvV2ValidatorFailureBounds(7, 2, 3, 2)
 	if err != nil {
 		t.Fatalf("compute validator failure bound: %v", err)
 	}
-	if got.Cmp(big.NewRat(1, 7)) != 0 {
-		t.Fatalf("validator failure probability = %s, want 1/7", got)
+	for name, got := range map[string]*big.Rat{"soundness": soundness, "liveness": liveness, "combined": combined} {
+		if got.Cmp(big.NewRat(1, 7)) != 0 {
+			t.Fatalf("validator %s failure probability = %s, want 1/7", name, got)
+		}
+	}
+}
+
+func TestCVV2ValidatorFailureBoundsExposeEvenSampleLivenessGap(t *testing.T) {
+	soundness, liveness, combined, err := cvV2ValidatorFailureBounds(7, 2, 4, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if soundness.Sign() != 0 || liveness.Cmp(big.NewRat(2, 7)) != 0 || combined.Cmp(liveness) != 0 {
+		t.Fatalf("even-sample bounds soundness=%s liveness=%s combined=%s", soundness, liveness, combined)
+	}
+}
+
+func TestCVV2SecureSamplingOperatingPoints(t *testing.T) {
+	targets := []struct {
+		name                        string
+		target                      *big.Rat
+		wantProposer, wantValidator int
+	}{
+		{name: "1e-8", target: big.NewRat(1, 100000000), wantProposer: 15, wantValidator: 79},
+		{name: "1e-10", target: big.NewRat(1, 10000000000), wantProposer: 18, wantValidator: 83},
+	}
+	for _, test := range targets {
+		t.Run(test.name, func(t *testing.T) {
+			proposer := 0
+			for sample := 1; sample <= 128; sample++ {
+				bound, err := cvV2ProposerFailureBound(128, 42, sample)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bound.Cmp(test.target) <= 0 {
+					proposer = sample
+					break
+				}
+			}
+			validator := 0
+			for sample := 1; sample <= 128; sample += 2 {
+				threshold := (sample + 1) / 2
+				_, _, bound, err := cvV2ValidatorFailureBounds(128, 42, sample, threshold)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bound.Cmp(test.target) <= 0 {
+					validator = sample
+					break
+				}
+			}
+			if proposer != test.wantProposer || validator != test.wantValidator {
+				t.Fatalf("minimum samples proposer=%d validator=%d, want %d/%d",
+					proposer, validator, test.wantProposer, test.wantValidator)
+			}
+		})
 	}
 }

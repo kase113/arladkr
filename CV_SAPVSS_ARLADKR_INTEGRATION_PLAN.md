@@ -4,14 +4,14 @@
 
 **Goal:** Replace the benchmark execution path with a complete, cross-process CV-sAPVSS ARL-ADKR flow under static corruption: component availability, common dealer selection, materialized aggregate ARC, \(n_o-2f_o\)-shard recovery, receipt verification, and scalar threshold-key output.
 
-**Architecture:** Keep the existing CV algebra/proofs, TCP transport, threshold signer, Reed--Solomon library, and Dumbomvba ACS/MVBA. Add one CV-specific orchestration path called by `RunEpoch`; do not force receipt-bearing material through the legacy `APVSS` interface. Only a materialized AggRLO is proposed to MVBA, and the semantic decision remains its canonical digest.
+**Architecture:** This is the historical materialized-AggRLO integration plan. The current `RunEpoch` path is the scalar/group V2 protocol documented in the 2026-08-11 modification plan: V2 components, Pool/PoolCert, contributor selection, aggregate APDB, sampled VCert, one direct MVBA, DecCert handoff, and scalar-share recovery. The legacy objects below remain useful only as test fixtures or shared helpers unless explicitly identified otherwise.
 
 **Tech stack:** Go standard library, gnark-crypto BLS12-381/fr, klauspost/reedsolomon, existing `agreementTransport`, existing TBLS signer, existing Dumbomvba common-subset runner.
 
-**Status (2026-07-24):** Tasks 1--6 and the single-AggRLO-MVBA follow-up are implemented. Full CV
-tests and real `n=4`/`n=7` loopback TCP E2E pass. Task 7 removed all legacy runtime selection and the
-standalone `arl-pvss/` tree; compile-coupled Go legacy sources remain until caller analysis permits
-physical deletion.
+**Status (2026-08-14):** Superseded as an implementation authority by the scalar/group V2 plan.
+`RunEpoch` and runtime preparation now select only V2. Graft caller analysis removed the unreachable
+legacy `RunCVEpoch` production orchestration; legacy materialized/leaf helpers with active regression
+callers live only in `_test.go`. Shared curve, ElGamal, bounded-DLog, APDB and codec primitives remain.
 
 ---
 
@@ -22,7 +22,8 @@ physical deletion.
 - `core/cv_sapvss_component_service.go`, `core/cv_sapvss_aggregate_service.go`: component dispersal/retrieval, fresh shard/ARC collection, ARC-holder recovery, and receipt exchange.
 - `core/cv_sapvss_router.go`: exactly one `RecvChan` consumer per local old node and bounded tag demultiplexing for the whole epoch.
 - `core/cv_sapvss_store.go`: holder-local atomic shard persistence keyed by `(sid, epoch, header digest, holder)`.
-- `core/cv_sapvss_epoch.go`: CV-only `RunEpoch` orchestration and result construction.
+- `core/cv_sapvss_epoch_v2.go`: scalar/group V2 `RunEpoch` orchestration and result construction.
+- `core/cv_sapvss_epoch_legacy_test.go`: test-only materialized witness and legacy leaf fixtures.
 - `core/cv_sapvss_m4.go`: deterministic per-candidate fresh nonce entry point and helpers reused by the network path.
 - `core/mvba_tcp.go`: optional external-validity predicate and instance-domain parameter; old caller remains a thin wrapper.
 - `core/config.go`, `core/types.go`, `core/epoch.go`: CV constraints, result fields, and dispatch.
@@ -112,6 +113,6 @@ the retired full aggregate-offer wire is not accepted.
 ## Task 7: Legacy cleanup and documentation
 
 - [x] Remove old providers from CLI/config runtime selection after CV path compiles; retain only shared ARL transport/MVBA/threshold-signature/state helpers.
-- [ ] Delete compile-coupled legacy Go provider files/tests only when `rg` proves they have no remaining shared callers. The standalone `arl-pvss/` prototype is already deleted; historical documents and CV reference tests remain.
+- [x] Delete the unreachable legacy `RunCVEpoch` production orchestration after Graft proves `RunEpoch -> RunCVEpochV2`; retain active regression fixtures in `_test.go` and shared curve/ElGamal/bounded-DLog/APDB code. The standalone `arl-pvss/` prototype was already deleted.
 - [x] Update the Phase 1 authority document: mark codec/network/common-candidate/ARC/recovery/receipt gates with exact component-test status; keep full E2E/benchmark status open until actually run.
 - [x] Run `gofmt`, `go test` only for the named component tests, and `go test` compile-only selection where possible. Record commands and outcomes; never claim E2E success from component checks.

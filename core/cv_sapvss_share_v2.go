@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
@@ -33,54 +34,77 @@ type cvScalarShareOutputV2 struct {
 	Proof           cvAggregateShareProofV2
 }
 
+type cvAggregateShareDecryptionTimingsV2 struct {
+	ScalarBoundedDLog       time.Duration
+	BlindingGroupDecryption time.Duration
+}
+
 func cvDecryptAggregateShareV2(
 	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
 	receiverID, receiverIndex int, receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
 ) (fr.Element, *cvScalarShareOutputV2, error) {
+	scalar, output, _, err := cvDecryptAggregateShareMeasuredV2(
+		aggregate, context, params, receiverID, receiverIndex, receiverPublicKey, receiverSecret,
+	)
+	return scalar, output, err
+}
+
+func cvDecryptAggregateShareMeasuredV2(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+	receiverID, receiverIndex int, receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
+) (fr.Element, *cvScalarShareOutputV2, cvAggregateShareDecryptionTimingsV2, error) {
+	var timings cvAggregateShareDecryptionTimingsV2
 	if err := cvValidateAggregateShareInputsV2(aggregate, context, params, receiverID, receiverIndex, receiverPublicKey); err != nil {
-		return fr.Element{}, nil, err
+		return fr.Element{}, nil, timings, err
 	}
 	wantPublic, err := cvReceiverPublicKey(receiverSecret)
 	if err != nil || !wantPublic.Equal(receiverPublicKey) {
-		return fr.Element{}, nil, fmt.Errorf("CV V2 aggregate-share secret does not match receiver key")
+		return fr.Element{}, nil, timings, fmt.Errorf("CV V2 aggregate-share secret does not match receiver key")
 	}
 	base, digitBound, chunks, err := cvProfile(context.Profile)
 	if err != nil {
-		return fr.Element{}, nil, err
+		return fr.Element{}, nil, timings, err
 	}
 	receiver := &aggregate.Receivers[receiverIndex-1]
 	digits := make([]uint64, chunks)
+	started := time.Now()
 	solver := cvNewBoundedDLogSolverForBaseV2(&genG1, digitBound)
+	timings.ScalarBoundedDLog += time.Since(started)
 	for chunk := 0; chunk < chunks; chunk++ {
 		plaintext := cvDecryptGroupCiphertextV2(&receiver.ScalarChunks[chunk], receiverSecret)
+		started = time.Now()
 		digit, ok := solver.solve(&plaintext)
+		timings.ScalarBoundedDLog += time.Since(started)
 		if !ok {
-			return fr.Element{}, nil, fmt.Errorf("CV V2 aggregate scalar chunk %d is outside [0,K(B-1)]", chunk)
+			return fr.Element{}, nil, timings, fmt.Errorf("CV V2 aggregate scalar chunk %d is outside [0,K(B-1)]", chunk)
 		}
 		digits[chunk] = digit
 	}
 	scalar, err := cvAggregateDigitsToScalarV2(digits, context.Profile.chunkBits, base, digitBound)
 	if err != nil {
-		return fr.Element{}, nil, err
+		return fr.Element{}, nil, timings, err
 	}
+	started = time.Now()
+	yBlind := cvDecryptGroupCiphertextV2(&receiver.Blinding, receiverSecret)
+	timings.BlindingGroupDecryption += time.Since(started)
 	output := &cvScalarShareOutputV2{
 		AggregateDigest: append([]byte(nil), aggregate.Digest...), ReceiverID: receiverID, ReceiverIndex: receiverIndex,
-		Y: cvPointTimes(&genG1, &scalar), YBlind: cvDecryptGroupCiphertextV2(&receiver.Blinding, receiverSecret),
+		Y: cvPointTimes(&genG1, &scalar), YBlind: yBlind,
 	}
 	var opened bls12381.G1Affine
 	opened.Add(&output.Y, &output.YBlind)
 	if !opened.Equal(&receiver.Evaluation) {
-		return fr.Element{}, nil, fmt.Errorf("CV V2 aggregate decrypted shares do not open receiver evaluation")
+		return fr.Element{}, nil, timings, fmt.Errorf("CV V2 aggregate decrypted shares do not open receiver evaluation")
 	}
 	proof, err := cvProveAggregateShareV2(aggregate, context, receiverPublicKey, receiverSecret, scalar, output)
 	if err != nil {
-		return fr.Element{}, nil, err
+		return fr.Element{}, nil, timings, err
 	}
 	output.Proof = *proof
 	if err := cvVerifyAggregateShareV2(output, aggregate, context, params, receiverPublicKey); err != nil {
-		return fr.Element{}, nil, err
+		return fr.Element{}, nil, timings, err
 	}
-	return scalar, output, nil
+	return scalar, output, timings, nil
 }
 
 func cvProveAggregateShareV2(

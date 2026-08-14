@@ -89,7 +89,7 @@ func (m *DumboMVBA) runPDInstance(
 						Siblings: cloneSiblings(msg.Branch.Siblings),
 					},
 				}
-				dig := digestDomain("PD_STORED", sid, msg.Root)
+				dig := pdCertificateDigest("PD_STORED", sid, leader, msg.Root)
 				share, err := m.signer.Sign("PD_STORED", dig)
 				if err != nil {
 					return nil, err
@@ -109,35 +109,36 @@ func (m *DumboMVBA) runPDInstance(
 				if _, seen := seenStored[in.From]; seen {
 					continue
 				}
-				dig := digestDomain("PD_STORED", sid, msg.Root)
+				dig := pdCertificateDigest("PD_STORED", sid, leader, msg.Root)
 				if !m.signer.Verify(in.From, "PD_STORED", dig, msg.Share) {
 					continue
 				}
 				seenStored[in.From] = struct{}{}
 				storedShares[in.From] = append([]byte(nil), msg.Share...)
 				if len(storedShares) >= threshold {
-					proof := collectShares(storedShares, threshold)
+					certificate, err := recoverThresholdCertificate(m.signer, "PD_STORED", dig, storedShares, threshold)
+					if err != nil {
+						return nil, err
+					}
 					broadcastPD(pdLockMsg{
-						SID:   sid,
-						Root:  append([]byte(nil), msg.Root...),
-						Proof: cloneShares(proof),
+						SID: sid, Leader: leader, Root: append([]byte(nil), msg.Root...),
+						Certificate: append([]byte(nil), certificate...),
 					})
 				}
 			case pdLockMsg:
-				if msg.SID != sid || in.From != leader || seenLockFromLeader {
+				if msg.SID != sid || msg.Leader != leader || in.From != leader || seenLockFromLeader {
 					continue
 				}
-				dig := digestDomain("PD_STORED", sid, msg.Root)
-				if !verifyShareSet(m.signer, "PD_STORED", dig, msg.Proof, threshold) {
+				dig := pdCertificateDigest("PD_STORED", sid, leader, msg.Root)
+				if !verifyThresholdCertificate(m.signer, "PD_STORED", dig, msg.Certificate, threshold) {
 					continue
 				}
 				seenLockFromLeader = true
 				out.lock = &pdLockMsg{
-					SID:   sid,
-					Root:  append([]byte(nil), msg.Root...),
-					Proof: cloneShares(msg.Proof),
+					SID: sid, Leader: leader, Root: append([]byte(nil), msg.Root...),
+					Certificate: append([]byte(nil), msg.Certificate...),
 				}
-				dig2 := digestDomain("PD_LOCKED", sid, msg.Root)
+				dig2 := pdCertificateDigest("PD_LOCKED", sid, leader, msg.Root)
 				share, err := m.signer.Sign("PD_LOCKED", dig2)
 				if err != nil {
 					return nil, err
@@ -157,18 +158,20 @@ func (m *DumboMVBA) runPDInstance(
 				if _, seen := seenLocked[in.From]; seen {
 					continue
 				}
-				dig := digestDomain("PD_LOCKED", sid, msg.Root)
+				dig := pdCertificateDigest("PD_LOCKED", sid, leader, msg.Root)
 				if !m.signer.Verify(in.From, "PD_LOCKED", dig, msg.Share) {
 					continue
 				}
 				seenLocked[in.From] = struct{}{}
 				lockedShares[in.From] = append([]byte(nil), msg.Share...)
 				if len(lockedShares) >= threshold {
-					proof := collectShares(lockedShares, threshold)
+					certificate, err := recoverThresholdCertificate(m.signer, "PD_LOCKED", dig, lockedShares, threshold)
+					if err != nil {
+						return nil, err
+					}
 					done := &pdDoneMsg{
-						SID:   sid,
-						Root:  append([]byte(nil), msg.Root...),
-						Proof: cloneShares(proof),
+						SID: sid, Leader: leader, Root: append([]byte(nil), msg.Root...),
+						Certificate: append([]byte(nil), certificate...),
 					}
 					out.done = done
 					broadcastPD(*done)

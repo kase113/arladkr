@@ -5,61 +5,62 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"rladkr_go/core"
 )
 
 func main() {
 	var (
-		sid             = flag.String("sid", "cv-v2-reference", "experiment session identifier")
-		epoch           = flag.Int("epoch", 1, "experiment epoch")
-		oldNodes        = flag.Int("old-n", 7, "old committee size")
-		oldFaults       = flag.Int("old-f", 2, "old committee fault bound")
-		newNodes        = flag.Int("new-n", 4, "new committee size")
-		newFaults       = flag.Int("new-f", 1, "new committee fault bound")
-		proposerSample  = flag.Int("proposer-sample", 3, "eligibility proposer sample size")
-		validatorSample = flag.Int("validator-sample", 3, "eligibility validator sample size")
-		runs            = flag.Int("runs", 1, "number of independent reference epochs")
+		sid                = flag.String("sid", "cv-v2-reference", "experiment session identifier")
+		epoch              = flag.Int("epoch", 1, "experiment epoch")
+		oldNodes           = flag.Int("old-n", 7, "old committee size")
+		oldFaults          = flag.Int("old-f", 2, "old committee fault bound")
+		newNodes           = flag.Int("new-n", 4, "new committee size")
+		newFaults          = flag.Int("new-f", 1, "new committee fault bound")
+		proposerSample     = flag.Int("proposer-sample", 3, "eligibility proposer sample size")
+		validatorSample    = flag.Int("validator-sample", 3, "eligibility validator sample size")
+		failureTarget      = flag.String("failure-target", "smoke", "sampling target: smoke|1e-8|1e-10|2^-80|2^-128")
+		runs               = flag.Int("runs", 1, "number of independent reference epochs")
+		manifestOnly       = flag.Bool("manifest-only", false, "validate one point and emit its manifest without cryptographic execution")
+		matrixFile         = flag.String("matrix-file", "", "versioned local reference matrix JSON")
+		matrixManifestOnly = flag.Bool("matrix-manifest-only", false, "validate all matrix points without cryptographic execution")
 	)
 	flag.Parse()
-	if *runs <= 0 || *oldNodes <= 0 || *newNodes <= 0 {
-		fmt.Fprintln(os.Stderr, "runs and committee sizes must be positive")
-		os.Exit(2)
-	}
-	oldRoster := make([]int, *oldNodes)
-	newRoster := make([]int, *newNodes)
-	for i := range oldRoster {
-		oldRoster[i] = i
-	}
-	for i := range newRoster {
-		newRoster[i] = *oldNodes + i
-	}
+
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetEscapeHTML(false)
-	for run := 0; run < *runs; run++ {
-		scratch, err := os.MkdirTemp("", "arladkr-cvv2ref-")
+	if *matrixFile != "" {
+		matrix, err := loadCVV2ReferenceMatrix(*matrixFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "CV_V2_REFERENCE_ERROR run=%d err=%v\n", run+1, err)
-			os.Exit(1)
+			failCVV2Reference(2, "matrix", err)
 		}
-		cfg := core.Config{
-			SID: fmt.Sprintf("%s-run-%d", *sid, run+1), Epoch: *epoch,
-			OldCommittee: oldRoster, NewCommittee: newRoster,
-			OldFaults: *oldFaults, NewFaults: *newFaults,
-			CVProposerSampleSize: *proposerSample, CVValidatorSampleSize: *validatorSample,
+		report, err := executeCVV2ReferenceMatrix(matrix, *matrixManifestOnly)
+		if err != nil {
+			failCVV2Reference(1, "matrix", err)
 		}
-		result, runErr := core.RunCVV2ReferenceExperiment(cfg, scratch)
-		removeErr := os.RemoveAll(scratch)
-		if runErr != nil {
-			fmt.Fprintf(os.Stderr, "CV_V2_REFERENCE_ERROR run=%d err=%v\n", run+1, runErr)
-			os.Exit(1)
+		if err := encoder.Encode(report); err != nil {
+			failCVV2Reference(1, "matrix_encode", err)
 		}
-		if removeErr != nil {
-			fmt.Fprintf(os.Stderr, "CV_V2_REFERENCE_ERROR run=%d cleanup=%v\n", run+1, removeErr)
-			os.Exit(1)
-		}
-		if err := encoder.Encode(result); err != nil {
-			fmt.Fprintf(os.Stderr, "CV_V2_REFERENCE_ERROR run=%d encode=%v\n", run+1, err)
-			os.Exit(1)
-		}
+		return
 	}
+
+	point := cvV2ReferencePoint{
+		Name: "single", SIDPrefix: *sid, Epoch: *epoch, Runs: *runs,
+		OldNodes: *oldNodes, OldFaults: *oldFaults, NewNodes: *newNodes, NewFaults: *newFaults,
+		FailureTarget: *failureTarget, ProposerSample: *proposerSample, ValidatorSample: *validatorSample,
+		ExecutionMode: "reference-crypto",
+	}
+	if *manifestOnly {
+		point.ExecutionMode = "manifest-only"
+	}
+	report, err := executeCVV2ReferencePoint(point, false)
+	if err != nil {
+		failCVV2Reference(1, "point", err)
+	}
+	if err := encoder.Encode(report); err != nil {
+		failCVV2Reference(1, "report_encode", err)
+	}
+}
+
+func failCVV2Reference(code int, stage string, err error) {
+	fmt.Fprintf(os.Stderr, "CV_V2_REFERENCE_ERROR stage=%s err=%v\n", stage, err)
+	os.Exit(code)
 }

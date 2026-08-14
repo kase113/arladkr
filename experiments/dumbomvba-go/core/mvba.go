@@ -64,8 +64,14 @@ func NewDumboMVBA(
 	if recv == nil {
 		return nil, fmt.Errorf("%w: nil receive channel", ErrInvalidConfig)
 	}
-	if cfg.UseEquivalentPath && signer == nil {
-		return nil, fmt.Errorf("%w: nil signer for equivalent path", ErrInvalidConfig)
+	if cfg.UseEquivalentPath {
+		thresholdSigner, ok := signer.(ThresholdSigner)
+		if !ok || thresholdSigner.Threshold("PD_STORED") != cfg.N-cfg.F ||
+			thresholdSigner.Threshold("PD_LOCKED") != cfg.N-cfg.F ||
+			thresholdSigner.Threshold("PD_QUIT_READY") != cfg.F+1 ||
+			thresholdSigner.Threshold("EQ_COIN_SHARE") != cfg.F+1 {
+			return nil, fmt.Errorf("%w: invalid threshold signer for equivalent path", ErrInvalidConfig)
+		}
 	}
 	if cfg.EquivalentCoinMode == "" {
 		cfg.EquivalentCoinMode = "signature"

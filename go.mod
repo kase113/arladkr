@@ -33,4 +33,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace dumbomvba_go => ../dumbomvba-go
+replace dumbomvba_go => ./experiments/dumbomvba-go

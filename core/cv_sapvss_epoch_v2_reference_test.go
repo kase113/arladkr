@@ -2,6 +2,8 @@ package core
 
 import (
 	"bytes"
+	"encoding/hex"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -107,6 +109,43 @@ func TestCVReferenceEpochV2EndToEnd(t *testing.T) {
 		metrics.AggregatePayloadBytes != len(result.AggregatePayload) ||
 		metrics.FallbackLinkProofBytes != 0 || metrics.FallbackRangeProofBytes != 0 {
 		t.Fatalf("unexpected V2 scalar/group metrics: %+v", metrics)
+	}
+	if metrics.ScalarBoundedDLogMilliseconds <= 0 || metrics.BlindingGroupDecryptMilliseconds <= 0 {
+		t.Fatalf("missing V2 scalar/group decryption timings: %+v", metrics)
+	}
+	handoffDigest, err := cvHandoffDigestV2(result.Handoff.ContextDigest, &result.Handoff.Header, &result.Handoff.ARC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyBytes := result.PublicKey.Bytes()
+	jsonWire, err := json.Marshal(&CVV2ReferenceExperimentResult{
+		Protocol: cvSAPVSSV2ReferenceExperimentProtocol, SID: context.SID, Epoch: context.Epoch,
+		SelectedIndices: append([]int(nil), result.SelectedIndices...),
+		AggregateDigest: hex.EncodeToString(result.Aggregate.Digest),
+		HandoffDigest:   hex.EncodeToString(handoffDigest),
+		PublicKey:       hex.EncodeToString(publicKeyBytes[:]),
+		Metrics:         metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicWires := [][]byte{result.AgreementWire, result.HandoffWire, result.AggregatePayload}
+	for _, output := range result.ShareOutputs {
+		wire, encodeErr := cvScalarShareOutputV2CanonicalBytes(output)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		publicWires = append(publicWires, wire)
+	}
+	for receiverID, scalar := range result.localScalarShares {
+		for _, wire := range publicWires {
+			if bytes.Contains(wire, scalar) {
+				t.Fatalf("receiver %d scalar leaked into a public protocol wire", receiverID)
+			}
+		}
+		if bytes.Contains(jsonWire, []byte(hex.EncodeToString(scalar))) {
+			t.Fatalf("receiver %d scalar leaked into reference JSON", receiverID)
+		}
 	}
 	if result.Timings.Total <= 0 || result.Timings.Components <= 0 || result.Timings.Shares <= 0 {
 		t.Fatal("reference V2 epoch did not record experiment phase timings")

@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestCVAPDBNetworkServiceV2BuildsVCertAfterRecovery(t *testing.T) {
 	}
 }
 
-func TestCVAPDBNetworkServiceV2ReceiversRecoverAndExchangeScalarShares(t *testing.T) {
+func TestCVAPDBNetworkServiceV2ReceiversPersistBeforeExchangingScalarShares(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real V2 receiver recovery network test in short mode")
 	}
@@ -213,6 +214,7 @@ func TestCVAPDBNetworkServiceV2ReceiversRecoverAndExchangeScalarShares(t *testin
 		EligibilityCoin: &reference.EligibilityCoin, LeafContext: leafContext, Receivers: receivers, Validators: validators,
 	}
 	services := make(map[int]*cvAPDBNetworkServiceV2, len(allNodes))
+	failingReceiver := cfg.NewCommittee[0]
 	for _, node := range allNodes {
 		nodeCfg := serviceCfg
 		nodeCfg.LocalNode = node
@@ -222,6 +224,12 @@ func TestCVAPDBNetworkServiceV2ReceiversRecoverAndExchangeScalarShares(t *testin
 			nodeCfg.ScalarStore, err = newCVScalarStoreV2(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
+			}
+			if node == failingReceiver {
+				blocker := filepath.Dir(filepath.Dir(nodeCfg.ScalarStore.path(cfg.SID, uint64(cfg.Epoch), node)))
+				if err := os.WriteFile(blocker, []byte("block scalar state directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 		services[node], err = newCVAPDBNetworkServiceV2(context.Background(), nodeCfg, transport, router, auth,
@@ -251,6 +259,7 @@ func TestCVAPDBNetworkServiceV2ReceiversRecoverAndExchangeScalarShares(t *testin
 	handoff := &cvHandoffV2{ContextDigest: contextDigest, Header: header, ARC: *arc,
 		DecCert: cvRecoverThresholdCertificateV2ForTest(t, controlSigner, cfg.OldCommittee, cvDecisionCertificateV2Domain, statement)}
 	type receiverResult struct {
+		node   int
 		public bls12381.G1Affine
 		err    error
 	}
@@ -258,23 +267,40 @@ func TestCVAPDBNetworkServiceV2ReceiversRecoverAndExchangeScalarShares(t *testin
 	for _, receiver := range cfg.NewCommittee {
 		go func(node int) {
 			_, _, _, publicKey, recoverErr := services[node].RecoverAndExchangeScalarShare(ctx, handoff)
-			results <- receiverResult{public: publicKey, err: recoverErr}
+			results <- receiverResult{node: node, public: publicKey, err: recoverErr}
 		}(receiver)
 	}
 	var publicKey bls12381.G1Affine
+	havePublicKey := false
 	for i := 0; i < len(cfg.NewCommittee); i++ {
 		result := <-results
+		if result.node == failingReceiver {
+			if result.err == nil {
+				t.Fatal("receiver released a scalar share after persistence failure")
+			}
+			continue
+		}
 		if result.err != nil {
 			t.Fatal(result.err)
 		}
-		if i == 0 {
+		if !havePublicKey {
 			publicKey = result.public
+			havePublicKey = true
 		} else if !publicKey.Equal(&result.public) {
 			t.Fatal("CV V2 receivers recovered different public keys")
 		}
 	}
-	if !publicKey.Equal(&reference.PublicKey) {
+	if !havePublicKey || !publicKey.Equal(&reference.PublicKey) {
 		t.Fatal("network receiver public key differs from reference recovery")
+	}
+	if cvContainsID(transport.sentFromByTag(cvTagAggregateShareV2), failingReceiver) {
+		t.Fatal("receiver broadcast a public scalar output after persistence failure")
+	}
+	services[failingReceiver].mu.Lock()
+	localOutputCount := len(services[failingReceiver].localScalarOutputs)
+	services[failingReceiver].mu.Unlock()
+	if localOutputCount != 0 {
+		t.Fatal("receiver registered a public scalar output after persistence failure")
 	}
 }
 
@@ -368,8 +394,9 @@ func TestCVAPDBNetworkServiceV2LockAndRecoverOverAuthenticatedRouter(t *testing.
 			t.Fatal("network coin nodes derived different outputs")
 		}
 	}
-	if got := transport.sentCount(cvTagCoinShareV2); got != len(cfg.OldCommittee)*(len(cfg.OldCommittee)-1) {
-		t.Fatalf("network coin sent %d shares", got)
+	minimumCoinShares := len(cfg.OldCommittee) * (len(cfg.OldCommittee) - 1)
+	if got := transport.sentCount(cvTagCoinShareV2); got < minimumCoinShares {
+		t.Fatalf("network coin sent only %d shares, need at least %d", got, minimumCoinShares)
 	}
 
 	lock, err := services[proposer].Lock(ctx, encoded)

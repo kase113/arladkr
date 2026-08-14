@@ -8,8 +8,9 @@ type agreementTransport interface {
 }
 
 type Message struct {
-	From int
-	To   int
-	Tag  string
-	Body []byte
+	From      int
+	To        int
+	Tag       string
+	Body      []byte
+	WireBytes int
 }

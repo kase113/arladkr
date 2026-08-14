@@ -49,6 +49,7 @@ const (
 	cvTagLaneOfferV2             = "CV_V2_LANE_OFFER"
 	cvTagLaneACKV2               = "CV_V2_LANE_ACK"
 	cvTagComponentRefV2          = "CV_V2_COMPONENT_REF"
+	cvTagCertifiedCandidateV2    = "CV_V2_CERTIFIED_CANDIDATE"
 )
 
 func cvAllowedNetworkTag(tag string) bool {
@@ -87,7 +88,7 @@ func cvAllowedNetworkTag(tag string) bool {
 		cvTagDecisionShareV2,
 		cvTagAggregateShareV2:
 		return true
-	case cvTagLaneOfferV2, cvTagLaneACKV2, cvTagComponentRefV2:
+	case cvTagLaneOfferV2, cvTagLaneACKV2, cvTagComponentRefV2, cvTagCertifiedCandidateV2:
 		return true
 	default:
 		return false
@@ -317,6 +318,7 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 	if !cvAllowedNetworkTag(msg.Tag) || msg.To != node {
 		return Message{}, false
 	}
+	wireBytes := tcpMessageFrameFixedBytes + len(msg.Tag) + len(msg.Body)
 	switch msg.Tag {
 	case apvssTagLaneOffer, cvTagLaneOfferV2, cvTagHandoffV2, cvTagAggregateRecoverStoreV2:
 		if _, ok := r.oldNodes[msg.From]; !ok {
@@ -356,7 +358,7 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 	if err != nil {
 		return Message{}, false
 	}
-	return Message{From: msg.From, To: msg.To, Tag: msg.Tag, Body: payload}, true
+	return Message{From: msg.From, To: msg.To, Tag: msg.Tag, Body: payload, WireBytes: wireBytes}, true
 }
 
 func (r *cvSAPVSSRouter) fail(err error) {

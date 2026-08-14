@@ -39,8 +39,23 @@ The ARL-ADKR comparison run is launched from the repository root with:
 ./scripts/run_cv_cluster.sh 7 2 /tmp/arladkr-cv-n7
 ```
 
-This launcher uses the single-path CV-sAPVSS network path: certificate-only
-component descriptors, `CV_AGG_MANIFEST` references, collector-directed ARC
-shares, compact ARC certificate broadcast, and the certificate-only AggRLO
-MVBA witness. The removed retired full-offer wire is not available as a benchmark
-fallback.
+This launcher uses the scalar/group CV-sAPVSS V2 network path: component APDB,
+Pool/PoolCert, contributor sampling, aggregate APDB, sampled VCert, one direct
+Dumbo-MVBA, DecCert handoff, aggregate recovery, and scalar-share proofs. It is
+a fresh single-epoch experiment and rejects multi-run rotation or resume.
+
+The local academic reference pilot is defined by
+`cvv2_reference_matrix_v1.json`. Validate every point without generating keys
+or proofs:
+
+```bash
+go run ./cmd/cvv2ref \
+  -matrix-file experiments/cvv2_reference_matrix_v1.json \
+  -matrix-manifest-only
+```
+
+The three `reference-crypto` points are functional smoke measurements with
+three independent fresh runs each. The four secure points are
+`manifest-only`; they record fixed-fraction sampling parameters and must not be
+reported as measured cryptographic performance. This file is a pilot reference
+matrix, not the separate multi-process network comparison matrix.

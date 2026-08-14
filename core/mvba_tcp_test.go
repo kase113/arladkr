@@ -105,12 +105,27 @@ func TestPredicateBearingMVBATCPRequiresOneLocalOldNode(t *testing.T) {
 		FNew:         1,
 		LocalNodeIDs: []int{0, 1},
 	})
-	_, _, err := runArladkrMVBATCPInstance(
+	_, _, err := runArladkrMVBACCommonSubsetTCPInstance(
 		context.Background(), cfg, "test-component-value", []byte("candidate"),
 		func(_ int, _ []byte) bool { return true },
 	)
 	if err == nil || !strings.Contains(err.Error(), "exactly one local old node") {
 		t.Fatalf("predicate-bearing MVBA accepted multiple local old nodes: %v", err)
+	}
+}
+
+func TestDirectMVBATCPRejectsInvalidLocalPayloadBeforeNetwork(t *testing.T) {
+	cfg := NormalizeConfig(Config{
+		SID: "direct-mvba-invalid-local", Epoch: 1,
+		OldCommittee: []int{0, 1, 2, 3}, NewCommittee: []int{4, 5, 6, 7},
+		FOld: 1, FNew: 1, LocalNodeIDs: []int{0},
+	})
+	_, _, err := runArladkrMVBADirectTCPInstance(
+		context.Background(), cfg, "direct-invalid-local", []byte("invalid"),
+		func(_ int, payload []byte) bool { return string(payload) == "valid" }, nil, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "rejected local payload") {
+		t.Fatalf("direct MVBA opened network for invalid local payload: %v", err)
 	}
 }
 

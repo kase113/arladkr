@@ -61,6 +61,22 @@ func (t *cvRouterTestTransport) sentCount(tag string) int {
 	return count
 }
 
+func (t *cvRouterTestTransport) sentFromByTag(tag string) []int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	senders := make(map[int]struct{})
+	for _, msg := range t.sent {
+		if msg.Tag == tag {
+			senders[msg.From] = struct{}{}
+		}
+	}
+	result := make([]int, 0, len(senders))
+	for sender := range senders {
+		result = append(result, sender)
+	}
+	return sortedUnique(result)
+}
+
 func (t *cvRouterTestTransport) Broadcast(from int, to []int, tag string, body []byte) {
 	for _, node := range to {
 		_ = t.Send(Message{From: from, To: node, Tag: tag, Body: body})

@@ -554,6 +554,9 @@ func TestCVSAPVSSM4DecodeAggregateRejectsCommitmentCountBeyondRemainingWire(t *t
 
 func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping exact-range CV M4 fixture in short mode")
+	}
 	receiverSecrets := []fr.Element{
 		cvTestScalar(13),
 		cvTestScalar(17),

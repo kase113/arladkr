@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sort"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -23,44 +22,30 @@ func digestDomain(domain string, sid string, root []byte) []byte {
 	return hashBytes([]byte(domain), []byte{0}, []byte(sid), []byte{0}, root)
 }
 
-func collectShares(shares map[int][]byte, threshold int) []SigShare {
-	keys := make([]int, 0, len(shares))
-	for id := range shares {
-		keys = append(keys, id)
-	}
-	sort.Ints(keys)
-	if len(keys) > threshold {
-		keys = keys[:threshold]
-	}
-	out := make([]SigShare, 0, len(keys))
-	for _, id := range keys {
-		out = append(out, SigShare{
-			Signer: id,
-			Sig:    append([]byte(nil), shares[id]...),
-		})
-	}
-	return out
+func pdCertificateDigest(domain, sid string, leader int, root []byte) []byte {
+	var leaderWire [8]byte
+	binary.BigEndian.PutUint64(leaderWire[:], uint64(leader))
+	return hashBytes([]byte(domain), []byte{0}, []byte(sid), []byte{0}, leaderWire[:], []byte{0}, root)
 }
 
-func verifyShareSet(signer Signer, domain string, digest []byte, proof []SigShare, threshold int) bool {
-	if signer == nil {
-		return false
+func recoverThresholdCertificate(
+	signer Signer, domain string, digest []byte, shares map[int][]byte, threshold int,
+) ([]byte, error) {
+	ts, ok := signer.(ThresholdSigner)
+	if !ok || threshold <= 0 || ts.Threshold(domain) != threshold || len(shares) < threshold {
+		return nil, fmt.Errorf("invalid %s threshold certificate input", domain)
 	}
-	used := make(map[int]struct{}, len(proof))
-	valid := 0
-	for _, sh := range proof {
-		if _, seen := used[sh.Signer]; seen {
-			continue
-		}
-		if signer.Verify(sh.Signer, domain, digest, sh.Sig) {
-			used[sh.Signer] = struct{}{}
-			valid++
-			if valid >= threshold {
-				return true
-			}
-		}
+	certificate, err := ts.Recover(domain, digest, shares)
+	if err != nil || !ts.VerifyRecovered(domain, digest, certificate) {
+		return nil, fmt.Errorf("recover %s threshold certificate", domain)
 	}
-	return false
+	return certificate, nil
+}
+
+func verifyThresholdCertificate(signer Signer, domain string, digest, certificate []byte, threshold int) bool {
+	ts, ok := signer.(ThresholdSigner)
+	return ok && threshold > 0 && ts.Threshold(domain) == threshold &&
+		len(certificate) > 0 && ts.VerifyRecovered(domain, digest, certificate)
 }
 
 func packValue(v []byte) []byte {

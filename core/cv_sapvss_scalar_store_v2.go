@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -70,12 +71,28 @@ func (s *cvScalarStoreV2) Read(sid string, epoch uint64, receiverID int) (*cvSca
 		return nil, err
 	}
 	var state cvScalarStateV2
-	if err := cvDecodeStrictJSON(raw, &state); err != nil || state.Version != cvScalarStateV2Version ||
+	if err := cvDecodeStrictJSONV2(raw, &state); err != nil || state.Version != cvScalarStateV2Version ||
 		state.SID != sid || state.Epoch != epoch || state.ReceiverID != receiverID ||
 		len(state.AggregateDigest) != 32 || len(state.Scalar) != fr.Bytes || len(state.Output) == 0 {
 		return nil, fmt.Errorf("invalid CV V2 scalar state")
 	}
 	return &state, nil
+}
+
+func cvDecodeStrictJSONV2(raw []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("trailing JSON state")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *cvScalarStoreV2) path(sid string, epoch uint64, receiverID int) string {

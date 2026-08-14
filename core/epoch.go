@@ -7,7 +7,8 @@ func PrepareRuntime(cfg Config) error {
 	if err := ValidateConfig(cfg); err != nil {
 		return err
 	}
-	return ensureRuntime(&cfg)
+	_, err := cvLoadEpochRuntimeV2(cfg)
+	return err
 }
 
 func PrepareConfigRuntime(cfg Config) (Config, error) {
@@ -15,14 +16,17 @@ func PrepareConfigRuntime(cfg Config) (Config, error) {
 	if err := ValidateConfig(cfg); err != nil {
 		return cfg, err
 	}
-	if err := ensureRuntime(&cfg); err != nil {
+	runtime, err := cvLoadEpochRuntimeV2(cfg)
+	if err != nil {
 		return cfg, err
 	}
+	cfg.cvRuntimeV2 = runtime
+	cfg.runtime = newRuntimeCommMetrics(cfg.CommMetrics)
 	return cfg, nil
 }
 
-// RunEpoch has one production protocol path: materialized CV-sAPVSS followed
-// by a single aggregate-level MVBA.
+// RunEpoch has one production protocol path: scalar/group CV-sAPVSS V2 with
+// direct aggregate-level Dumbo-MVBA.
 func RunEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
-	return RunCVEpoch(ctx, NormalizeConfig(cfg))
+	return RunCVEpochV2(ctx, NormalizeConfig(cfg))
 }

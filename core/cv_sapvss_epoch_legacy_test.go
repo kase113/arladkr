@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -93,7 +92,7 @@ func cvRunMaterializedAgreement(ctx context.Context, cfg Config, localRLO *AggRL
 		_, decodeErr := cvDecodeMaterializedAggRLOWitness(payload, cfg)
 		return decodeErr == nil
 	}
-	payloads, peerWait, err := runArladkrMVBATCPInstance(ctx, cfg, "cv-materialized-aggrlo", wire, predicate)
+	payloads, peerWait, err := runArladkrMVBACCommonSubsetTCPInstance(ctx, cfg, "cv-materialized-aggrlo", wire, predicate)
 	if err != nil {
 		return nil, peerWait, err
 	}
@@ -102,13 +101,6 @@ func cvRunMaterializedAgreement(ctx context.Context, cfg Config, localRLO *AggRL
 	}
 	decided, err := cvDecodeMaterializedAggRLOWitness(payloads[0], cfg)
 	return decided, peerWait, err
-}
-
-func traceCVEpochPhase(cfg Config, node int, phase string) {
-	if os.Getenv("RLADKR_CV_DEBUG") == "" {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "CV_EPOCH_PHASE node=%d phase=%s\n", node, phase)
 }
 
 func cvBuildEpochLeafContext(cfg Config, material *cvReceiverKeyMaterial) (cvLeafContext, error) {
@@ -235,255 +227,6 @@ func cvRandomDealerLeafWithWitness(
 		witness.blindings[i] = evalPolyInt(blindingCoefficients, int64(i+1))
 	}
 	return leaf, witness, nil
-}
-
-func RunCVEpoch(ctx context.Context, cfg Config) (*EpochResult, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("nil CV epoch context")
-	}
-	start := time.Now()
-	cfg = NormalizeConfig(cfg)
-	if err := validateCVEpochConfig(cfg); err != nil {
-		return nil, err
-	}
-	if err := ValidateConfig(cfg); err != nil {
-		return nil, err
-	}
-	if err := ensureRuntime(&cfg); err != nil {
-		return nil, err
-	}
-	localNode := cfg.LocalNodeIDs[0]
-	perfStart := cvPerfSnapshotNow()
-	defer traceCVPerfCounters(localNode, perfStart)
-	traceCVEpochPhase(cfg, localNode, "runtime_ready")
-	material, err := cvLoadReceiverKeyMaterial(
-		cfg.CVPublicKeyDir,
-		cfg.CVLocalSecretDir,
-		cfg.SID,
-		sortedUnique(cfg.NewCommittee),
-		cfg.CVLocalReceiverIDs,
-	)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "keys_loaded")
-	leafContext, err := cvBuildEpochLeafContext(cfg, material)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "transport_ready")
-
-	transport := cfg.protocolTransport
-	ownedTransport := false
-	if transport == nil {
-		transportNodes := sortedUnique(append(
-			append([]int(nil), cfg.runtime.oldOrder...), material.receiverOrder...,
-		))
-		transport, err = newAgreementTransport(cfg, transportNodes, len(transportNodes)*64)
-		if err != nil {
-			return nil, err
-		}
-		ownedTransport = true
-	}
-	if ownedTransport {
-		defer transport.Close()
-	}
-	localActors := []int{localNode}
-	for receiverID := range material.localReceiverSecrets {
-		localActors = append(localActors, receiverID)
-	}
-	var networkAuth *cvNetworkAuthenticator
-	if cfg.StrictNetwork {
-		networkAuth, err = newCVNetworkAuthenticator(
-			cfg.runtime.lockSigner, material.receiverOrder, material.receiverPublicKeys,
-			material.localReceiverSecrets,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-	router, err := newCVSAPVSSRouterWithReceivers(
-		ctx, transport, cfg.SID, cfg.Epoch,
-		cfg.runtime.oldOrder, material.receiverOrder, sortedUnique(localActors),
-		(len(cfg.runtime.oldOrder)+len(material.receiverOrder))*64, networkAuth,
-	)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "component_service_ready")
-	defer router.Close()
-	store, err := newCVComponentLeafStore(cfg.ArtifactCacheDir)
-	if err != nil {
-		return nil, err
-	}
-	service, err := newCVComponentServiceWithReceivers(
-		ctx, cfg, &leafContext, localNode, transport, router, store,
-		material.receiverOrder, material.localReceiverSecrets, material.localReceiverSigningSecrets,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer service.Close()
-	setupLatency := time.Since(start)
-
-	leafBuildStart := time.Now()
-	leaf, witness, err := cvRandomDealerLeafWithWitness(leafContext, localNode)
-	if err != nil {
-		return nil, err
-	}
-	proofBytes := 0
-	leafWireBytes := 0
-	ackCount := 0
-	fallbackCount := 0
-	var prototype *apvssLeafPrototype
-	if cfg.APVSSMode == APVSSModeFullPublicVE {
-		proofWire, proofErr := cvFullPublicProofCanonicalBytes(leaf)
-		if proofErr != nil {
-			return nil, proofErr
-		}
-		leafWire, wireErr := cvLeafCanonicalBytes(leaf)
-		if wireErr != nil {
-			return nil, wireErr
-		}
-		proofBytes = len(proofWire)
-		leafWireBytes = len(leafWire)
-	} else {
-		prototype, err = service.CollectAPVSSLaneACKs(ctx, leaf, witness)
-		if err != nil {
-			return nil, err
-		}
-		proofBytes, err = apvssProofMaterialBytes(prototype)
-		if err != nil {
-			return nil, err
-		}
-		prototypeWire, wireErr := apvssLeafPrototypeCanonicalBytes(prototype)
-		if wireErr != nil {
-			return nil, wireErr
-		}
-		leafWireBytes = len(prototypeWire)
-		ackCount = len(prototype.acks)
-		fallbackCount = apvssPrototypeFallbackCount(prototype)
-	}
-	leafBuildLatency := time.Since(leafBuildStart)
-	traceCVEpochPhase(cfg, localNode, "leaf_built")
-	cfg.runtime.setCommPhase("component_disperse")
-	phaseStart := time.Now()
-	if cfg.APVSSMode == APVSSModeFullPublicVE {
-		_, err = service.Disperse(ctx, leaf)
-	} else {
-		_, err = service.DisperseAPVSS(ctx, prototype)
-	}
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "component_certified")
-	componentLatency := time.Since(phaseStart)
-
-	cfg.runtime.setCommPhase("eligibility_coin")
-	phaseStart = time.Now()
-	eligibilityCoin, err := service.CollectEligibilityCoin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	eligibleProposers, err := cvEligibilityProposerSet(
-		cfg.OldCommittee, cfg.FOld+1, cfg.FOld, eligibilityCoin,
-	)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "eligibility_coin_ready")
-
-	cfg.runtime.setCommPhase("component_collection")
-	phaseStart = time.Now()
-	descriptors, err := service.CollectLocalComponentSet(ctx)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "component_set_collected")
-	collectionLatency := time.Since(phaseStart)
-
-	cfg.runtime.setCommPhase("aggregate_disperse")
-	phaseStart = time.Now()
-	materialized, err := service.MaterializeEligibleCertified(ctx, descriptors, eligibleProposers)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "aggregate_arc_ready")
-	aggregateLatency := time.Since(phaseStart)
-	// Receipt material remains local until agreement. Precomputing it here
-	// overlaps bounded-DLog/DLEQ work with MVBA without releasing shares for an
-	// aggregate that has not been decided.
-	service.StartReceiptPreparation(
-		materialized.aggregate, material.receiverOrder, material.localReceiverSecrets,
-	)
-
-	cfg.runtime.setCommPhase("aggregate_agreement")
-	phaseStart = time.Now()
-	decidedRLO, aggregatePeerWait, err := cvRunMaterializedAgreement(ctx, cfg, materialized.rlo)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "aggregate_agreed")
-	aggregateAgreementLatency := time.Since(phaseStart)
-
-	cfg.runtime.setCommPhase("recover_shard")
-	phaseStart = time.Now()
-	recovered, err := service.RecoverAggregate(ctx, decidedRLO)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "aggregate_recovered")
-	recoverLatency := time.Since(phaseStart)
-	recoveredWire, err := cvAggregateCanonicalBytes(recovered)
-	if err != nil {
-		return nil, err
-	}
-	traceCVEpochPhase(cfg, localNode, "receipts_exchanged")
-
-	cfg.runtime.setCommPhase("receipt")
-	phaseStart = time.Now()
-	shares, receipts, publicKey, err := service.ExchangeReceipts(
-		ctx, recovered, material.receiverOrder, material.localReceiverSecrets,
-	)
-	if err != nil {
-		return nil, err
-	}
-	receiptLatency := time.Since(phaseStart)
-	totalSent, totalRecv := cfg.runtime.commStats()
-	phaseSent, phaseRecv := cfg.runtime.phaseCommStats()
-	dealers := append([]int(nil), decidedRLO.Header.Dealers...)
-	totalLatency := time.Since(start)
-	return &EpochResult{
-		AgreementMode: "cv-single-mvba-aggrlo", AblationMode: cfg.AblationMode, CVAPVSSMode: cfg.APVSSMode,
-		LockedSet: dealers, SampledSet: append([]int(nil), dealers...), AggRLODealers: append([]int(nil), dealers...),
-		RecoveredAggregate: recoveredWire, AggRLODigest: append([]byte(nil), decidedRLO.Digest...),
-		AggRLOReadyLatency: componentLatency + collectionLatency + aggregateLatency,
-		AdmitAggAttempts:   1, AdmitAggPasses: 1, RecoverAggSuccess: true,
-		SetupLatency: setupLatency, DisperseLatency: componentLatency,
-		LockAggLatency: aggregateLatency, MVBAOnlyLatency: aggregateAgreementLatency,
-		MVBAPeerWaitLatency: aggregatePeerWait,
-		AgreeAggLatency:     collectionLatency + aggregateLatency + aggregateAgreementLatency,
-		RecoverLatency:      recoverLatency, RecoverOnlyLatency: recoverLatency, DeriveLatency: receiptLatency,
-		TotalSentBytes: totalSent, TotalRecvBytes: totalRecv, PhaseSentBytes: phaseSent, PhaseRecvBytes: phaseRecv,
-		NewShares: shares, NewPublicKey: publicKey, CVReceipts: receipts,
-		CVComponentCount: len(descriptors), CVARCHolderCount: decidedRLO.Lock.Threshold,
-		CVRecoveredShardCount: len(cfg.OldCommittee) - 2*cfg.FOld, CVVerifiedReceiptCount: len(receipts),
-		CVLeafBuildLatency:         leafBuildLatency,
-		CVComponentDisperseLatency: componentLatency, CVComponentCollectionLatency: collectionLatency,
-		CVAggregateDisperseLatency: aggregateLatency, CVAggregateAgreementLatency: aggregateAgreementLatency,
-		CVRecoverShardLatency: recoverLatency, CVReceiptLatency: receiptLatency,
-		CVAPVSSACKCount: ackCount, CVAPVSSFallbackCount: fallbackCount,
-		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: leafWireBytes,
-		CVAggregateGateWaitLatency:    materialized.metrics.gateWait,
-		CVAggregateLeafLoadLatency:    materialized.metrics.leafLoad,
-		CVAggregateBuildLatency:       materialized.metrics.aggregate,
-		CVAggregateRSLatency:          materialized.metrics.rsDisperse,
-		CVAggregateHeaderTokenLatency: materialized.metrics.headerToken,
-		CVAggregateOfferSendLatency:   materialized.metrics.offerSend,
-		CVAggregateARCWaitLatency:     materialized.metrics.arcWait,
-		CVAggregateCertificateLatency: materialized.metrics.certificate,
-		PerNode:                       []NodeOutput{{NodeID: localNode, DecidedSet: append([]int(nil), dealers...), Latency: totalLatency}},
-	}, nil
 }
 
 func cvFullPublicProofCanonicalBytes(leaf *cvLeaf) ([]byte, error) {

@@ -63,6 +63,7 @@ type cvReferenceEpochResultV2 struct {
 	RecoveredAggregate *cvAggregateV2
 	ShareOutputs       []*cvScalarShareOutputV2
 	localScalarShares  map[int][]byte
+	ShareDecryption    cvAggregateShareDecryptionTimingsV2
 	PublicKey          bls12381.G1Affine
 	Timings            cvReferenceEpochTimingsV2
 }
@@ -364,13 +365,15 @@ func cvRunReferenceEpochV2(input cvReferenceEpochInputV2) (*cvReferenceEpochResu
 		if !ok {
 			return nil, fmt.Errorf("reference V2 receiver %d lacks decryption secret", receiverID)
 		}
-		scalar, output, err := cvDecryptAggregateShareV2(
+		scalar, output, decryptTimings, err := cvDecryptAggregateShareMeasuredV2(
 			recoveredAggregate, input.Context, input.Params, receiverID, i+1,
 			&input.Receivers.encryptionPublicKeys[i], secret,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("reference V2 receiver %d aggregate share: %w", receiverID, err)
 		}
+		result.ShareDecryption.ScalarBoundedDLog += decryptTimings.ScalarBoundedDLog
+		result.ShareDecryption.BlindingGroupDecryption += decryptTimings.BlindingGroupDecryption
 		encodedScalar := scalar.Bytes()
 		result.localScalarShares[receiverID] = append([]byte(nil), encodedScalar[:]...)
 		wire, err := cvScalarShareOutputV2CanonicalBytes(output)

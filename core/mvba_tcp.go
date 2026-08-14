@@ -307,6 +307,7 @@ func (h *arladkrTCPHub) readConn(id int, conn net.Conn) {
 		if err := gob.NewDecoder(bytes.NewReader(body)).Decode(&wire); err != nil {
 			continue
 		}
+		h.recordEquivalentRecv(wire.Msg, 4+len(body))
 		msg := dmvba.ReceivedMessage{From: wire.From, Msg: wire.Msg}
 		select {
 		case h.recv[id] <- msg:
@@ -422,7 +423,10 @@ func (n *arladkrTCPNet) Send(to int, msg dmvba.ProtocolMessage) error {
 		localMsg := dmvba.ReceivedMessage{From: n.id, Msg: msg}
 		select {
 		case n.hub.recv[to] <- localMsg:
-			n.hub.recordSendRecvBytes(lenBufAndBodySize(msg, n.id))
+			frameBytes := lenBufAndBodySize(msg, n.id)
+			n.hub.recordSendRecvBytes(frameBytes)
+			n.hub.recordEquivalentSend(msg, frameBytes)
+			n.hub.recordEquivalentRecv(msg, frameBytes)
 			n.hub.recordMVBANetSend(n.id, arlMVBANetTag(msg), time.Since(sendStart), 0, true, false, 0, nil)
 			return nil
 		case <-time.After(n.hub.enqueueTO):
@@ -466,6 +470,7 @@ func (n *arladkrTCPNet) Send(to int, msg dmvba.ProtocolMessage) error {
 			return io.ErrShortWrite
 		}
 		n.hub.recordSentBytes(frameBytes)
+		n.hub.recordEquivalentSend(msg, frameBytes)
 		return nil
 	}
 
@@ -514,6 +519,30 @@ func (h *arladkrTCPHub) recordRecvBytes(n int) {
 func (h *arladkrTCPHub) recordSendRecvBytes(n int) {
 	h.recordSentBytes(n)
 	h.recordRecvBytes(n)
+}
+
+func (h *arladkrTCPHub) recordEquivalentSend(msg dmvba.ProtocolMessage, n int) {
+	h.recordEquivalentBytes(msg, n, true)
+}
+
+func (h *arladkrTCPHub) recordEquivalentRecv(msg dmvba.ProtocolMessage, n int) {
+	h.recordEquivalentBytes(msg, n, false)
+}
+
+func (h *arladkrTCPHub) recordEquivalentBytes(msg dmvba.ProtocolMessage, n int, sent bool) {
+	if h == nil || h.runtime == nil || n <= 0 {
+		return
+	}
+	class := dmvba.ClassifyEquivalentMessage(msg)
+	if class == dmvba.EquivalentMessageOther {
+		return
+	}
+	name := "mvba_" + string(class)
+	if sent {
+		h.runtime.recordNamedSentBytes(name, n)
+	} else {
+		h.runtime.recordNamedRecvBytes(name, n)
+	}
 }
 
 func lenBufAndBodySize(msg dmvba.ProtocolMessage, from int) int {
@@ -680,19 +709,136 @@ func (h *arladkrTCPHub) closeConns() {
 
 type arladkrMVBAPredicate func(proposer int, payload []byte) bool
 
-func runArladkrMVBATCPInstance(
+type arladkrMVBATCPSession struct {
+	n, f, maxRounds               int
+	sid, hint                     string
+	localIDs                      []int
+	recv                          []chan dmvba.ReceivedMessage
+	hub                           *arladkrTCPHub
+	highSigner, lowSigner         *tblsThresholdSigner
+	spbcTimeout, routeSendTimeout time.Duration
+	peerWaitLatency               time.Duration
+}
+
+func runArladkrMVBACCommonSubsetTCPInstance(
 	ctx context.Context,
 	cfg Config,
 	instance string,
 	payload []byte,
 	predicate arladkrMVBAPredicate,
 ) ([][]byte, time.Duration, error) {
-	var peerWaitLatency time.Duration
+	return runArladkrMVBACCommonSubsetTCPInstanceWithSigners(ctx, cfg, instance, payload, predicate, nil, nil)
+}
+
+func runArladkrMVBACCommonSubsetTCPInstanceWithSigners(
+	ctx context.Context,
+	cfg Config,
+	instance string,
+	payload []byte,
+	predicate arladkrMVBAPredicate,
+	highSigner, lowSigner *tblsThresholdSigner,
+) ([][]byte, time.Duration, error) {
+	session, err := newArladkrMVBATCPSession(ctx, cfg, instance, predicate != nil, highSigner, lowSigner)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer session.hub.close()
+
+	outs := make([][][]byte, session.n)
+	errs := make([]error, session.n)
+	var wg sync.WaitGroup
+	for _, i := range session.localIDs {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			signer := &mvbaDomainSigner{member: i, high: session.highSigner, low: session.lowSigner}
+			neti := &arladkrTCPNet{id: i, hub: session.hub}
+			var mvbaPredicate func(int, dmvba.ProposalValue) bool
+			if predicate != nil {
+				mvbaPredicate = func(proposer int, value dmvba.ProposalValue) bool {
+					return value.Round == 1 && value.Hint == session.hint && predicate(proposer, value.Payload)
+				}
+			}
+			vec, runErr := dmvba.RunMVBACCommonSubset(ctx,
+				dmvba.Config{SID: session.sid, ID: i, N: session.n, F: session.f,
+					MaxRounds: session.maxRounds, WaitSPBCTimeout: session.spbcTimeout,
+					RouteSendTimeout: session.routeSendTimeout, UseEquivalentPath: true},
+				neti, signer, session.recv[i],
+				dmvba.ProposalValue{Payload: payload, Round: 1, Hint: session.hint}, mvbaPredicate,
+			)
+			if runErr == nil {
+				selected := selectAgreedPayloads(vec, 1, session.hint, predicate)
+				if predicate != nil && len(selected) < session.n-session.f {
+					runErr = fmt.Errorf("common-subset output has too few valid proposals: have=%d need=%d",
+						len(selected), session.n-session.f)
+				} else {
+					outs[i] = selected
+				}
+			}
+			errs[i] = runErr
+		}()
+	}
+	wg.Wait()
+	for _, i := range session.localIDs {
+		if errs[i] != nil {
+			return nil, session.peerWaitLatency, fmt.Errorf("arladkr MVBA common-subset node %d: %w", i, errs[i])
+		}
+		if len(outs[i]) > 0 {
+			return outs[i], session.peerWaitLatency, nil
+		}
+	}
+	return nil, session.peerWaitLatency, fmt.Errorf("arladkr MVBA common-subset: no output")
+}
+
+func runArladkrMVBADirectTCPInstance(
+	ctx context.Context, cfg Config, instance string, payload []byte, predicate arladkrMVBAPredicate,
+	highSigner, lowSigner *tblsThresholdSigner,
+) ([]byte, time.Duration, error) {
+	localIDs := sortedUnique(cfg.LocalNodeIDs)
+	if len(localIDs) == 0 {
+		localIDs = sortedUnique(cfg.OldCommittee)
+	}
+	if predicate == nil || len(localIDs) != 1 || !predicate(localIDs[0], payload) {
+		return nil, 0, fmt.Errorf("arladkr direct MVBA rejected local payload")
+	}
+	session, err := newArladkrMVBATCPSession(ctx, cfg, instance, true, highSigner, lowSigner)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer session.hub.close()
+
+	i := session.localIDs[0]
+	signer := &mvbaDomainSigner{member: i, high: session.highSigner, low: session.lowSigner}
+	node, err := dmvba.NewDumboMVBA(
+		dmvba.Config{SID: session.sid, ID: i, N: session.n, F: session.f,
+			MaxRounds: session.maxRounds, WaitSPBCTimeout: session.spbcTimeout,
+			RouteSendTimeout: session.routeSendTimeout, UseEquivalentPath: true,
+			ValidatePayload: func(candidate []byte) bool { return predicate(i, candidate) }},
+		&arladkrTCPNet{id: i, hub: session.hub}, signer, nil, session.recv[i], nil,
+	)
+	if err != nil {
+		return nil, session.peerWaitLatency, err
+	}
+	decided, err := node.Run(ctx, dmvba.ProposalValue{Payload: payload, Round: 1, Hint: session.hint})
+	if err != nil {
+		return nil, session.peerWaitLatency, fmt.Errorf("arladkr direct MVBA node %d: %w", i, err)
+	}
+	if !predicate(i, decided.Payload) {
+		return nil, session.peerWaitLatency, fmt.Errorf("arladkr direct MVBA returned invalid payload")
+	}
+	return append([]byte(nil), decided.Payload...), session.peerWaitLatency, nil
+}
+
+func newArladkrMVBATCPSession(
+	ctx context.Context, cfg Config, instance string, requireSingleLocal bool,
+	highSigner, lowSigner *tblsThresholdSigner,
+) (*arladkrMVBATCPSession, error) {
 	n := len(cfg.OldCommittee)
 	f := cfg.FOld
 	mvbaSID, err := arlMVBAInstanceSID(fmt.Sprintf("%s|epoch=%d", cfg.SID, cfg.Epoch), instance)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	hint := "arladkr-mvba-tcp-cs"
 	if instance != "" {
@@ -704,18 +850,24 @@ func runArladkrMVBATCPInstance(
 	}
 	for _, id := range localIDs {
 		if id < 0 || id >= n {
-			return nil, 0, fmt.Errorf("arladkr mvba tcp requires old node IDs 0..n-1: %d", id)
+			return nil, fmt.Errorf("arladkr mvba tcp requires old node IDs 0..n-1: %d", id)
 		}
 	}
-	if predicate != nil && len(localIDs) != 1 {
-		return nil, 0, fmt.Errorf(
+	if requireSingleLocal && len(localIDs) != 1 {
+		return nil, fmt.Errorf(
 			"predicate-bearing MVBA requires exactly one local old node, got %d",
 			len(localIDs),
 		)
 	}
 
-	if cfg.runtime == nil || cfg.runtime.coinSigner == nil {
-		return nil, 0, fmt.Errorf("arladkr MVBA coin runtime is unavailable")
+	if highSigner == nil && cfg.runtime != nil {
+		highSigner = cfg.runtime.lockSigner
+	}
+	if lowSigner == nil && cfg.runtime != nil {
+		lowSigner = cfg.runtime.coinSigner
+	}
+	if highSigner == nil || lowSigner == nil || highSigner.Threshold() != n-f || lowSigner.Threshold() != f+1 {
+		return nil, fmt.Errorf("arladkr MVBA domain-routed threshold runtime is unavailable")
 	}
 
 	recv := make([]chan dmvba.ReceivedMessage, n)
@@ -725,9 +877,8 @@ func runArladkrMVBATCPInstance(
 
 	hub, err := newArladkrTCPHub(cfg, recv)
 	if err != nil {
-		return nil, 0, fmt.Errorf("arladkr mvba tcp hub: %w", err)
+		return nil, fmt.Errorf("arladkr mvba tcp hub: %w", err)
 	}
-	defer hub.close()
 
 	// Wait for peers — longer timeout at larger n.
 	peerStart := time.Now()
@@ -762,11 +913,12 @@ func runArladkrMVBATCPInstance(
 		}
 		select {
 		case <-ctx.Done():
-			return nil, 0, ctx.Err()
+			hub.close()
+			return nil, ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
-	peerWaitLatency = time.Since(peerStart)
+	peerWaitLatency := time.Since(peerStart)
 
 	maxR := f + 4
 	if maxR < 4 {
@@ -795,65 +947,9 @@ func runArladkrMVBATCPInstance(
 		}
 	}
 
-	outs := make([][][]byte, n)
-	errs := make([]error, n)
-	var wg sync.WaitGroup
-	for _, i := range localIDs {
-		wg.Add(1)
-		i := i
-		go func() {
-			defer wg.Done()
-			signer := &mvbaCoinSigner{member: i, signer: cfg.runtime.coinSigner}
-			neti := &arladkrTCPNet{id: i, hub: hub}
-			var mvbaPredicate func(int, dmvba.ProposalValue) bool
-			if predicate != nil {
-				mvbaPredicate = func(proposer int, value dmvba.ProposalValue) bool {
-					return value.Round == 1 && value.Hint == hint && predicate(proposer, value.Payload)
-				}
-			}
-			vec, runErr := dmvba.RunMVBACCommonSubset(ctx,
-				dmvba.Config{
-					SID: mvbaSID,
-					ID:  i, N: n, F: f,
-					MaxRounds:         maxR,
-					WaitSPBCTimeout:   spbcTimeout,
-					RouteSendTimeout:  routeSendTimeout,
-					UseEquivalentPath: true,
-				},
-				neti, signer, recv[i],
-				dmvba.ProposalValue{Payload: payload, Round: 1, Hint: hint},
-				mvbaPredicate,
-			)
-			if runErr == nil {
-				selected := selectAgreedPayloads(vec, 1, hint, predicate)
-				if predicate != nil && len(selected) < n-f {
-					runErr = fmt.Errorf(
-						"common-subset output has too few valid proposals: have=%d need=%d",
-						len(selected), n-f,
-					)
-				} else {
-					outs[i] = selected
-				}
-			}
-			if runErr != nil {
-				errs[i] = runErr
-			}
-		}()
-	}
-	wg.Wait()
-	for _, i := range localIDs {
-		if errs[i] != nil {
-			return nil, 0, fmt.Errorf("arladkr mvba tcp node %d: %w", i, errs[i])
-		}
-	}
-
-	// Collect output from local nodes
-	for _, i := range localIDs {
-		if len(outs[i]) > 0 {
-			return outs[i], peerWaitLatency, nil
-		}
-	}
-	return nil, 0, fmt.Errorf("arladkr mvba tcp: no output")
+	return &arladkrMVBATCPSession{n: n, f: f, maxRounds: maxR, sid: mvbaSID, hint: hint,
+		localIDs: localIDs, recv: recv, hub: hub, highSigner: highSigner, lowSigner: lowSigner,
+		spbcTimeout: spbcTimeout, routeSendTimeout: routeSendTimeout, peerWaitLatency: peerWaitLatency}, nil
 }
 
 func arlMVBAInstanceSID(base, instance string) (string, error) {

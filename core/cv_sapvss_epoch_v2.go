@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// RunCVEpochV2 composes the scalar/group V2 network stages. The current
-// academic network path requires all receiver ACKs for each component.
+// RunCVEpochV2 composes the scalar/group V2 network stages.
 func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	started := time.Now()
 	c := NormalizeConfig(cfg)
@@ -18,12 +17,16 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err := validateCVEpochConfig(c); err != nil {
 		return nil, err
 	}
-	if err := ensureRuntime(&c); err != nil {
-		return nil, err
+	if c.runtime == nil {
+		c.runtime = newRuntimeCommMetrics(c.CommMetrics)
 	}
-	runtime, err := cvLoadEpochRuntimeV2(c)
-	if err != nil {
-		return nil, err
+	runtime := c.cvRuntimeV2
+	if runtime == nil {
+		var err error
+		runtime, err = cvLoadEpochRuntimeV2(c)
+		if err != nil {
+			return nil, err
+		}
 	}
 	localOld := c.LocalNodeIDs[0]
 	localReceiver := c.CVLocalReceiverIDs[0]
@@ -31,8 +34,8 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	shardBytes, err := cvAllACKLeafShardBytesV2(
-		runtime.context, runtime.receivers, runtime.validators, runtime.params.recoveryThreshold,
+	shardBytes, err := cvEpochShardBytesUpperBoundV2(
+		runtime.context, runtime.params, runtime.receivers, runtime.validators, runtime.params.recoveryThreshold,
 	)
 	if err != nil {
 		return nil, err
@@ -98,139 +101,61 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	}
 	defer receiverService.Close()
 
+	c.runtime.setCommPhase("component_disperse")
 	leafStarted := time.Now()
-	leaf, err := oldService.BuildAllACKLeafV2(ctx)
+	leaf, err := oldService.BuildLeafV2(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("build CV V2 all-ACK leaf: %w", err)
+		return nil, fmt.Errorf("build CV V2 quorum/fallback leaf: %w", err)
 	}
 	leafLatency := time.Since(leafStarted)
+	ackCount, fallbackCount, proofBytes, leafWireBytes, err := cvLeafExperimentMetricsV2(leaf, runtime.context, runtime.receivers, runtime.validators)
+	if err != nil {
+		return nil, err
+	}
 	componentStarted := time.Now()
 	if _, err := oldService.PublishComponentV2(ctx, leaf); err != nil {
 		return nil, fmt.Errorf("publish CV V2 component: %w", err)
 	}
 	componentLatency := time.Since(componentStarted)
 
+	c.runtime.setCommPhase("candidate_formation")
 	coinStarted := time.Now()
 	eligibilityCoin, err := oldService.EligibilityCoin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("collect CV V2 eligibility coin: %w", err)
 	}
-	proposers, _, err := cvDeriveEligibilitySamplesV2(
+	proposers, validatorSample, err := cvDeriveEligibilitySamplesV2(
 		c.OldCommittee, eligibilityCoin.Value, runtime.params.proposerSampleSize, runtime.params.validatorSampleSize,
 	)
 	if err != nil || len(proposers) == 0 {
 		return nil, fmt.Errorf("derive CV V2 eligibility samples: %w", err)
 	}
-	proposer := proposers[0]
-	var pool *cvPoolV2
-	var poolCert *cvPoolCertificateV2
-	if localOld == proposer {
-		refs, waitErr := oldService.AwaitComponentRefsV2(ctx)
-		if waitErr != nil {
-			return nil, waitErr
-		}
-		pool, err = cvBuildPoolV2(contextDigest, proposer, refs, runtime.params)
-		if err == nil {
-			poolCert, err = oldService.CertifyPool(ctx, pool)
-		}
-	} else {
-		pool, poolCert, err = oldService.AwaitCertifiedPool(ctx, proposer)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("build CV V2 certified pool: %w", err)
-	}
-	contributorCoin, err := oldService.ContributorCoin(ctx, pool, poolCert)
-	if err != nil {
-		return nil, fmt.Errorf("collect CV V2 contributor coin: %w", err)
-	}
-	selected, err := cvSelectedPoolIndicesV2(runtime.params.poolSize, runtime.params.componentCount, contributorCoin.Value)
-	if err != nil {
-		return nil, fmt.Errorf("build CV V2 certified aggregate: %w", err)
-	}
-	coinPoolLatency := time.Since(coinStarted)
-
-	aggregateStarted := time.Now()
-	var validationRequest *cvValidationRequestV2
-	var vCert *cvValidationCertificateV2
-	if localOld == proposer {
-		selectedLeaves := make([]*cvLeafV2, len(selected))
-		for i, poolIndex := range selected {
-			component := pool.Components[poolIndex]
-			payload, recoverErr := oldService.RecoverComponent(ctx, &component.Lock, func(recovered []byte) error {
-				if !bytes.Equal(cvComponentPayloadDigestV2(recovered), component.Header.PayloadDigest) {
-					return fmt.Errorf("CV V2 selected component payload mismatch")
-				}
-				return nil
-			})
-			if recoverErr != nil {
-				return nil, recoverErr
-			}
-			selectedLeaves[i], err = cvDecodeLeafV2(payload, runtime.context, runtime.receivers, runtime.validators)
-			if err != nil {
-				return nil, err
-			}
-		}
-		aggregate, aggregateErr := cvAggV2(selectedLeaves, runtime.context, runtime.params, runtime.receivers, runtime.validators)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		aggregatePayload, aggregateErr := cvAggregateV2CanonicalBytes(aggregate, runtime.context, runtime.params)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		selectionDigest, aggregateErr := cvSelectionDigestV2(contributorCoin, selected, runtime.params.poolSize, runtime.params.componentCount)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		aggregateInstance, aggregateErr := cvAggregateInstanceDigestV2(contextDigest, proposer, pool.Digest, selectionDigest)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		aggregateEncoded, aggregateErr := cvAPDBEncodeSizedV2(
-			aggregateInstance, aggregatePayload, runtime.params.recoveryThreshold, len(c.OldCommittee), shardBytes, cvMaxLeafWireBytes,
-		)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		arc, aggregateErr := oldService.Lock(ctx, aggregateEncoded)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		payloadDigest, aggregateErr := cvAggregatePayloadDigestV2(aggregatePayload)
-		if aggregateErr != nil {
-			return nil, aggregateErr
-		}
-		header := cvAggregateHeaderV2{
-			ContextDigest: contextDigest, ProposerID: proposer, PoolDigest: append([]byte(nil), pool.Digest...),
-			SelectionDigest: selectionDigest, AggregateDigest: append([]byte(nil), aggregate.Digest...),
-			PayloadDigest: payloadDigest, APDBInstance: aggregateInstance, APDBRoot: append([]byte(nil), arc.Root...),
-		}
-		validationRequest = &cvValidationRequestV2{Header: header, Pool: *pool, PoolCert: *poolCert,
-			ContributorCoin: *contributorCoin, SelectedIndices: selected, ARC: *arc}
-		vCert, err = oldService.CertifyAggregate(ctx, validationRequest)
-	} else {
-		validationRequest, vCert, err = oldService.AwaitCertifiedValidationV2(ctx, proposer)
-	}
-	if err != nil {
-		return nil, err
-	}
-	aggregateLatency := time.Since(aggregateStarted)
-
-	candidate := &cvAgreementObjectV2{
-		Header: validationRequest.Header, Pool: validationRequest.Pool, PoolCert: validationRequest.PoolCert,
-		ContributorCoin: validationRequest.ContributorCoin, SelectedIndices: append([]int(nil), validationRequest.SelectedIndices...),
-		VCert: *vCert, ARC: validationRequest.ARC,
-	}
 	public := cvAgreementPublicContextV2{SID: c.SID, Epoch: uint64(c.Epoch), ContextDigest: contextDigest,
 		OldCommittee: c.OldCommittee, EligibilityCoin: eligibilityCoin, Params: runtime.params,
 		APDBSigner: runtime.apdbSigner, ControlSigner: runtime.controlSigner, CoinSigner: runtime.coinSigner,
 		ValidatorKeys: runtime.validators}
+	candidate, err := cvRunSampledProposerSlotsV2(
+		ctx, proposers, oldService.certifiedCandidateChV2,
+		func(slotCtx context.Context, proposer int) error {
+			return runCVProposerSlotV2(
+				slotCtx, c, runtime, oldService, localOld, proposer, contextDigest, shardBytes,
+			)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	candidateFormationLatency := time.Since(coinStarted)
+	c.runtime.setCommPhase("aggregate_agreement")
 	agreementStarted := time.Now()
 	decided, agreementWire, peerWait, err := cvRunAgreementV2(ctx, c, candidate, public)
 	if err != nil {
 		return nil, fmt.Errorf("run CV V2 agreement: %w", err)
 	}
 	agreementLatency := time.Since(agreementStarted)
+	pool := &decided.Pool
+	selected := append([]int(nil), decided.SelectedIndices...)
+	c.runtime.setCommPhase("receipt")
 	handoffStarted := time.Now()
 	handoff, err := oldService.FinalizeDecision(ctx, decided)
 	if err != nil {
@@ -244,6 +169,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		return nil, fmt.Errorf("CV V2 local receiver accepted a different handoff")
 	}
 	handoffLatency := time.Since(handoffStarted)
+	c.runtime.setCommPhase("recover_shard")
 	recoveryStarted := time.Now()
 	aggregate, scalar, output, publicKey, err := receiverService.RecoverAndExchangeScalarShare(ctx, accepted)
 	if err != nil {
@@ -264,6 +190,25 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	for i, index := range selected {
 		selectedDealers[i] = pool.Components[index].Header.DealerID
 	}
+	sampling, err := ResolveCVV2Sampling(
+		len(c.OldCommittee), c.OldFaults, c.CVSamplingFailureTarget,
+		runtime.params.proposerSampleSize, runtime.params.validatorSampleSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	costMetrics, err := cvCalculateEpochCostMetricsV2(
+		decided, handoff, agreementWire, aggregateWire, runtime.params, validatorSample,
+		oldService.CertifiedCandidateCountV2(), len(c.OldCommittee)*shardBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	totalSent, totalRecv := c.runtime.commStats()
+	phaseSent, phaseRecv := c.runtime.phaseCommStats()
+	experimentMetrics := oldService.experimentMetricsV2()
+	receiverExperimentMetrics := receiverService.experimentMetricsV2()
+	cvAddCostBreakdownV2(phaseSent, phaseRecv, experimentMetrics, receiverExperimentMetrics)
 	return &EpochResult{
 		AgreementMode: "single-mvba-v2", AblationMode: c.AblationMode, CVAPVSSMode: cvSAPVSSV2ProtocolVersion,
 		LockedSet: append([]int(nil), poolDealerIDsV2(pool)...), SampledSet: selectedDealers, AggRLODealers: selectedDealers,
@@ -272,12 +217,164 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		NewPublicKey: append([]byte(nil), publicKeyBytes[:]...), CVReceipts: map[int][]byte{localReceiver: shareWire},
 		CVComponentCount: runtime.params.poolSize, CVARCHolderCount: runtime.params.apdbLockThreshold,
 		CVRecoveredShardCount: runtime.params.recoveryThreshold, CVVerifiedReceiptCount: runtime.params.newShareThreshold,
+		CVSampling:         sampling,
 		CVLeafBuildLatency: leafLatency, CVComponentDisperseLatency: componentLatency,
-		CVComponentCollectionLatency: coinPoolLatency, CVAggregateDisperseLatency: aggregateLatency,
-		CVAggregateAgreementLatency: agreementLatency, MVBAPeerWaitLatency: peerWait,
+		CVComponentCollectionLatency: candidateFormationLatency,
+		CVAggregateAgreementLatency:  agreementLatency, MVBAPeerWaitLatency: peerWait,
 		CVRecoverShardLatency: time.Since(recoveryStarted), CVReceiptLatency: handoffLatency,
+		CVAPVSSACKCount: ackCount, CVAPVSSFallbackCount: fallbackCount,
+		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: leafWireBytes,
+		CVCompletedCandidateCount:               costMetrics.completedCandidates,
+		CVPoolWireBytes:                         costMetrics.poolBytes,
+		CVValidationRequestWireBytes:            costMetrics.validationRequestBytes,
+		CVAgreementObjectWireBytes:              costMetrics.agreementObjectBytes,
+		CVAggregatePayloadBytes:                 costMetrics.aggregatePayloadBytes,
+		CVAggregateAPDBShardBytes:               costMetrics.aggregateAPDBShardBytes,
+		CVPoolCertificateBytes:                  costMetrics.poolCertificateBytes,
+		CVValidationCertificateBytes:            costMetrics.validationCertificateBytes,
+		CVARCCertificateBytes:                   costMetrics.arcCertificateBytes,
+		CVDecisionCertificateBytes:              costMetrics.decisionCertificateBytes,
+		CVHandoffWireBytes:                      costMetrics.handoffBytes,
+		CVProposerRecoverySentBytes:             experimentMetrics.proposerRecoverySentBytes,
+		CVProposerRecoveryRecvBytes:             experimentMetrics.proposerRecoveryRecvBytes,
+		CVProposerRecoveryLatency:               experimentMetrics.proposerRecoveryLatency,
+		CVProposerCatalogScanCount:              experimentMetrics.proposerCatalogScanCount,
+		CVProposerRejectedComponentCount:        experimentMetrics.proposerRejectedCount,
+		CVValidatorComponentRecoverySentBytes:   experimentMetrics.validatorComponentRecoverySentBytes,
+		CVValidatorComponentRecoveryRecvBytes:   experimentMetrics.validatorComponentRecoveryRecvBytes,
+		CVValidatorComponentRecoveryLatency:     experimentMetrics.validatorComponentRecoveryLatency,
+		CVValidatorAggregateRecoverySentBytes:   experimentMetrics.validatorAggregateRecoverySentBytes,
+		CVValidatorAggregateRecoveryRecvBytes:   experimentMetrics.validatorAggregateRecoveryRecvBytes,
+		CVValidatorAggregateRecoveryLatency:     experimentMetrics.validatorAggregateRecoveryLatency,
+		CVNewAggregateRecoveryLatency:           receiverExperimentMetrics.newAggregateRecoveryLatency,
+		CVARCFormationLatency:                   experimentMetrics.arcFormationLatency,
+		CVValidationCertificateFormationLatency: experimentMetrics.validationCertificateLatency,
+		CVDecisionCertificateFormationLatency:   experimentMetrics.decisionCertificateLatency,
+		CVScalarBoundedDLogLatency:              receiverExperimentMetrics.scalarBoundedDLogLatency,
+		CVBlindingGroupDecryptionLatency:        receiverExperimentMetrics.blindingGroupDecryptionLatency,
+		TotalSentBytes:                          totalSent, TotalRecvBytes: totalRecv, PhaseSentBytes: phaseSent, PhaseRecvBytes: phaseRecv,
 		PerNode: []NodeOutput{{NodeID: localOld, DecidedSet: selectedDealers, Latency: time.Since(started)}},
 	}, nil
+}
+
+func cvAddCostBreakdownV2(sent, recv map[string]uint64, services ...cvServiceExperimentMetricsV2) {
+	if sent == nil || recv == nil {
+		return
+	}
+	tagGroups := map[string][]string{
+		"pool_coin":          {cvTagCoinShareV2, cvTagPoolOfferV2, cvTagPoolCertShareV2, cvTagPoolCertV2},
+		"validation_request": {cvTagValidationRequestV2, cvTagValidationSignatureV2, cvTagValidationResultV2},
+		"candidate_relay":    {cvTagCertifiedCandidateV2},
+		"decision_handoff":   {cvTagDecisionShareV2, cvTagHandoffV2},
+		"new_share_exchange": {cvTagAggregateShareV2},
+	}
+	for _, metrics := range services {
+		sent["component_apdb_dispersal"] += metrics.componentDispersalSentBytes
+		recv["component_apdb_dispersal"] += metrics.componentDispersalRecvBytes
+		sent["aggregate_apdb_dispersal"] += metrics.aggregateDispersalSentBytes
+		recv["aggregate_apdb_dispersal"] += metrics.aggregateDispersalRecvBytes
+		sent["new_aggregate_recovery"] += metrics.newAggregateRecoverySentBytes
+		recv["new_aggregate_recovery"] += metrics.newAggregateRecoveryRecvBytes
+		for name, tags := range tagGroups {
+			for _, tag := range tags {
+				sent[name] += metrics.tagSentBytes[tag]
+				recv[name] += metrics.tagRecvBytes[tag]
+			}
+		}
+	}
+}
+
+type cvEpochCostMetricsV2 struct {
+	completedCandidates        int
+	poolBytes                  int
+	validationRequestBytes     int
+	agreementObjectBytes       int
+	aggregatePayloadBytes      int
+	aggregateAPDBShardBytes    int
+	poolCertificateBytes       int
+	validationCertificateBytes int
+	arcCertificateBytes        int
+	decisionCertificateBytes   int
+	handoffBytes               int
+}
+
+func cvCalculateEpochCostMetricsV2(
+	decided *cvAgreementObjectV2, handoff *cvHandoffV2, agreementWire, aggregateWire []byte,
+	params cvV2Params, validatorSample []int,
+	completedCandidates, aggregateAPDBShardBytes int,
+) (cvEpochCostMetricsV2, error) {
+	if decided == nil || handoff == nil || len(validatorSample) != params.validatorSampleSize || completedCandidates <= 0 ||
+		aggregateAPDBShardBytes <= 0 {
+		return cvEpochCostMetricsV2{}, fmt.Errorf("invalid CV V2 epoch cost metrics input")
+	}
+	poolWire, err := cvPoolV2CanonicalBytes(&decided.Pool, params)
+	if err != nil {
+		return cvEpochCostMetricsV2{}, err
+	}
+	validationWire, err := cvValidationRequestV2CanonicalBytes(&cvValidationRequestV2{
+		Header: decided.Header, Pool: decided.Pool, PoolCert: decided.PoolCert,
+		ContributorCoin: decided.ContributorCoin, SelectedIndices: decided.SelectedIndices, ARC: decided.ARC,
+	}, params)
+	if err != nil {
+		return cvEpochCostMetricsV2{}, err
+	}
+	poolCertificate, err := cvPoolCertificateV2CanonicalBytes(&decided.PoolCert)
+	if err != nil {
+		return cvEpochCostMetricsV2{}, err
+	}
+	validationCertificate, err := cvValidationCertificateV2CanonicalBytes(&decided.VCert, validatorSample)
+	if err != nil {
+		return cvEpochCostMetricsV2{}, err
+	}
+	arc, err := cvAPDBLockV2CanonicalBytes(&decided.ARC)
+	if err != nil {
+		return cvEpochCostMetricsV2{}, err
+	}
+	handoffWire, err := cvHandoffV2CanonicalBytes(handoff)
+	if err != nil {
+		return cvEpochCostMetricsV2{}, err
+	}
+	return cvEpochCostMetricsV2{
+		completedCandidates: completedCandidates, poolBytes: len(poolWire),
+		validationRequestBytes: len(validationWire), agreementObjectBytes: len(agreementWire),
+		aggregatePayloadBytes: len(aggregateWire), aggregateAPDBShardBytes: aggregateAPDBShardBytes,
+		poolCertificateBytes: len(poolCertificate), validationCertificateBytes: len(validationCertificate),
+		arcCertificateBytes: len(arc), decisionCertificateBytes: len(handoff.DecCert), handoffBytes: len(handoffWire),
+	}, nil
+}
+
+func cvLeafExperimentMetricsV2(
+	leaf *cvLeafV2, context *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) (ackCount, fallbackCount, proofBytes, leafWireBytes int, err error) {
+	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	for i := range leaf.Receivers {
+		if leaf.Receivers[i].ACK == nil {
+			continue
+		}
+		ackCount++
+		proofWire, proofErr := cvOwnershipProofV2CanonicalBytes(&leaf.Receivers[i].ACK.Ownership, context)
+		if proofErr != nil {
+			return 0, 0, 0, 0, proofErr
+		}
+		proofBytes += len(proofWire)
+	}
+	if leaf.Fallback != nil {
+		fallbackCount = len(leaf.Fallback.ReceiverIndices)
+		linkWire, linkErr := cvFallbackLinkProofV2CanonicalBytes(&leaf.Fallback.Link, context, fallbackCount)
+		if linkErr != nil {
+			return 0, 0, 0, 0, linkErr
+		}
+		rangeWire, rangeErr := cvFallbackRangeProofV2CanonicalBytes(&leaf.Fallback.Range)
+		if rangeErr != nil {
+			return 0, 0, 0, 0, rangeErr
+		}
+		proofBytes += len(linkWire) + len(rangeWire)
+	}
+	return ackCount, fallbackCount, proofBytes, len(wire), nil
 }
 
 func poolDealerIDsV2(pool *cvPoolV2) []int {

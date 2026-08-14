@@ -51,6 +51,10 @@ if (( n <= 0 || f < 0 || n < 3 * f + 1 || epochs <= 0 || runs <= 0 )); then
   printf 'invalid committee parameters: n=%s f=%s\n' "$n" "$f" >&2
   exit 2
 fi
+if (( epochs != 1 || runs != 1 )); then
+  printf 'CV V2 cluster experiment supports exactly one fresh run and one epoch; key rotation and incomplete-epoch resume are unsupported\n' >&2
+  exit 2
+fi
 component_last_port=$((base_port + 2 * n - 1))
 mvba_base_port=$((base_port + 2 * n + 100))
 mvba_last_port=$((mvba_base_port + n - 1))
@@ -90,9 +94,12 @@ for ((i=0; i<n; i++)); do
   node_secret_dir="$root/node-$i/private"
   mkdir -p "$node_secret_dir"
   chmod 700 "$node_secret_dir"
-  mv "$generated_secret_dir/old-node-$i-lock.scalar" "$node_secret_dir/"
-  mv "$generated_secret_dir/old-node-$i-coin.scalar" "$node_secret_dir/"
-  mv "$generated_secret_dir/receiver-$((n+i)).scalar" "$node_secret_dir/"
+	  mv "$generated_secret_dir/old-node-$i-validator.scalar" "$node_secret_dir/"
+	  mv "$generated_secret_dir/old-node-$i-v2-apdb.scalar" "$node_secret_dir/"
+	  mv "$generated_secret_dir/old-node-$i-v2-control.scalar" "$node_secret_dir/"
+	  mv "$generated_secret_dir/old-node-$i-v2-coin.scalar" "$node_secret_dir/"
+	  mv "$generated_secret_dir/receiver-$((n+i))-elgamal.scalar" "$node_secret_dir/"
+	  mv "$generated_secret_dir/receiver-$((n+i))-identity.ed25519" "$node_secret_dir/"
 done
 rmdir "$generated_secret_dir"
 
@@ -121,7 +128,6 @@ for ((i=0; i<n; i++)); do
     export RLADKR_NODE_ADDRS="$node_addrs"
     export RLADKR_MVBA_NODE_ADDRS="$mvba_addrs"
     export RLADKR_ARTIFACT_CACHE_DIR="$root/node-$i/store"
-		export RLADKR_STATE_CHAIN_DIR="$root/node-$i/state-chain"
     export RLADKR_LISTENER_READY_DIR="$root/ready"
     export RLADKR_LISTENER_READY_NODE_COUNT="$n"
 		export RLADKR_EPOCH_BARRIER_DIR="$root/epoch-barrier"

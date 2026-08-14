@@ -47,6 +47,9 @@ func TestCVAggregateHeaderV2AndSelectionDigestAreCanonical(t *testing.T) {
 }
 
 func TestCVAggV2BuildCodecAndRecomputeVerification(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real V2 aggregate proof test in short mode")
+	}
 	first, context, receivers, validators := cvAllACKLeafV2Fixture(t)
 	params, err := cvDeriveV2Params(cvV2ParamsTestConfig())
 	if err != nil {
@@ -124,6 +127,38 @@ func TestCVAggV2BuildCodecAndRecomputeVerification(t *testing.T) {
 	badLeaves[0] = &mutatedLeaf
 	if _, err := cvAVerV2(payload, badLeaves, context, params, receivers, validators); err == nil {
 		t.Fatal("accepted aggregate with an invalid selected leaf")
+	}
+}
+
+func TestCVV2AggregateFitsEpochShardUpperBound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real V2 aggregate sizing test in short mode")
+	}
+	first, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+	params, err := cvDeriveV2Params(cvV2ParamsTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaves := []*cvLeafV2{first}
+	for i := 1; i < params.componentCount; i++ {
+		leaves = append(leaves, cvBuildAllACKLeafForDealerV2(t, context.OldRoster[i], context, receivers, validators))
+	}
+	aggregate, err := cvAggV2(leaves, context, params, receivers, validators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := cvAggregateV2CanonicalBytes(aggregate, context, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shardBytes, err := cvEpochShardBytesUpperBoundV2(
+		context, params, receivers, validators, params.recoveryThreshold,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if 8+len(payload) > params.recoveryThreshold*shardBytes {
+		t.Fatalf("aggregate exceeds epoch shard capacity: payload=%d shard=%d", len(payload), shardBytes)
 	}
 }
 

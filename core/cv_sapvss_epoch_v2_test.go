@@ -34,12 +34,6 @@ func TestRunCVEpochV2FourNodeEndToEnd(t *testing.T) {
 		CVPublicKeyDir:    publicDir, CVLocalSecretDir: secretDir,
 		WaitSPBCTimeout: 5 * time.Second, RouteSendTimeout: time.Second,
 	}
-	if err := GenerateCVOldLockKeyMaterial(publicDir, secretDir, base.SID, base.OldCommittee, len(base.OldCommittee)-base.FOld); err != nil {
-		t.Fatal(err)
-	}
-	if err := GenerateCVMVBACoinKeyMaterial(publicDir, secretDir, base.SID, base.OldCommittee, base.FOld+1); err != nil {
-		t.Fatal(err)
-	}
 	if err := GenerateCVV2KeyMaterial(publicDir, secretDir, base); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +57,7 @@ func TestRunCVEpochV2FourNodeEndToEnd(t *testing.T) {
 		cfg.ArtifactCacheDir = filepath.Join(root, fmt.Sprintf("node-%d", oldID))
 		cfg.protocolTransport = transport
 		go func() {
-			result, err := RunCVEpochV2(ctx, cfg)
+			result, err := RunEpoch(ctx, cfg)
 			results <- epochResult{oldID: oldID, result: result, err: err}
 		}()
 	}
@@ -84,9 +78,18 @@ func TestRunCVEpochV2FourNodeEndToEnd(t *testing.T) {
 		}
 		t.Fatalf("CV V2 epoch failed on %d nodes (coin shares sent=%d)", len(failures), transport.sentCount(cvTagCoinShareV2))
 	}
+	if senders := transport.sentFromByTag(cvTagPoolOfferV2); len(senders) != base.CVProposerSampleSize {
+		t.Fatalf("sampled proposer Pool senders=%v want %d distinct proposers", senders, base.CVProposerSampleSize)
+	}
+	if senders := transport.sentFromByTag(cvTagValidationRequestV2); len(senders) != base.CVProposerSampleSize {
+		t.Fatalf("sampled proposer validation senders=%v want %d distinct proposers", senders, base.CVProposerSampleSize)
+	}
 	for node, result := range got {
 		if result == nil || !result.RecoverAggSuccess || len(result.NewShares) != 1 || len(result.CVReceipts) != 1 {
 			t.Fatalf("CV V2 epoch node %d returned incomplete result", node)
+		}
+		if result.CVAPVSSMode != cvSAPVSSV2ProtocolVersion || result.AgreementMode != "single-mvba-v2" {
+			t.Fatalf("production entry node %d returned mode=%q agreement=%q", node, result.CVAPVSSMode, result.AgreementMode)
 		}
 		if !bytes.Equal(result.AggRLODigest, got[0].AggRLODigest) ||
 			!bytes.Equal(result.RecoveredAggregate, got[0].RecoveredAggregate) ||

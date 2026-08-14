@@ -1,14 +1,16 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestCVLaneNetworkV2BuildsAllACKLeafWithActorLocalSecrets(t *testing.T) {
+func TestCVV2NetworkLeafCompletesWithFNewSilentReceivers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real V2 quorum/fallback proof generation in short mode")
+	}
 	cfg := cvV2ParamsTestConfig()
 	params, err := cvDeriveV2Params(cfg)
 	if err != nil {
@@ -58,6 +60,7 @@ func TestCVLaneNetworkV2BuildsAllACKLeafWithActorLocalSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	dealer := cfg.OldCommittee[0]
+	silentReceiver := cfg.NewCommittee[len(cfg.NewCommittee)-1]
 	localNodes := sortedUnique(append([]int{dealer}, cfg.NewCommittee...))
 	transport := newCVRouterTestTransport(localNodes, 512)
 	router, err := newCVSAPVSSRouterWithReceivers(context.Background(), transport, cfg.SID, cfg.Epoch,
@@ -78,6 +81,9 @@ func TestCVLaneNetworkV2BuildsAllACKLeafWithActorLocalSecrets(t *testing.T) {
 	}
 	services := make(map[int]*cvAPDBNetworkServiceV2, len(localNodes))
 	for _, node := range localNodes {
+		if node == silentReceiver {
+			continue
+		}
 		nodeCfg := serviceCfg
 		nodeCfg.LocalNode = node
 		localStore := holderStore
@@ -119,7 +125,7 @@ func TestCVLaneNetworkV2BuildsAllACKLeafWithActorLocalSecrets(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	leaf, err := services[dealer].BuildAllACKLeafV2(ctx)
+	leaf, err := services[dealer].BuildLeafV2(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,20 +138,79 @@ func TestCVLaneNetworkV2BuildsAllACKLeafWithActorLocalSecrets(t *testing.T) {
 		t.Fatal("network V2 dealer actor received non-local secrets")
 	}
 	for _, receiver := range cfg.NewCommittee {
+		if receiver == silentReceiver {
+			continue
+		}
 		if len(services[receiver].cfg.Receivers.localEncryptionSecrets) != 1 ||
 			len(services[receiver].cfg.Receivers.localIdentitySecrets) != 1 ||
 			len(services[receiver].cfg.Validators.localSecrets) != 0 {
 			t.Fatalf("network V2 receiver %d received non-local secrets", receiver)
 		}
 	}
-	if len(leaf.Partition.ACKReceiverIndices) != len(cfg.NewCommittee) || len(leaf.Partition.FallbackReceiverIndices) != 0 {
-		t.Fatal("network V2 leaf did not contain all receiver ACKs")
+	if len(leaf.Partition.ACKReceiverIndices) != params.newShareThreshold ||
+		len(leaf.Partition.FallbackReceiverIndices) != params.newFaults {
+		t.Fatal("network V2 leaf did not freeze the first ACK quorum")
+	}
+	if len(leaf.Partition.FallbackReceiverIndices) != 1 ||
+		leaf.Partition.FallbackReceiverIndices[0] != len(cfg.NewCommittee) {
+		t.Fatal("network V2 leaf did not assign the silent receiver to fallback")
+	}
+	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	if err != nil || 8+len(wire) > params.recoveryThreshold*services[dealer].cfg.ShardBytes {
+		t.Fatalf("fallback leaf exceeds configured shard capacity: wire=%d shard=%d err=%v",
+			len(wire), services[dealer].cfg.ShardBytes, err)
 	}
 	if got := transport.sentCount(cvTagLaneOfferV2); got != len(cfg.NewCommittee) {
 		t.Fatalf("network V2 dealer sent %d offers", got)
 	}
-	if got := transport.sentCount(cvTagLaneACKV2); got != len(cfg.NewCommittee) {
+	if got := transport.sentCount(cvTagLaneACKV2); got != params.newShareThreshold {
 		t.Fatalf("network V2 receivers sent %d ACKs", got)
+	}
+}
+
+func TestCVLaneNetworkV2IgnoresLateACKAfterFreeze(t *testing.T) {
+	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+	pending := &cvPendingLaneACKsV2{
+		offers: make([]*cvReceiverLaneOfferV2, len(leaf.Receivers)),
+		acks: map[int]*cvACKEvidenceV2{
+			1: leaf.Receivers[0].ACK,
+			2: leaf.Receivers[1].ACK,
+			3: leaf.Receivers[2].ACK,
+		},
+		quorum: 3, frozen: true, ready: make(chan struct{}, 1),
+	}
+	for i := range leaf.Receivers {
+		pending.offers[i] = &leaf.Receivers[i].Offer
+	}
+	service := &cvAPDBNetworkServiceV2{
+		cfg: cvAPDBNetworkServiceConfigV2{
+			LocalNode: leaf.DealerID, NewRoster: append([]int(nil), context.NewRoster...),
+			LeafContext: context, Receivers: receivers, Validators: validators,
+		},
+		pendingLaneACKsV2: pending,
+	}
+	lateIndex := len(context.NewRoster)
+	lateOffer := pending.offers[lateIndex-1]
+	offerWire, err := cvReceiverLaneOfferV2CanonicalBytes(
+		context, leaf.DealerID, lateOffer, &receivers.encryptionPublicKeys[lateIndex-1],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := &cvLaneACKMessageV2{
+		DealerID: leaf.DealerID, ReceiverID: context.NewRoster[lateIndex-1], ReceiverIndex: lateIndex,
+		OfferDigest: cvLaneOfferDigestV2(offerWire), Evidence: *leaf.Receivers[lateIndex-1].ACK,
+	}
+	wire, err := cvLaneACKMessageV2CanonicalBytes(message, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.handleLaneACKV2(Message{From: message.ReceiverID, To: leaf.DealerID, Body: wire})
+	if len(pending.acks) != pending.quorum {
+		t.Fatal("late ACK changed the frozen CV V2 quorum")
+	}
+	if _, accepted := pending.acks[lateIndex]; accepted {
+		t.Fatal("late ACK entered the frozen CV V2 leaf")
 	}
 }
 
@@ -180,7 +245,7 @@ func TestCVLaneACKMessageV2StrictCodecAndBinding(t *testing.T) {
 	}
 }
 
-func TestCVComponentNetworkV2PublicationBarrier(t *testing.T) {
+func TestCVComponentNetworkV2VerifiedCatalogSkipsInvalidPayload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real V2 component publication barrier in short mode")
 	}
@@ -210,6 +275,12 @@ func TestCVComponentNetworkV2PublicationBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	shardBytes, err := cvEpochShardBytesUpperBoundV2(
+		leafContext, params, receivers, validators, params.recoveryThreshold,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	allNodes := sortedUnique(append(append([]int(nil), cfg.OldCommittee...), cfg.NewCommittee...))
 	transport := newCVRouterTestTransport(allNodes, 8192)
 	router, err := newCVSAPVSSRouterWithReceivers(context.Background(), transport, cfg.SID, cfg.Epoch,
@@ -225,7 +296,7 @@ func TestCVComponentNetworkV2PublicationBarrier(t *testing.T) {
 	serviceCfg := cvAPDBNetworkServiceConfigV2{
 		SID: cfg.SID, Epoch: uint64(cfg.Epoch), OldRoster: cfg.OldCommittee, NewRoster: cfg.NewCommittee,
 		ExpectedContext: contextDigest, TotalShards: len(cfg.OldCommittee), DataShards: params.recoveryThreshold,
-		MaximumPayload: cvMaxLeafWireBytes, Params: params, LeafContext: leafContext,
+		ShardBytes: shardBytes, MaximumPayload: cvMaxLeafWireBytes, Params: params, LeafContext: leafContext,
 		Receivers: receivers, Validators: validators,
 	}
 	services := make(map[int]*cvAPDBNetworkServiceV2, len(allNodes))
@@ -249,35 +320,100 @@ func TestCVComponentNetworkV2PublicationBarrier(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	published := make(chan error, len(cfg.OldCommittee))
-	for _, dealer := range cfg.OldCommittee {
+	invalidDealer := cfg.OldCommittee[0]
+	invalidPayload := []byte("valid APDB payload that is not a CV V2 leaf")
+	invalidInstance, err := cvComponentInstanceDigestV2(contextDigest, invalidDealer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidEncoded, err := cvAPDBEncodeSizedV2(
+		invalidInstance, invalidPayload, params.recoveryThreshold, len(cfg.OldCommittee), shardBytes, cvMaxLeafWireBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidLock, err := services[invalidDealer].Lock(ctx, invalidEncoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidRef := cvComponentRefV2{Header: cvComponentHeaderV2{
+		ContextDigest: append([]byte(nil), contextDigest...), DealerID: invalidDealer,
+		PayloadDigest: cvComponentPayloadDigestV2(invalidPayload), Instance: invalidInstance,
+		Root: append([]byte(nil), invalidLock.Root...),
+	}, Lock: *invalidLock}
+	invalidWire, err := cvComponentRefV2CanonicalBytes(invalidRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services[invalidDealer].storeComponentRefV2(invalidRef)
+	for _, member := range cfg.OldCommittee[1:] {
+		if err := services[invalidDealer].send(member, cvTagComponentRefV2, invalidWire); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	published := make(chan error, len(cfg.OldCommittee)-1)
+	for _, dealer := range cfg.OldCommittee[1:] {
 		go func(node int) {
-			leaf, buildErr := services[node].BuildAllACKLeafV2(ctx)
+			leaf, buildErr := services[node].BuildLeafV2(ctx)
 			if buildErr == nil {
 				_, buildErr = services[node].PublishComponentV2(ctx, leaf)
 			}
 			published <- buildErr
 		}(dealer)
 	}
-	for range cfg.OldCommittee {
+	for range cfg.OldCommittee[1:] {
 		if err := <-published; err != nil {
 			t.Fatal(err)
 		}
 	}
-	var frozen []cvComponentRefV2
+	var proposerCatalog []cvComponentRefV2
 	for _, member := range cfg.OldCommittee {
-		refs, err := services[member].AwaitComponentRefsV2(ctx)
+		refs, err := services[member].AwaitVerifiedComponentCatalogV2(ctx)
 		if err != nil || len(refs) != params.poolSize {
-			t.Fatalf("old member %d component barrier: refs=%d err=%v", member, len(refs), err)
-		}
-		if frozen == nil {
-			frozen = refs
-			continue
+			t.Fatalf("old member %d verified component barrier: refs=%d err=%v", member, len(refs), err)
 		}
 		for i := range refs {
-			if refs[i].Header.DealerID != frozen[i].Header.DealerID || !bytes.Equal(refs[i].Lock.Root, frozen[i].Lock.Root) {
-				t.Fatal("old actors froze different V2 component catalogs")
+			if refs[i].Header.DealerID == invalidDealer {
+				t.Fatalf("old actor %d accepted non-leaf APDB payload", member)
+			}
+			if i > 0 && refs[i-1].Header.DealerID >= refs[i].Header.DealerID {
+				t.Fatalf("old actor %d froze a non-canonical verified catalog", member)
 			}
 		}
+		if member == cfg.OldCommittee[0] {
+			proposerCatalog = refs
+		}
+	}
+	pool, err := cvBuildPoolV2(contextDigest, cfg.OldCommittee[0], proposerCatalog, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := make([]int, params.componentCount)
+	for i := range selected {
+		selected[i] = i
+	}
+	recoveriesBefore := transport.sentCount(cvTagAPDBRecoverGetV2)
+	leaves, err := services[cfg.OldCommittee[0]].VerifiedComponentLeavesV2(pool, selected)
+	if err != nil || len(leaves) != params.componentCount {
+		t.Fatalf("read selected verified components: leaves=%d err=%v", len(leaves), err)
+	}
+	if recoveriesAfter := transport.sentCount(cvTagAPDBRecoverGetV2); recoveriesAfter != recoveriesBefore {
+		t.Fatalf("verified component cache triggered recovery: before=%d after=%d", recoveriesBefore, recoveriesAfter)
+	}
+	mutatedRefs := cloneComponentRefsV2(pool.Components)
+	mutatedRefs[len(mutatedRefs)-1].Header.Root[0] ^= 1
+	mutatedRefs[len(mutatedRefs)-1].Lock.Root[0] ^= 1
+	mutatedPool, err := cvBuildPoolV2(contextDigest, cfg.OldCommittee[0], mutatedRefs, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := services[cfg.OldCommittee[0]].VerifiedComponentLeavesV2(mutatedPool, selected); err == nil {
+		t.Fatal("verified component cache accepted a mutated Pool reference")
+	}
+	duplicateSelection := append([]int(nil), selected...)
+	duplicateSelection[len(duplicateSelection)-1] = duplicateSelection[0]
+	if _, err := services[cfg.OldCommittee[0]].VerifiedComponentLeavesV2(pool, duplicateSelection); err == nil {
+		t.Fatal("verified component cache accepted duplicate selected indices")
 	}
 }

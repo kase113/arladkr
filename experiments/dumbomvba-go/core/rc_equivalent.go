@@ -58,8 +58,10 @@ func (m *DumboMVBA) runRCSubprotocol(
 				if msg.SID != sid {
 					continue
 				}
-				dig := digestDomain("PD_STORED", sid, msg.Root)
-				if !verifyShareSet(m.signer, "PD_STORED", dig, msg.Proof, threshold) {
+				dig := pdCertificateDigest("PD_STORED", sid, msg.Leader, msg.Root)
+				if msg.Leader < 0 || msg.Leader >= n || !verifyThresholdCertificate(
+					m.signer, "PD_STORED", dig, msg.Certificate, threshold,
+				) {
 					continue
 				}
 				if !rebroadcastLock {
