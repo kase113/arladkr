@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -125,9 +126,30 @@ func TestCVV2NetworkLeafCompletesWithFNewSilentReceivers(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	leaf, err := services[dealer].BuildLeafV2(ctx)
+	material, err := services[dealer].BuildLeafMaterialV2(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	leaf := material.leaf
+	canonical, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
+	if err != nil || !bytes.Equal(canonical, material.wire) {
+		t.Fatalf("built leaf material is not canonical: %v", err)
+	}
+	if _, _, _, wireBytes, err := cvLeafExperimentMetricsFromWireV2(leaf, material.wire, leafContext); err != nil || wireBytes != len(canonical) {
+		t.Fatalf("built leaf material metrics mismatch: wire=%d want=%d err=%v", wireBytes, len(canonical), err)
+	}
+	tampered := *material
+	tampered.wire = append([]byte(nil), material.wire...)
+	tampered.wire[len(tampered.wire)-1] ^= 1
+	if _, err := services[dealer].PublishBuiltComponentV2(ctx, &tampered); err == nil {
+		t.Fatal("component publisher accepted tampered built leaf wire")
+	}
+	otherDealer := cfg.OldCommittee[0]
+	if otherDealer == dealer {
+		otherDealer = cfg.OldCommittee[1]
+	}
+	if _, err := services[otherDealer].PublishBuiltComponentV2(ctx, material); err == nil {
+		t.Fatal("component publisher accepted built leaf material from another service")
 	}
 	if err := cvVerifyAPVSSV2(leaf, leafContext, receivers, validators); err != nil {
 		t.Fatal(err)
@@ -355,9 +377,17 @@ func TestCVComponentNetworkV2VerifiedCatalogSkipsInvalidPayload(t *testing.T) {
 	published := make(chan error, len(cfg.OldCommittee)-1)
 	for _, dealer := range cfg.OldCommittee[1:] {
 		go func(node int) {
-			leaf, buildErr := services[node].BuildLeafV2(ctx)
+			if node == cfg.OldCommittee[1] {
+				leaf, buildErr := services[node].BuildLeafV2(ctx)
+				if buildErr == nil {
+					_, buildErr = services[node].PublishComponentV2(ctx, leaf)
+				}
+				published <- buildErr
+				return
+			}
+			material, buildErr := services[node].BuildLeafMaterialV2(ctx)
 			if buildErr == nil {
-				_, buildErr = services[node].PublishComponentV2(ctx, leaf)
+				_, buildErr = services[node].PublishBuiltComponentV2(ctx, material)
 			}
 			published <- buildErr
 		}(dealer)

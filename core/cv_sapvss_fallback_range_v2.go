@@ -26,13 +26,40 @@ func cvProveFallbackRangeV2(
 	receiverPublicKeys []bls12381.G1Affine, dealerWitnesses []*cvDealerReceiverWitnessV2,
 	linkProof *cvFallbackLinkProofV2, linkWitness *cvFallbackDigitWitnessV2,
 ) (*cvFallbackRangeProofV2, error) {
-	chunks, total, err := cvValidateFallbackLinkStatementV2(context, dealerID, offers, receiverPublicKeys)
-	if err != nil || len(dealerWitnesses) != len(offers) || linkWitness == nil ||
-		len(linkWitness.Blindings) != total || !cvValidFallbackLinkProofShapeV2(linkProof, total, len(offers)) {
-		return nil, fmt.Errorf("invalid CV V2 fallback-range witness")
+	return cvProveFallbackRangeModeV2(
+		context, dealerID, offers, receiverPublicKeys, dealerWitnesses, linkProof, linkWitness, true,
+	)
+}
+
+func cvProveFallbackRangeAfterLinkV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, dealerWitnesses []*cvDealerReceiverWitnessV2,
+	linkProof *cvFallbackLinkProofV2, linkWitness *cvFallbackDigitWitnessV2,
+) (*cvFallbackRangeProofV2, error) {
+	return cvProveFallbackRangeModeV2(
+		context, dealerID, offers, receiverPublicKeys, dealerWitnesses, linkProof, linkWitness, false,
+	)
+}
+
+func cvProveFallbackRangeModeV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, dealerWitnesses []*cvDealerReceiverWitnessV2,
+	linkProof *cvFallbackLinkProofV2, linkWitness *cvFallbackDigitWitnessV2, validateLink bool,
+) (*cvFallbackRangeProofV2, error) {
+	var chunks, total int
+	var err error
+	if validateLink {
+		chunks, total, err = cvValidateFallbackLinkStatementV2(context, dealerID, offers, receiverPublicKeys)
+	} else {
+		chunks, total, err = cvValidateFallbackLinkStatementAfterPointDecodingV2(
+			context, dealerID, offers, receiverPublicKeys,
+		)
 	}
-	if err := cvVerifyFallbackLinkV2(context, dealerID, offers, receiverPublicKeys, linkProof); err != nil {
-		return nil, err
+	if err != nil || len(dealerWitnesses) != len(offers) || linkWitness == nil ||
+		len(linkWitness.Blindings) != total ||
+		(validateLink && !cvValidFallbackLinkProofShapeV2(linkProof, total, len(offers))) ||
+		(!validateLink && !cvValidFallbackLinkProofShapeAfterValidationV2(linkProof, total, len(offers))) {
+		return nil, fmt.Errorf("invalid CV V2 fallback-range witness")
 	}
 	values := make([]uint64, total)
 	for receiver := range offers {
@@ -48,7 +75,14 @@ func cvProveFallbackRangeV2(
 			values[position] = witness.ScalarDigits[chunk]
 		}
 	}
-	statement, err := cvFallbackRangeStatementV2(context, dealerID, offers, receiverPublicKeys, linkProof)
+	var statement []byte
+	if validateLink {
+		statement, err = cvFallbackRangeStatementV2(context, dealerID, offers, receiverPublicKeys, linkProof)
+	} else {
+		statement, err = cvFallbackRangeStatementAfterValidationV2(
+			context, dealerID, offers, receiverPublicKeys, linkProof,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -58,11 +92,7 @@ func cvProveFallbackRangeV2(
 	if err != nil {
 		return nil, err
 	}
-	out := &cvFallbackRangeProofV2{backend: cvFallbackRangeBackendV2, proof: proof}
-	if err := cvVerifyFallbackRangeV2(context, dealerID, offers, receiverPublicKeys, linkProof, out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return &cvFallbackRangeProofV2{backend: cvFallbackRangeBackendV2, proof: proof}, nil
 }
 
 func cvVerifyFallbackRangeV2(
@@ -70,15 +100,33 @@ func cvVerifyFallbackRangeV2(
 	receiverPublicKeys []bls12381.G1Affine, linkProof *cvFallbackLinkProofV2,
 	rangeProof *cvFallbackRangeProofV2,
 ) error {
-	_, total, err := cvValidateFallbackLinkStatementV2(context, dealerID, offers, receiverPublicKeys)
-	if err != nil || rangeProof == nil || rangeProof.backend != cvFallbackRangeBackendV2 || rangeProof.proof == nil ||
-		rangeProof.proof.valueCount != total || rangeProof.proof.bits != int(context.Profile.chunkBits) {
-		return fmt.Errorf("invalid CV V2 fallback-range proof")
-	}
 	if err := cvVerifyFallbackLinkV2(context, dealerID, offers, receiverPublicKeys, linkProof); err != nil {
 		return err
 	}
-	statement, err := cvFallbackRangeStatementV2(context, dealerID, offers, receiverPublicKeys, linkProof)
+	return cvVerifyFallbackRangeAfterLinkV2(
+		context, dealerID, offers, receiverPublicKeys, linkProof, rangeProof,
+	)
+}
+
+func cvVerifyFallbackRangeAfterLinkV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, linkProof *cvFallbackLinkProofV2,
+	rangeProof *cvFallbackRangeProofV2,
+) error {
+	if context == nil {
+		return fmt.Errorf("invalid CV V2 fallback-range proof")
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	total := len(offers) * chunks
+	if err != nil || rangeProof == nil || rangeProof.backend != cvFallbackRangeBackendV2 || rangeProof.proof == nil ||
+		dealerID < 0 || len(offers) == 0 || len(offers) != len(receiverPublicKeys) ||
+		!cvValidFallbackLinkProofShapeAfterValidationV2(linkProof, total, len(offers)) ||
+		rangeProof.proof.valueCount != total || rangeProof.proof.bits != int(context.Profile.chunkBits) {
+		return fmt.Errorf("invalid CV V2 fallback-range proof")
+	}
+	statement, err := cvFallbackRangeStatementAfterValidationV2(
+		context, dealerID, offers, receiverPublicKeys, linkProof,
+	)
 	if err != nil {
 		return err
 	}
@@ -98,11 +146,33 @@ func cvFallbackRangeStatementV2(
 	if err != nil || !cvValidFallbackLinkProofShapeV2(linkProof, total, len(offers)) {
 		return nil, fmt.Errorf("invalid CV V2 fallback-range statement")
 	}
+	return cvFallbackRangeStatementModeV2(context, dealerID, offers, receiverPublicKeys, linkProof, true)
+}
+
+func cvFallbackRangeStatementAfterValidationV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, linkProof *cvFallbackLinkProofV2,
+) ([]byte, error) {
+	if context == nil || dealerID < 0 || len(offers) == 0 || len(offers) != len(receiverPublicKeys) || linkProof == nil {
+		return nil, fmt.Errorf("invalid verified CV V2 fallback-range statement")
+	}
+	return cvFallbackRangeStatementModeV2(context, dealerID, offers, receiverPublicKeys, linkProof, false)
+}
+
+func cvFallbackRangeStatementModeV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, linkProof *cvFallbackLinkProofV2, validatePoints bool,
+) ([]byte, error) {
 	contextWire, err := cvLeafContextV2CanonicalBytes(context)
 	if err != nil {
 		return nil, err
 	}
-	linkWire, err := cvFallbackLinkProofV2CanonicalBytes(linkProof, context, len(offers))
+	var linkWire []byte
+	if validatePoints {
+		linkWire, err = cvFallbackLinkProofV2CanonicalBytes(linkProof, context, len(offers))
+	} else {
+		linkWire, err = cvFallbackLinkProofV2CanonicalBytesAfterValidation(linkProof, context, len(offers))
+	}
 	if err != nil {
 		return nil, err
 	}

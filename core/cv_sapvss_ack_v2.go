@@ -30,6 +30,19 @@ func cvFallbackLaneOfferV2CanonicalBytes(
 	if dealerID < 0 || cvValidateLaneOfferShapeV2(context, offer, receiverPublicKey) != nil {
 		return nil, fmt.Errorf("invalid CV V2 fallback lane")
 	}
+	return cvFallbackLaneOfferV2CanonicalBytesAfterValidation(context, dealerID, offer)
+}
+
+func cvFallbackLaneOfferV2CanonicalBytesAfterValidation(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+) ([]byte, error) {
+	if context == nil || dealerID < 0 || offer == nil || offer.ReceiverID < 0 || offer.ReceiverIndex <= 0 {
+		return nil, fmt.Errorf("invalid verified CV V2 fallback lane")
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil || len(offer.ScalarChunks) != chunks {
+		return nil, fmt.Errorf("invalid verified CV V2 fallback lane dimensions")
+	}
 	contextDigest, err := cvLeafContextDigestV2(context)
 	if err != nil {
 		return nil, err
@@ -108,7 +121,7 @@ func cvDecodeFallbackLaneOfferV2(
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV V2 fallback lane bytes")
 	}
-	canonical, err := cvFallbackLaneOfferV2CanonicalBytes(context, expectedDealer, offer, receiverPublicKey)
+	canonical, err := cvFallbackLaneOfferV2CanonicalBytesAfterValidation(context, expectedDealer, offer)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 fallback lane")
 	}
@@ -120,17 +133,48 @@ func cvVerifyDecryptAndSignACKV2(
 	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
 	identityPublicKey ed25519.PublicKey, identitySecret ed25519.PrivateKey,
 ) (*cvACKEvidenceV2, fr.Element, bls12381.G1Affine, error) {
+	return cvVerifyDecryptAndSignACKModeV2(
+		context, dealerID, offer, receiverPublicKey, receiverSecret,
+		identityPublicKey, identitySecret, true,
+	)
+}
+
+func cvVerifyDecryptAndSignACKAfterPointDecodingV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
+	identityPublicKey ed25519.PublicKey, identitySecret ed25519.PrivateKey,
+) (*cvACKEvidenceV2, fr.Element, bls12381.G1Affine, error) {
+	return cvVerifyDecryptAndSignACKModeV2(
+		context, dealerID, offer, receiverPublicKey, receiverSecret,
+		identityPublicKey, identitySecret, false,
+	)
+}
+
+func cvVerifyDecryptAndSignACKModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
+	identityPublicKey ed25519.PublicKey, identitySecret ed25519.PrivateKey, validatePoints bool,
+) (*cvACKEvidenceV2, fr.Element, bls12381.G1Affine, error) {
 	if len(identityPublicKey) != ed25519.PublicKeySize || len(identitySecret) != ed25519.PrivateKeySize ||
 		!bytes.Equal(identitySecret.Public().(ed25519.PublicKey), identityPublicKey) {
 		return nil, fr.Element{}, bls12381.G1Affine{}, fmt.Errorf("invalid CV V2 receiver identity secret")
 	}
-	scalar, blinding, err := cvVerifyAndDecryptReceiverLanesV2(
-		context, dealerID, offer, receiverPublicKey, receiverSecret,
-	)
+	var scalar fr.Element
+	var blinding bls12381.G1Affine
+	var err error
+	if validatePoints {
+		scalar, blinding, err = cvVerifyAndDecryptReceiverLanesV2(
+			context, dealerID, offer, receiverPublicKey, receiverSecret,
+		)
+	} else {
+		scalar, blinding, err = cvVerifyAndDecryptReceiverLanesAfterPointDecodingV2(
+			context, dealerID, offer, receiverPublicKey, receiverSecret,
+		)
+	}
 	if err != nil {
 		return nil, fr.Element{}, bls12381.G1Affine{}, err
 	}
-	statement, err := cvACKStatementV2(context, dealerID, offer)
+	statement, err := cvACKStatementAfterValidationV2(context, dealerID, offer)
 	if err != nil {
 		return nil, fr.Element{}, bls12381.G1Affine{}, err
 	}
@@ -146,15 +190,53 @@ func cvVerifyACKV2(
 	receiverPublicKey *bls12381.G1Affine, identityPublicKey ed25519.PublicKey,
 	evidence *cvACKEvidenceV2,
 ) error {
+	return cvVerifyACKModeV2(context, dealerID, offer, receiverPublicKey, identityPublicKey, evidence, true)
+}
+
+func cvVerifyACKAfterPointDecodingV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, identityPublicKey ed25519.PublicKey,
+	evidence *cvACKEvidenceV2,
+) error {
+	return cvVerifyACKModeV2(context, dealerID, offer, receiverPublicKey, identityPublicKey, evidence, false)
+}
+
+func cvVerifyACKAfterLocalOwnershipValidationV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	identityPublicKey ed25519.PublicKey, evidence *cvACKEvidenceV2,
+) error {
+	if offer == nil || evidence == nil || len(identityPublicKey) != ed25519.PublicKeySize ||
+		len(evidence.Signature) != ed25519.SignatureSize ||
+		!cvEqualOwnershipProofV2(&offer.Ownership, &evidence.Ownership) {
+		return fmt.Errorf("invalid verified CV V2 ACK evidence")
+	}
+	statement, err := cvACKStatementAfterValidationV2(context, dealerID, offer)
+	if err != nil || !ed25519.Verify(identityPublicKey, statement, evidence.Signature) {
+		return fmt.Errorf("invalid CV V2 ACK signature")
+	}
+	return nil
+}
+
+func cvVerifyACKModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, identityPublicKey ed25519.PublicKey,
+	evidence *cvACKEvidenceV2, validatePoints bool,
+) error {
 	if offer == nil || evidence == nil || len(identityPublicKey) != ed25519.PublicKeySize ||
 		len(evidence.Signature) != ed25519.SignatureSize ||
 		!cvEqualOwnershipProofV2(&offer.Ownership, &evidence.Ownership) {
 		return fmt.Errorf("invalid CV V2 ACK evidence")
 	}
-	if err := cvVerifyOwnershipV2(context, dealerID, offer, receiverPublicKey); err != nil {
-		return err
+	var ownershipErr error
+	if validatePoints {
+		ownershipErr = cvVerifyOwnershipV2(context, dealerID, offer, receiverPublicKey)
+	} else {
+		ownershipErr = cvVerifyOwnershipAfterPointDecodingV2(context, dealerID, offer, receiverPublicKey)
 	}
-	statement, err := cvACKStatementV2(context, dealerID, offer)
+	if ownershipErr != nil {
+		return ownershipErr
+	}
+	statement, err := cvACKStatementAfterValidationV2(context, dealerID, offer)
 	if err != nil || !ed25519.Verify(identityPublicKey, statement, evidence.Signature) {
 		return fmt.Errorf("invalid CV V2 ACK signature")
 	}
@@ -164,6 +246,18 @@ func cvVerifyACKV2(
 func cvACKStatementV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 ) ([]byte, error) {
+	return cvACKStatementModeV2(context, dealerID, offer, true)
+}
+
+func cvACKStatementAfterValidationV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+) ([]byte, error) {
+	return cvACKStatementModeV2(context, dealerID, offer, false)
+}
+
+func cvACKStatementModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2, validatePoints bool,
+) ([]byte, error) {
 	if dealerID < 0 || context == nil || offer == nil || len(context.ReceiverRegistryDigest) != 32 {
 		return nil, fmt.Errorf("invalid CV V2 ACK statement")
 	}
@@ -171,7 +265,12 @@ func cvACKStatementV2(
 	if err != nil {
 		return nil, err
 	}
-	ciphertextDigest, err := cvCiphertextDigestV2(context, offer)
+	var ciphertextDigest []byte
+	if validatePoints {
+		ciphertextDigest, err = cvCiphertextDigestV2(context, offer)
+	} else {
+		ciphertextDigest, err = cvCiphertextDigestAfterValidationV2(context, offer)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +283,7 @@ func cvACKStatementV2(
 	_ = cvWriteBytes(&wire, context.ReceiverRegistryDigest)
 	cvWritePoint(&wire, &offer.Evaluation)
 	_ = cvWriteBytes(&wire, ciphertextDigest)
-	ownershipWire, err := cvOwnershipProofV2CanonicalBytes(&offer.Ownership, context)
+	ownershipWire, err := cvOwnershipProofV2CanonicalBytesMode(&offer.Ownership, context, validatePoints)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +292,18 @@ func cvACKStatementV2(
 }
 
 func cvCiphertextDigestV2(context *cvLeafContextV2, offer *cvReceiverLaneOfferV2) ([]byte, error) {
+	return cvCiphertextDigestModeV2(context, offer, true)
+}
+
+func cvCiphertextDigestAfterValidationV2(
+	context *cvLeafContextV2, offer *cvReceiverLaneOfferV2,
+) ([]byte, error) {
+	return cvCiphertextDigestModeV2(context, offer, false)
+}
+
+func cvCiphertextDigestModeV2(
+	context *cvLeafContextV2, offer *cvReceiverLaneOfferV2, validatePoints bool,
+) ([]byte, error) {
 	if context == nil || offer == nil {
 		return nil, fmt.Errorf("invalid CV V2 ciphertext digest")
 	}
@@ -202,14 +313,14 @@ func cvCiphertextDigestV2(context *cvLeafContextV2, offer *cvReceiverLaneOfferV2
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvCiphertextDigestDomainV2))
-	if len(offer.ScalarChunks) != chunks || !cvValidCiphertext(&offer.Blinding) {
+	if len(offer.ScalarChunks) != chunks || (validatePoints && !cvValidCiphertext(&offer.Blinding)) {
 		return nil, fmt.Errorf("invalid CV V2 ciphertext digest dimensions")
 	}
 	if err := cvWriteUint32(&wire, len(offer.ScalarChunks)); err != nil {
 		return nil, err
 	}
 	for chunk := range offer.ScalarChunks {
-		if !cvValidCiphertext(&offer.ScalarChunks[chunk]) {
+		if validatePoints && !cvValidCiphertext(&offer.ScalarChunks[chunk]) {
 			return nil, fmt.Errorf("invalid CV V2 scalar ciphertext")
 		}
 		cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
@@ -225,11 +336,24 @@ func cvReceiverLaneOfferV2CanonicalBytes(
 	if dealerID < 0 || cvVerifyOwnershipV2(context, dealerID, offer, receiverPublicKey) != nil {
 		return nil, fmt.Errorf("invalid CV V2 lane offer")
 	}
+	return cvReceiverLaneOfferV2CanonicalBytesAfterValidation(context, dealerID, offer)
+}
+
+func cvReceiverLaneOfferV2CanonicalBytesAfterValidation(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+) ([]byte, error) {
+	if context == nil || dealerID < 0 || offer == nil || offer.ReceiverID < 0 || offer.ReceiverIndex <= 0 {
+		return nil, fmt.Errorf("invalid verified CV V2 lane offer")
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil || len(offer.ScalarChunks) != chunks {
+		return nil, fmt.Errorf("invalid verified CV V2 lane offer dimensions")
+	}
 	contextDigest, err := cvLeafContextDigestV2(context)
 	if err != nil {
 		return nil, err
 	}
-	proofWire, err := cvOwnershipProofV2CanonicalBytes(&offer.Ownership, context)
+	proofWire, err := cvOwnershipProofV2CanonicalBytesAfterValidation(&offer.Ownership, context)
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +380,24 @@ func cvReceiverLaneOfferV2CanonicalBytes(
 func cvDecodeReceiverLaneOfferV2(
 	wire []byte, context *cvLeafContextV2, expectedDealer, expectedReceiverID, expectedReceiverIndex int,
 	receiverPublicKey *bls12381.G1Affine,
+) (*cvReceiverLaneOfferV2, error) {
+	return cvDecodeReceiverLaneOfferV2Mode(
+		wire, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey, true,
+	)
+}
+
+func cvDecodeReceiverLaneOfferBeforeVerificationV2(
+	wire []byte, context *cvLeafContextV2, expectedDealer, expectedReceiverID, expectedReceiverIndex int,
+	receiverPublicKey *bls12381.G1Affine,
+) (*cvReceiverLaneOfferV2, error) {
+	return cvDecodeReceiverLaneOfferV2Mode(
+		wire, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey, false,
+	)
+}
+
+func cvDecodeReceiverLaneOfferV2Mode(
+	wire []byte, context *cvLeafContextV2, expectedDealer, expectedReceiverID, expectedReceiverIndex int,
+	receiverPublicKey *bls12381.G1Affine, verifyOwnership bool,
 ) (*cvReceiverLaneOfferV2, error) {
 	if expectedDealer < 0 || cvValidateReceiverBindingV2(
 		context, expectedReceiverID, expectedReceiverIndex, receiverPublicKey,
@@ -319,7 +461,12 @@ func cvDecodeReceiverLaneOfferV2(
 		return nil, err
 	}
 	offer.Ownership = *proof
-	canonical, err := cvReceiverLaneOfferV2CanonicalBytes(context, expectedDealer, offer, receiverPublicKey)
+	var canonical []byte
+	if verifyOwnership {
+		canonical, err = cvReceiverLaneOfferV2CanonicalBytes(context, expectedDealer, offer, receiverPublicKey)
+	} else {
+		canonical, err = cvReceiverLaneOfferV2CanonicalBytesAfterValidation(context, expectedDealer, offer)
+	}
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 lane offer")
 	}
@@ -327,6 +474,18 @@ func cvDecodeReceiverLaneOfferV2(
 }
 
 func cvOwnershipProofV2CanonicalBytes(proof *cvOwnershipProofV2, context *cvLeafContextV2) ([]byte, error) {
+	return cvOwnershipProofV2CanonicalBytesMode(proof, context, true)
+}
+
+func cvOwnershipProofV2CanonicalBytesAfterValidation(
+	proof *cvOwnershipProofV2, context *cvLeafContextV2,
+) ([]byte, error) {
+	return cvOwnershipProofV2CanonicalBytesMode(proof, context, false)
+}
+
+func cvOwnershipProofV2CanonicalBytesMode(
+	proof *cvOwnershipProofV2, context *cvLeafContextV2, validatePoints bool,
+) ([]byte, error) {
 	if context == nil || proof == nil {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof")
 	}
@@ -336,17 +495,17 @@ func cvOwnershipProofV2CanonicalBytes(proof *cvOwnershipProofV2, context *cvLeaf
 	}
 	if len(proof.ScalarCoinCommitments) != chunks || len(proof.ScalarCipherCommitments) != chunks ||
 		len(proof.ScalarCoinResponses) != chunks || len(proof.ScalarDigitResponses) != chunks ||
-		!cvValidG1(&proof.BlindingCoinCommitment, true) ||
-		!cvValidG1(&proof.BlindingCipherCommitment, true) ||
-		!cvValidG1(&proof.EvaluationCommitment, true) {
+		(validatePoints && (!cvValidG1(&proof.BlindingCoinCommitment, true) ||
+			!cvValidG1(&proof.BlindingCipherCommitment, true) ||
+			!cvValidG1(&proof.EvaluationCommitment, true))) {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof dimensions")
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvOwnershipProofWireDomainV2))
-	if err := cvWritePointVector(&wire, proof.ScalarCoinCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, proof.ScalarCoinCommitments, validatePoints); err != nil {
 		return nil, err
 	}
-	if err := cvWritePointVector(&wire, proof.ScalarCipherCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, proof.ScalarCipherCommitments, validatePoints); err != nil {
 		return nil, err
 	}
 	cvWritePoint(&wire, &proof.BlindingCoinCommitment)
@@ -419,7 +578,7 @@ func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnersh
 		ScalarDigitResponses: digitResponses, BlindingCoinResponse: blindingCoinResponse,
 		BlindingShareResponse: blindingShareResponse,
 	}
-	canonical, err := cvOwnershipProofV2CanonicalBytes(proof, context)
+	canonical, err := cvOwnershipProofV2CanonicalBytesAfterValidation(proof, context)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 ownership proof")
 	}
@@ -427,10 +586,22 @@ func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnersh
 }
 
 func cvACKEvidenceV2CanonicalBytes(evidence *cvACKEvidenceV2, context *cvLeafContextV2) ([]byte, error) {
+	return cvACKEvidenceV2CanonicalBytesMode(evidence, context, true)
+}
+
+func cvACKEvidenceV2CanonicalBytesAfterValidation(
+	evidence *cvACKEvidenceV2, context *cvLeafContextV2,
+) ([]byte, error) {
+	return cvACKEvidenceV2CanonicalBytesMode(evidence, context, false)
+}
+
+func cvACKEvidenceV2CanonicalBytesMode(
+	evidence *cvACKEvidenceV2, context *cvLeafContextV2, validatePoints bool,
+) ([]byte, error) {
 	if evidence == nil || len(evidence.Signature) != ed25519.SignatureSize {
 		return nil, fmt.Errorf("invalid CV V2 ACK evidence")
 	}
-	ownershipWire, err := cvOwnershipProofV2CanonicalBytes(&evidence.Ownership, context)
+	ownershipWire, err := cvOwnershipProofV2CanonicalBytesMode(&evidence.Ownership, context, validatePoints)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +631,7 @@ func cvDecodeACKEvidenceV2(wire []byte, context *cvLeafContextV2) (*cvACKEvidenc
 		return nil, fmt.Errorf("invalid CV V2 ACK signature framing")
 	}
 	evidence := &cvACKEvidenceV2{Ownership: *ownership, Signature: signature}
-	canonical, err := cvACKEvidenceV2CanonicalBytes(evidence, context)
+	canonical, err := cvACKEvidenceV2CanonicalBytesAfterValidation(evidence, context)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 ACK evidence")
 	}

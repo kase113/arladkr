@@ -133,6 +133,25 @@ func cvVerifyValidationRequestPublicV2(
 	request *cvValidationRequestV2, contextDigest []byte, params cvV2Params,
 	eligibleProposers map[int]struct{}, apdbSigner, controlSigner, coinSigner *tblsThresholdSigner,
 ) error {
+	return cvVerifyValidationRequestPublicModeV2(
+		request, contextDigest, params, eligibleProposers, apdbSigner, controlSigner, coinSigner, true,
+	)
+}
+
+func cvVerifyValidationRequestPublicAfterComponentValidationV2(
+	request *cvValidationRequestV2, contextDigest []byte, params cvV2Params,
+	eligibleProposers map[int]struct{}, apdbSigner, controlSigner, coinSigner *tblsThresholdSigner,
+) error {
+	return cvVerifyValidationRequestPublicModeV2(
+		request, contextDigest, params, eligibleProposers, apdbSigner, controlSigner, coinSigner, false,
+	)
+}
+
+func cvVerifyValidationRequestPublicModeV2(
+	request *cvValidationRequestV2, contextDigest []byte, params cvV2Params,
+	eligibleProposers map[int]struct{}, apdbSigner, controlSigner, coinSigner *tblsThresholdSigner,
+	validateComponents bool,
+) error {
 	if request == nil || len(contextDigest) != 32 || len(eligibleProposers) == 0 ||
 		!cvV2SignerHasRole(apdbSigner, cvV2RoleAPDB) || !cvV2SignerHasRole(controlSigner, cvV2RoleControl) ||
 		!cvV2SignerHasRole(coinSigner, cvV2RoleCoin) {
@@ -148,9 +167,11 @@ func cvVerifyValidationRequestPublicV2(
 		!bytes.Equal(request.Header.PoolDigest, request.Pool.Digest) {
 		return fmt.Errorf("invalid CV V2 validation proposer, context, or pool")
 	}
-	for _, component := range request.Pool.Components {
-		if err := cvValidateComponentRefV2(component, apdbSigner); err != nil {
-			return fmt.Errorf("invalid CV V2 validation component: %w", err)
+	if validateComponents {
+		for _, component := range request.Pool.Components {
+			if err := cvValidateComponentRefV2(component, apdbSigner); err != nil {
+				return fmt.Errorf("invalid CV V2 validation component: %w", err)
+			}
 		}
 	}
 	if err := cvVerifyPoolCertificateV2(&request.Pool, &request.PoolCert, controlSigner); err != nil {

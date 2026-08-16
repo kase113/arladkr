@@ -320,12 +320,21 @@ func (r *cvSAPVSSRouter) route(node int, msg Message) (Message, bool) {
 	}
 	wireBytes := tcpMessageFrameFixedBytes + len(msg.Tag) + len(msg.Body)
 	switch msg.Tag {
-	case apvssTagLaneOffer, cvTagLaneOfferV2, cvTagHandoffV2, cvTagAggregateRecoverStoreV2:
+	case apvssTagLaneOffer, cvTagLaneOfferV2, cvTagAggregateRecoverStoreV2:
 		if _, ok := r.oldNodes[msg.From]; !ok {
 			return Message{}, false
 		}
 		if _, ok := r.newNodes[msg.To]; !ok {
 			return Message{}, false
+		}
+	case cvTagHandoffV2:
+		if _, ok := r.oldNodes[msg.From]; !ok {
+			return Message{}, false
+		}
+		if _, oldOK := r.oldNodes[msg.To]; !oldOK {
+			if _, newOK := r.newNodes[msg.To]; !newOK {
+				return Message{}, false
+			}
 		}
 	case apvssTagLaneACK, cvTagLaneACKV2, cvTagAggregateRecoverGetV2:
 		if _, ok := r.newNodes[msg.From]; !ok {

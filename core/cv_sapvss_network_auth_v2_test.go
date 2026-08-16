@@ -61,6 +61,14 @@ func TestCVNetworkAuthenticationV2SeparatesBLSAndEd25519Roles(t *testing.T) {
 		if err != nil || !bytes.Equal(opened, envelope) {
 			t.Fatalf("open V2 tag %s: %v", test.tag, err)
 		}
+		cachedWire, err := auth.seal(test.from, test.to, test.tag, envelope)
+		if err != nil || !bytes.Equal(cachedWire, wire) {
+			t.Fatalf("cached seal V2 tag %s changed the authenticated wire: %v", test.tag, err)
+		}
+		if cachedOpened, openErr := auth.open(test.from, test.to, test.tag, cachedWire); openErr != nil ||
+			!bytes.Equal(cachedOpened, envelope) {
+			t.Fatalf("cached open V2 tag %s: %v", test.tag, openErr)
+		}
 		for name, open := range map[string]func() error{
 			"from": func() error { _, openErr := auth.open(test.from+1, test.to, test.tag, wire); return openErr },
 			"to":   func() error { _, openErr := auth.open(test.from, test.to+1, test.tag, wire); return openErr },
@@ -74,6 +82,11 @@ func TestCVNetworkAuthenticationV2SeparatesBLSAndEd25519Roles(t *testing.T) {
 		mutated[8] ^= 1
 		if _, err := auth.open(test.from, test.to, test.tag, mutated); err == nil {
 			t.Fatalf("V2 %s authenticated a mutated envelope", test.tag)
+		}
+		mutatedSignature := append([]byte(nil), wire...)
+		mutatedSignature[len(mutatedSignature)-1] ^= 1
+		if _, err := auth.open(test.from, test.to, test.tag, mutatedSignature); err == nil {
+			t.Fatalf("V2 %s cache authenticated a mutated signature", test.tag)
 		}
 	}
 }

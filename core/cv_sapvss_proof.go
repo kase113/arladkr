@@ -263,6 +263,31 @@ func cvPointTimes(point *bls12381.G1Affine, scalar *fr.Element) bls12381.G1Affin
 	return result
 }
 
+func cvPointJointTimes(
+	first *bls12381.G1Affine, firstScalar *fr.Element,
+	second *bls12381.G1Affine, secondScalar *fr.Element,
+) bls12381.G1Affine {
+	var jacobian bls12381.G1Jac
+	jacobian.JointScalarMultiplication(
+		first, second, firstScalar.BigInt(new(big.Int)), secondScalar.BigInt(new(big.Int)),
+	)
+	var result bls12381.G1Affine
+	result.FromJacobian(&jacobian)
+	return result
+}
+
+func cvPointBaseAndTimes(
+	baseScalar *fr.Element, point *bls12381.G1Affine, pointScalar *fr.Element,
+) bls12381.G1Affine {
+	var jacobian bls12381.G1Jac
+	jacobian.JointScalarMultiplicationBase(
+		point, baseScalar.BigInt(new(big.Int)), pointScalar.BigInt(new(big.Int)),
+	)
+	var result bls12381.G1Affine
+	result.FromJacobian(&jacobian)
+	return result
+}
+
 func cvPointSum(points ...*bls12381.G1Affine) bls12381.G1Affine {
 	var result bls12381.G1Affine
 	result.ScalarMultiplication(&genG1, big.NewInt(0))

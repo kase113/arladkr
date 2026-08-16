@@ -196,7 +196,7 @@ func cvRunReferenceEpochV2(input cvReferenceEpochInputV2) (*cvReferenceEpochResu
 	if err != nil {
 		return nil, fmt.Errorf("reference V2 aggregate: %w", err)
 	}
-	aggregatePayload, err := cvAggregateV2CanonicalBytes(aggregate, input.Context, input.Params)
+	aggregatePayload, err := cvAggregateV2CanonicalBytesAfterValidation(aggregate, input.Context, input.Params)
 	if err != nil {
 		return nil, err
 	}

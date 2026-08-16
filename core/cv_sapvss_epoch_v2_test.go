@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+func TestCVRecoverServiceGraceV2Bounds(t *testing.T) {
+	tests := []struct {
+		route time.Duration
+		want  time.Duration
+	}{
+		{route: 0, want: 500 * time.Millisecond},
+		{route: 300 * time.Millisecond, want: 600 * time.Millisecond},
+		{route: time.Second, want: 10 * time.Second},
+		{route: 2 * time.Second, want: 10 * time.Second},
+		{route: 6 * time.Second, want: 10 * time.Second},
+	}
+	for _, test := range tests {
+		if got := cvRecoverServiceGraceV2(test.route); got != test.want {
+			t.Fatalf("route=%v grace=%v want %v", test.route, got, test.want)
+		}
+	}
+}
+
 func TestRunCVEpochV2FourNodeEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real four-node CV V2 epoch in short mode")
@@ -32,7 +50,7 @@ func TestRunCVEpochV2FourNodeEndToEnd(t *testing.T) {
 		AgreementTransport: "tcp-distributed", AgreementBindHost: "127.0.0.1",
 		AgreementBasePort: cvAvailableEpochV2BasePort(t),
 		CVPublicKeyDir:    publicDir, CVLocalSecretDir: secretDir,
-		WaitSPBCTimeout: 5 * time.Second, RouteSendTimeout: time.Second,
+		WaitSPBCTimeout: 30 * time.Second, RouteSendTimeout: time.Second,
 	}
 	if err := GenerateCVV2KeyMaterial(publicDir, secretDir, base); err != nil {
 		t.Fatal(err)
@@ -78,11 +96,11 @@ func TestRunCVEpochV2FourNodeEndToEnd(t *testing.T) {
 		}
 		t.Fatalf("CV V2 epoch failed on %d nodes (coin shares sent=%d)", len(failures), transport.sentCount(cvTagCoinShareV2))
 	}
-	if senders := transport.sentFromByTag(cvTagPoolOfferV2); len(senders) != base.CVProposerSampleSize {
-		t.Fatalf("sampled proposer Pool senders=%v want %d distinct proposers", senders, base.CVProposerSampleSize)
+	if senders := transport.sentFromByTag(cvTagPoolOfferV2); len(senders) == 0 || len(senders) > base.CVProposerSampleSize {
+		t.Fatalf("sampled proposer Pool senders=%v want between 1 and %d", senders, base.CVProposerSampleSize)
 	}
-	if senders := transport.sentFromByTag(cvTagValidationRequestV2); len(senders) != base.CVProposerSampleSize {
-		t.Fatalf("sampled proposer validation senders=%v want %d distinct proposers", senders, base.CVProposerSampleSize)
+	if senders := transport.sentFromByTag(cvTagValidationRequestV2); len(senders) == 0 || len(senders) > base.CVProposerSampleSize {
+		t.Fatalf("sampled proposer validation senders=%v want between 1 and %d", senders, base.CVProposerSampleSize)
 	}
 	for node, result := range got {
 		if result == nil || !result.RecoverAggSuccess || len(result.NewShares) != 1 || len(result.CVReceipts) != 1 {

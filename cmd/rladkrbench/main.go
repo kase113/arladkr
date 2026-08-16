@@ -401,9 +401,10 @@ func main() {
 			}
 			traceBenchMain(localNodeIDs, "before_runepoch", fmt.Sprintf("run=%d epoch=%d", i+1, globalEpoch))
 			res, err := core.RunEpoch(ctx, cfg)
-			totalAttemptLatencyMs += float64(time.Since(totalStart).Microseconds()) / 1000.0
+			outerAttemptLatencyMs := float64(time.Since(totalStart).Microseconds()) / 1000.0
 			cancel()
 			if err != nil {
+				totalAttemptLatencyMs += outerAttemptLatencyMs
 				fmt.Fprintf(os.Stderr, "EPOCH_RUN_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, err)
 				runSuccess = false
 				break
@@ -433,7 +434,11 @@ func main() {
 				runSuccess = false
 				break
 			}
-			epochLatencyMs := float64(time.Since(totalStart).Microseconds()) / 1000.0
+			epochLatencyMs := setupMs + resultProtocolLatencyMs(res)
+			if epochLatencyMs <= setupMs {
+				epochLatencyMs = outerAttemptLatencyMs
+			}
+			totalAttemptLatencyMs += epochLatencyMs
 			resultDigest, digestErr := arlResultDigest(cfg, res)
 			if digestErr != nil {
 				fmt.Fprintf(os.Stderr, "EPOCH_RESULT_DIGEST_ERROR run=%d epoch=%d err=%v\n", i+1, globalEpoch, digestErr)
@@ -620,6 +625,19 @@ func validateCVV2BenchmarkShape(runs, epochs int) error {
 		return fmt.Errorf("CV V2 benchmark supports exactly one fresh run and one epoch; key rotation and incomplete-epoch resume are unsupported")
 	}
 	return nil
+}
+
+func resultProtocolLatencyMs(result *core.EpochResult) float64 {
+	if result == nil {
+		return 0
+	}
+	var maximum time.Duration
+	for _, node := range result.PerNode {
+		if node.Latency > maximum {
+			maximum = node.Latency
+		}
+	}
+	return float64(maximum.Microseconds()) / 1000.0
 }
 
 func defaultBenchRunTimeout(n int) time.Duration {

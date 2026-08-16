@@ -7,7 +7,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+const cvDefaultACKSettleGraceV2 = 25 * time.Millisecond
+
+func cvACKSettleGraceV2() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("RLADKR_ACK_SETTLE_GRACE_MS"))
+	if raw == "" {
+		return cvDefaultACKSettleGraceV2
+	}
+	milliseconds, err := strconv.Atoi(raw)
+	if err != nil || milliseconds < 0 {
+		return cvDefaultACKSettleGraceV2
+	}
+	if milliseconds > 250 {
+		milliseconds = 250
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
 
 func cvLeafVerifyWorkers(jobs int) int {
 	if jobs <= 1 {

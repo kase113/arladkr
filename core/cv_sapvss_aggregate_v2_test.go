@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
@@ -120,6 +121,24 @@ func TestCVAggV2BuildCodecAndRecomputeVerification(t *testing.T) {
 	if _, err := cvDecodeAggregateV2(append(append([]byte(nil), payload...), 0), context, params); err == nil {
 		t.Fatal("accepted aggregate payload with trailing bytes")
 	}
+	badEvaluation := *decoded
+	badEvaluation.Components = append([]cvAggregateComponentV2(nil), decoded.Components...)
+	badEvaluation.CoefficientCommitments = append([]bls12381.G1Affine(nil), decoded.CoefficientCommitments...)
+	badEvaluation.Receivers = append([]cvAggregateReceiverV2(nil), decoded.Receivers...)
+	badEvaluation.Receivers[0] = decoded.Receivers[0]
+	badEvaluation.Receivers[0].Evaluation.Add(&badEvaluation.Receivers[0].Evaluation, &genG1)
+	badUnsigned, err := cvAggregateV2UnsignedCanonicalBytesAfterValidation(&badEvaluation, context, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badEvaluation.Digest = hashBytes([]byte(cvAggregateDigestV2Domain), badUnsigned)
+	badWire, err := cvAggregateV2CanonicalBytesAfterValidation(&badEvaluation, context, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cvDecodeAggregateV2(badWire, context, params); err == nil {
+		t.Fatal("decoded aggregate accepted a digest-resigned evaluation mutation")
+	}
 	mutatedLeaf := *leaves[0]
 	mutatedLeaf.Digest = append([]byte(nil), leaves[0].Digest...)
 	mutatedLeaf.Digest[0] ^= 1
@@ -150,6 +169,13 @@ func TestCVV2AggregateFitsEpochShardUpperBound(t *testing.T) {
 	payload, err := cvAggregateV2CanonicalBytes(aggregate, context, params)
 	if err != nil {
 		t.Fatal(err)
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := cvAggregateWireSizeV2(context, params, chunks); len(payload) != want {
+		t.Fatalf("aggregate V2 sizing mismatch: got=%d want=%d", len(payload), want)
 	}
 	shardBytes, err := cvEpochShardBytesUpperBoundV2(
 		context, params, receivers, validators, params.recoveryThreshold,

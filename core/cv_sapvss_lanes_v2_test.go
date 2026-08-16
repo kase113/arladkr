@@ -73,6 +73,50 @@ func TestCVReceiverLanesV2UseScalarChunksAndGroupBlinding(t *testing.T) {
 	}
 }
 
+func TestCVReceiverLanesV2DecodedPathStillVerifiesOwnershipEquations(t *testing.T) {
+	context, dealer, receiverID, receiverIndex, secret, publicKey, scalar, blinding := cvReceiverLanesV2Fixture(t)
+	offer, _, err := cvEncryptReceiverLanesV2(
+		context, dealer, receiverID, receiverIndex, &publicKey, scalar, blinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := cvReceiverLaneOfferV2CanonicalBytesAfterValidation(context, dealer, offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cvDecodeReceiverLaneOfferBeforeVerificationV2(
+		wire, context, dealer, receiverID, receiverIndex, &publicKey,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cvVerifyAndDecryptReceiverLanesAfterPointDecodingV2(
+		context, dealer, decoded, &publicKey, secret,
+	); err != nil {
+		t.Fatalf("decoded receiver lane verification failed: %v", err)
+	}
+
+	badProof := *decoded
+	badProof.Ownership = cvCloneOwnershipProofV2(&decoded.Ownership)
+	one := fr.One()
+	badProof.Ownership.BlindingShareResponse.Add(&badProof.Ownership.BlindingShareResponse, &one)
+	if _, _, err := cvVerifyAndDecryptReceiverLanesAfterPointDecodingV2(
+		context, dealer, &badProof, &publicKey, secret,
+	); err == nil {
+		t.Fatal("decoded receiver path accepted a mutated ownership response")
+	}
+
+	badCiphertext := *decoded
+	badCiphertext.ScalarChunks = append([]cvElGamalCiphertext(nil), decoded.ScalarChunks...)
+	badCiphertext.ScalarChunks[0].c.Add(&badCiphertext.ScalarChunks[0].c, &genG1)
+	if _, _, err := cvVerifyAndDecryptReceiverLanesAfterPointDecodingV2(
+		context, dealer, &badCiphertext, &publicKey, secret,
+	); err == nil {
+		t.Fatal("decoded receiver path accepted a ciphertext mutation")
+	}
+}
+
 func TestCVOwnershipProofV2RejectsCiphertextEvaluationAndBindingMutations(t *testing.T) {
 	context, dealer, receiverID, receiverIndex, _, publicKey, scalar, blinding := cvReceiverLanesV2Fixture(t)
 	offer, _, err := cvEncryptReceiverLanesV2(

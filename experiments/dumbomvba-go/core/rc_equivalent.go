@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 func (m *DumboMVBA) runRCSubprotocol(
@@ -23,18 +24,20 @@ func (m *DumboMVBA) runRCSubprotocol(
 		k = 1
 	}
 
-	sendRC := func(to int, body interface{}) {
-		_ = m.net.Send(to, ProtocolMessage{
-			Tag:    TagMVBARC,
-			Round:  0,
-			Leader: 0,
-			Body:   body,
-		})
+	// RC dissemination is a best-effort fan-out. A peer may have already
+	// completed MVBA and closed its listener while this node is still
+	// reconstructing a value. Keeping the old sequential Send loop here made
+	// one failed peer's retry/backoff stall the only goroutine consuming RC
+	// shards. Bound the fan-out wait by the protocol route timeout; certificate
+	// and shard validation below remain unchanged.
+	sendWait := m.cfg.RouteSendTimeout
+	if sendWait <= 0 {
+		sendWait = 300 * time.Millisecond
 	}
 	broadcastRC := func(body interface{}) {
-		for i := 0; i < n; i++ {
-			sendRC(i, body)
-		}
+		broadcastEquivalent(ctx, m.net, n, sendWait, ProtocolMessage{
+			Tag: TagMVBARC, Round: 0, Leader: 0, Body: body,
+		})
 	}
 
 	if lock != nil {
@@ -108,6 +111,44 @@ func (m *DumboMVBA) runRCSubprotocol(
 			default:
 				continue
 			}
+		}
+	}
+}
+
+// broadcastEquivalent fans out one protocol message without allowing a
+// stalled peer to stop the caller from processing already delivered messages.
+// Send has no context parameter, so timed-out sends finish in their own
+// goroutine and are reclaimed when the session transport closes.
+func broadcastEquivalent(
+	ctx context.Context,
+	net Network,
+	n int,
+	wait time.Duration,
+	msg ProtocolMessage,
+) {
+	if ctx == nil || net == nil || n <= 0 {
+		return
+	}
+	if wait <= 0 {
+		wait = 300 * time.Millisecond
+	}
+	done := make(chan struct{}, n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			_ = net.Send(i, msg)
+			done <- struct{}{}
+		}()
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for completed := 0; completed < n; completed++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+		case <-timer.C:
+			return
 		}
 	}
 }

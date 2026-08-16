@@ -69,26 +69,17 @@ func cvEncryptReceiverLanesV2(
 		}
 		var digitPoint bls12381.G1Affine
 		digitPoint.ScalarMultiplication(&genG1, new(big.Int).SetUint64(digit))
-		offer.ScalarChunks[chunk], err = cvEncryptPoint(
+		offer.ScalarChunks[chunk] = cvEncryptPointAfterValidationV2(
 			receiverPublicKey, &digitPoint, witness.ScalarCoins[chunk],
 		)
-		if err != nil {
-			return nil, nil, err
-		}
 	}
 	if _, err := witness.BlindingCoin.SetRandom(); err != nil {
 		return nil, nil, err
 	}
 	blindingPoint := cvPointTimes(&h, &blinding)
-	offer.Blinding, err = cvEncryptPoint(receiverPublicKey, &blindingPoint, witness.BlindingCoin)
-	if err != nil {
-		return nil, nil, err
-	}
-	offer.Evaluation = cvPointSum(
-		pointPtr(cvPointTimes(&genG1, &scalar)),
-		pointPtr(cvPointTimes(&h, &blinding)),
-	)
-	ownership, err := cvProveOwnershipV2(context, dealerID, offer, receiverPublicKey, witness)
+	offer.Blinding = cvEncryptPointAfterValidationV2(receiverPublicKey, &blindingPoint, witness.BlindingCoin)
+	offer.Evaluation = cvPointBaseAndTimes(&scalar, &h, &blinding)
+	ownership, err := cvProveOwnershipAfterEncryptionV2(context, dealerID, offer, receiverPublicKey, witness)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -100,7 +91,27 @@ func cvProveOwnershipV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 	receiverPublicKey *bls12381.G1Affine, witness *cvDealerReceiverWitnessV2,
 ) (*cvOwnershipProofV2, error) {
-	if context == nil || cvValidateLaneOfferShapeV2(context, offer, receiverPublicKey) != nil || witness == nil {
+	return cvProveOwnershipModeV2(context, dealerID, offer, receiverPublicKey, witness, true)
+}
+
+func cvProveOwnershipAfterEncryptionV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, witness *cvDealerReceiverWitnessV2,
+) (*cvOwnershipProofV2, error) {
+	return cvProveOwnershipModeV2(context, dealerID, offer, receiverPublicKey, witness, false)
+}
+
+func cvProveOwnershipModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, witness *cvDealerReceiverWitnessV2, validateLane bool,
+) (*cvOwnershipProofV2, error) {
+	var shapeErr error
+	if validateLane {
+		shapeErr = cvValidateLaneOfferShapeV2(context, offer, receiverPublicKey)
+	} else {
+		shapeErr = cvValidateLaneOfferShapeAfterPointDecodingV2(context, offer, receiverPublicKey)
+	}
+	if context == nil || shapeErr != nil || witness == nil {
 		return nil, fmt.Errorf("invalid CV V2 ownership witness")
 	}
 	chunks, err := cvChunkCount(context.Profile)
@@ -130,9 +141,8 @@ func cvProveOwnershipV2(
 			return nil, err
 		}
 		proof.ScalarCoinCommitments[chunk] = cvPointTimes(&genG1, &coinNonces[chunk])
-		proof.ScalarCipherCommitments[chunk] = cvPointSum(
-			pointPtr(cvPointTimes(receiverPublicKey, &coinNonces[chunk])),
-			pointPtr(cvPointTimes(&genG1, &digitNonces[chunk])),
+		proof.ScalarCipherCommitments[chunk] = cvPointBaseAndTimes(
+			&digitNonces[chunk], receiverPublicKey, &coinNonces[chunk],
 		)
 	}
 	if _, err := blindingCoinNonce.SetRandom(); err != nil {
@@ -142,19 +152,17 @@ func cvProveOwnershipV2(
 		return nil, err
 	}
 	proof.BlindingCoinCommitment = cvPointTimes(&genG1, &blindingCoinNonce)
-	proof.BlindingCipherCommitment = cvPointSum(
-		pointPtr(cvPointTimes(receiverPublicKey, &blindingCoinNonce)),
-		pointPtr(cvPointTimes(&h, &blindingShareNonce)),
+	proof.BlindingCipherCommitment = cvPointJointTimes(
+		receiverPublicKey, &blindingCoinNonce, &h, &blindingShareNonce,
 	)
 	weightedDigitNonce, err := cvWeightedScalarV2(digitNonces, context.Profile.chunkBits)
 	if err != nil {
 		return nil, err
 	}
-	proof.EvaluationCommitment = cvPointSum(
-		pointPtr(cvPointTimes(&genG1, &weightedDigitNonce)),
-		pointPtr(cvPointTimes(&h, &blindingShareNonce)),
+	proof.EvaluationCommitment = cvPointBaseAndTimes(&weightedDigitNonce, &h, &blindingShareNonce)
+	challenge, err := cvOwnershipChallengeScalarAfterValidationV2(
+		context, dealerID, offer, receiverPublicKey, proof,
 	)
-	challenge, err := cvOwnershipChallengeScalarV2(context, dealerID, offer, receiverPublicKey, proof)
 	if err != nil {
 		return nil, err
 	}
@@ -173,14 +181,47 @@ func cvProveOwnershipV2(
 	return proof, nil
 }
 
+func cvEncryptPointAfterValidationV2(
+	receiverPublicKey, message *bls12381.G1Affine, coin fr.Element,
+) cvElGamalCiphertext {
+	var coinInt big.Int
+	coin.BigInt(&coinInt)
+	var ciphertext cvElGamalCiphertext
+	ciphertext.r.ScalarMultiplication(&genG1, &coinInt)
+	var shared bls12381.G1Affine
+	shared.ScalarMultiplication(receiverPublicKey, &coinInt)
+	ciphertext.c.Add(&shared, message)
+	return ciphertext
+}
+
 func cvVerifyOwnershipV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 	receiverPublicKey *bls12381.G1Affine,
 ) error {
+	return cvVerifyOwnershipModeV2(context, dealerID, offer, receiverPublicKey, true)
+}
+
+func cvVerifyOwnershipAfterPointDecodingV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine,
+) error {
+	return cvVerifyOwnershipModeV2(context, dealerID, offer, receiverPublicKey, false)
+}
+
+func cvVerifyOwnershipModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, validatePoints bool,
+) error {
 	if dealerID < 0 {
 		return fmt.Errorf("invalid CV V2 ownership dealer")
 	}
-	if context == nil || cvValidateLaneOfferShapeV2(context, offer, receiverPublicKey) != nil {
+	var shapeErr error
+	if validatePoints {
+		shapeErr = cvValidateLaneOfferShapeV2(context, offer, receiverPublicKey)
+	} else {
+		shapeErr = cvValidateLaneOfferShapeAfterPointDecodingV2(context, offer, receiverPublicKey)
+	}
+	if context == nil || shapeErr != nil {
 		return fmt.Errorf("invalid CV V2 ownership statement")
 	}
 	chunks, err := cvChunkCount(context.Profile)
@@ -192,18 +233,22 @@ func cvVerifyOwnershipV2(
 		len(proof.ScalarCoinResponses) != chunks || len(proof.ScalarDigitResponses) != chunks {
 		return fmt.Errorf("invalid CV V2 ownership proof dimensions")
 	}
-	for i := 0; i < chunks; i++ {
-		if !cvValidG1(&proof.ScalarCoinCommitments[i], true) ||
-			!cvValidG1(&proof.ScalarCipherCommitments[i], true) {
+	if validatePoints {
+		for i := 0; i < chunks; i++ {
+			if !cvValidG1(&proof.ScalarCoinCommitments[i], true) ||
+				!cvValidG1(&proof.ScalarCipherCommitments[i], true) {
+				return fmt.Errorf("invalid CV V2 ownership proof point")
+			}
+		}
+		if !cvValidG1(&proof.BlindingCoinCommitment, true) ||
+			!cvValidG1(&proof.BlindingCipherCommitment, true) ||
+			!cvValidG1(&proof.EvaluationCommitment, true) {
 			return fmt.Errorf("invalid CV V2 ownership proof point")
 		}
 	}
-	if !cvValidG1(&proof.BlindingCoinCommitment, true) ||
-		!cvValidG1(&proof.BlindingCipherCommitment, true) ||
-		!cvValidG1(&proof.EvaluationCommitment, true) {
-		return fmt.Errorf("invalid CV V2 ownership proof point")
-	}
-	challenge, err := cvOwnershipChallengeScalarV2(context, dealerID, offer, receiverPublicKey, proof)
+	challenge, err := cvOwnershipChallengeScalarAfterValidationV2(
+		context, dealerID, offer, receiverPublicKey, proof,
+	)
 	if err != nil {
 		return err
 	}
@@ -219,9 +264,8 @@ func cvVerifyOwnershipV2(
 		if !leftCoin.Equal(&rightCoin) {
 			return fmt.Errorf("invalid CV V2 ownership scalar coin equation")
 		}
-		leftCipher := cvPointSum(
-			pointPtr(cvPointTimes(receiverPublicKey, &proof.ScalarCoinResponses[chunk])),
-			pointPtr(cvPointTimes(&genG1, &proof.ScalarDigitResponses[chunk])),
+		leftCipher := cvPointBaseAndTimes(
+			&proof.ScalarDigitResponses[chunk], receiverPublicKey, &proof.ScalarCoinResponses[chunk],
 		)
 		rightCipher := cvPointSum(&proof.ScalarCipherCommitments[chunk],
 			pointPtr(cvPointTimes(&ciphertext.c, &challenge)))
@@ -235,9 +279,8 @@ func cvVerifyOwnershipV2(
 	if !leftBlindingCoin.Equal(&rightBlindingCoin) {
 		return fmt.Errorf("invalid CV V2 ownership blinding coin equation")
 	}
-	leftBlindingCipher := cvPointSum(
-		pointPtr(cvPointTimes(receiverPublicKey, &proof.BlindingCoinResponse)),
-		pointPtr(cvPointTimes(&h, &proof.BlindingShareResponse)),
+	leftBlindingCipher := cvPointJointTimes(
+		receiverPublicKey, &proof.BlindingCoinResponse, &h, &proof.BlindingShareResponse,
 	)
 	rightBlindingCipher := cvPointSum(&proof.BlindingCipherCommitment,
 		pointPtr(cvPointTimes(&offer.Blinding.c, &challenge)))
@@ -248,10 +291,7 @@ func cvVerifyOwnershipV2(
 	if err != nil {
 		return err
 	}
-	leftEvaluation := cvPointSum(
-		pointPtr(cvPointTimes(&genG1, &weightedResponse)),
-		pointPtr(cvPointTimes(&h, &proof.BlindingShareResponse)),
-	)
+	leftEvaluation := cvPointBaseAndTimes(&weightedResponse, &h, &proof.BlindingShareResponse)
 	rightEvaluation := cvPointSum(&proof.EvaluationCommitment,
 		pointPtr(cvPointTimes(&offer.Evaluation, &challenge)))
 	if !leftEvaluation.Equal(&rightEvaluation) {
@@ -264,9 +304,33 @@ func cvVerifyAndDecryptReceiverLanesV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
 ) (fr.Element, bls12381.G1Affine, error) {
+	return cvVerifyAndDecryptReceiverLanesModeV2(
+		context, dealerID, offer, receiverPublicKey, receiverSecret, true,
+	)
+}
+
+func cvVerifyAndDecryptReceiverLanesAfterPointDecodingV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element,
+) (fr.Element, bls12381.G1Affine, error) {
+	return cvVerifyAndDecryptReceiverLanesModeV2(
+		context, dealerID, offer, receiverPublicKey, receiverSecret, false,
+	)
+}
+
+func cvVerifyAndDecryptReceiverLanesModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, receiverSecret fr.Element, validatePoints bool,
+) (fr.Element, bls12381.G1Affine, error) {
 	// Ownership is intentionally verified before the receiver secret is used.
-	if err := cvVerifyOwnershipV2(context, dealerID, offer, receiverPublicKey); err != nil {
-		return fr.Element{}, bls12381.G1Affine{}, err
+	var ownershipErr error
+	if validatePoints {
+		ownershipErr = cvVerifyOwnershipV2(context, dealerID, offer, receiverPublicKey)
+	} else {
+		ownershipErr = cvVerifyOwnershipAfterPointDecodingV2(context, dealerID, offer, receiverPublicKey)
+	}
+	if ownershipErr != nil {
+		return fr.Element{}, bls12381.G1Affine{}, ownershipErr
 	}
 	expectedPublic, err := cvReceiverPublicKey(receiverSecret)
 	if err != nil || !expectedPublic.Equal(receiverPublicKey) {
@@ -338,6 +402,21 @@ func cvValidateLaneOfferShapeV2(
 	return nil
 }
 
+func cvValidateLaneOfferShapeAfterPointDecodingV2(
+	context *cvLeafContextV2, offer *cvReceiverLaneOfferV2, receiverPublicKey *bls12381.G1Affine,
+) error {
+	if err := cvValidateLeafContextV2(context); err != nil || offer == nil || receiverPublicKey == nil ||
+		offer.ReceiverIndex <= 0 || offer.ReceiverIndex > len(context.NewRoster) ||
+		context.NewRoster[offer.ReceiverIndex-1] != offer.ReceiverID {
+		return fmt.Errorf("invalid decoded CV V2 receiver lane offer")
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil || len(offer.ScalarChunks) != chunks {
+		return fmt.Errorf("invalid decoded CV V2 receiver ciphertext dimensions")
+	}
+	return nil
+}
+
 func cvOwnershipChallengeScalarV2(
 	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
 	receiverPublicKey *bls12381.G1Affine, proof *cvOwnershipProofV2,
@@ -345,6 +424,23 @@ func cvOwnershipChallengeScalarV2(
 	if dealerID < 0 || proof == nil || cvValidateLaneOfferShapeV2(context, offer, receiverPublicKey) != nil {
 		return fr.Element{}, fmt.Errorf("invalid CV V2 ownership challenge")
 	}
+	return cvOwnershipChallengeScalarModeV2(context, dealerID, offer, receiverPublicKey, proof, true)
+}
+
+func cvOwnershipChallengeScalarAfterValidationV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, proof *cvOwnershipProofV2,
+) (fr.Element, error) {
+	if context == nil || dealerID < 0 || offer == nil || receiverPublicKey == nil || proof == nil {
+		return fr.Element{}, fmt.Errorf("invalid verified CV V2 ownership challenge")
+	}
+	return cvOwnershipChallengeScalarModeV2(context, dealerID, offer, receiverPublicKey, proof, false)
+}
+
+func cvOwnershipChallengeScalarModeV2(
+	context *cvLeafContextV2, dealerID int, offer *cvReceiverLaneOfferV2,
+	receiverPublicKey *bls12381.G1Affine, proof *cvOwnershipProofV2, validateProofPoints bool,
+) (fr.Element, error) {
 	contextDigest, err := cvLeafContextDigestV2(context)
 	if err != nil {
 		return fr.Element{}, err
@@ -364,10 +460,10 @@ func cvOwnershipChallengeScalarV2(
 		cvWriteCiphertext(&wire, &offer.ScalarChunks[chunk])
 	}
 	cvWriteCiphertext(&wire, &offer.Blinding)
-	if err := cvWritePointVector(&wire, proof.ScalarCoinCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, proof.ScalarCoinCommitments, validateProofPoints); err != nil {
 		return fr.Element{}, err
 	}
-	if err := cvWritePointVector(&wire, proof.ScalarCipherCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, proof.ScalarCipherCommitments, validateProofPoints); err != nil {
 		return fr.Element{}, err
 	}
 	cvWritePoint(&wire, &proof.BlindingCoinCommitment)

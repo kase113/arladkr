@@ -59,3 +59,17 @@ three independent fresh runs each. The four secure points are
 `manifest-only`; they record fixed-fraction sampling parameters and must not be
 reported as measured cryptographic performance. This file is a pilot reference
 matrix, not the separate multi-process network comparison matrix.
+
+The minimal multi-process comparison is declared in
+`network_comparison_matrix_v1.json`. It fixes the common `n=10,f=3` loopback
+topology, one excluded warm-up and three alternating fresh measured runs per
+protocol. This is an implementation-latency pilot: Practical uses explicit
+`kappa=4` and 3072-bit Paillier, while ARL-ADKR uses the executable `(3,3)`
+functional smoke sample with union bound `23/120`. The matrix therefore must
+not be cited as a matched-security comparison.
+
+The optimization-validation result collected on 2026-08-14 is recorded in
+`results/network_comparison_n10_pilot_2026-08-14.json`. It preserves all six
+cluster-level measured values and the phase means, but is deliberately marked
+as non-final because it was collected from a dirty worktree. Raw node logs are
+kept in the local artifact directory named by that result manifest.

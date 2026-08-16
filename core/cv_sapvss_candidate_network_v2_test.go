@@ -62,6 +62,14 @@ func TestCVCertifiedCandidateV2AcceptsRelaysAndSuppressesDuplicates(t *testing.T
 	if receiver == relay {
 		receiver = cfg.OldCommittee[len(cfg.OldCommittee)-2]
 	}
+	badObject := *object
+	badObject.Header.ProposerID++
+	badCtx, badCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := services[relay].PublishCertifiedCandidateV2(badCtx, &badObject); err == nil {
+		badCancel()
+		t.Fatal("local candidate publisher accepted an unverified candidate")
+	}
+	badCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	published := make(chan error, 1)

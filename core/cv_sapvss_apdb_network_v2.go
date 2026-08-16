@@ -122,9 +122,10 @@ type cvCertifiedValidationV2 struct {
 }
 
 type cvPendingDecisionV2 struct {
-	statement []byte
-	shares    map[int][]byte
-	ready     chan struct{}
+	statement   []byte
+	shares      map[int][]byte
+	certificate []byte
+	ready       chan struct{}
 }
 
 type cvPendingScalarSharesV2 struct {
@@ -137,6 +138,14 @@ type cvVerifiedComponentV2 struct {
 	ref        cvComponentRefV2
 	leafDigest []byte
 	payload    []byte
+	leaf       *cvLeafV2
+}
+
+type cvVerifiedComponentCallV2 struct {
+	ref  cvComponentRefV2
+	leaf *cvLeafV2
+	err  error
+	done chan struct{}
 }
 
 type cvAPDBNetworkServiceV2 struct {
@@ -174,6 +183,7 @@ type cvAPDBNetworkServiceV2 struct {
 	certifiedReady         map[int]chan struct{}
 	pendingDecisions       map[string]*cvPendingDecisionV2
 	decisionLocalShares    map[string][]byte
+	decisionCertificates   map[string][]byte
 	acceptedHandoff        []byte
 	handoffReady           chan struct{}
 	localScalarOutputs     map[string][]byte
@@ -181,6 +191,7 @@ type cvAPDBNetworkServiceV2 struct {
 	pendingLaneACKsV2      *cvPendingLaneACKsV2
 	componentRefsV2        map[int]cvComponentRefV2
 	verifiedComponentsV2   map[int]cvVerifiedComponentV2
+	verifiedComponentCalls map[int]*cvVerifiedComponentCallV2
 	rejectedComponentsV2   map[int]struct{}
 	verifiedCatalogV2      []cvComponentRefV2
 	localComponentRefV2    []byte
@@ -268,11 +279,13 @@ func newCVAPDBNetworkServiceV2(
 		certifiedReady:         make(map[int]chan struct{}),
 		pendingDecisions:       make(map[string]*cvPendingDecisionV2),
 		decisionLocalShares:    make(map[string][]byte),
+		decisionCertificates:   make(map[string][]byte),
 		handoffReady:           make(chan struct{}, 1),
 		localScalarOutputs:     make(map[string][]byte),
 		pendingScalarShares:    make(map[string]*cvPendingScalarSharesV2),
 		componentRefsV2:        make(map[int]cvComponentRefV2, cfg.Params.poolSize),
 		verifiedComponentsV2:   make(map[int]cvVerifiedComponentV2, cfg.Params.poolSize),
+		verifiedComponentCalls: make(map[int]*cvVerifiedComponentCallV2),
 		rejectedComponentsV2:   make(map[int]struct{}),
 		componentRefUpdatesV2:  make(chan struct{}, 1),
 		certifiedCandidatesV2:  make(map[string][]byte, cfg.Params.proposerSampleSize),
@@ -542,7 +555,10 @@ func (s *cvAPDBNetworkServiceV2) CertifyAggregate(
 	}
 	validatorSample := append([]int(nil), s.validatorSample...)
 	s.mu.Unlock()
-	if err := cvVerifyValidationRequestPublicV2(request, s.cfg.ExpectedContext, s.cfg.Params, eligible,
+	if err := s.validateKnownComponentRefsV2(request.Pool.Components); err != nil {
+		return nil, err
+	}
+	if err := cvVerifyValidationRequestPublicAfterComponentValidationV2(request, s.cfg.ExpectedContext, s.cfg.Params, eligible,
 		s.apdbSigner, s.controlSigner, s.coinSigner); err != nil {
 		return nil, err
 	}
@@ -752,7 +768,10 @@ func (s *cvAPDBNetworkServiceV2) FinalizeDecision(
 	}
 	s.pendingDecisions[key] = pending
 	s.decisionLocalShares[key] = append([]byte(nil), localShare...)
-	if len(pending.shares) >= s.controlSigner.Threshold() {
+	if certificate := s.decisionCertificates[key]; len(certificate) != 0 {
+		pending.certificate = append([]byte(nil), certificate...)
+	}
+	if len(pending.certificate) != 0 || len(pending.shares) >= s.controlSigner.Threshold() {
 		cvNotifyAPDBV2(pending.ready)
 	}
 	s.mu.Unlock()
@@ -784,13 +803,16 @@ func (s *cvAPDBNetworkServiceV2) FinalizeDecision(
 
 recoverDecision:
 	s.mu.Lock()
+	decCert := append([]byte(nil), pending.certificate...)
 	shares := make(map[int][]byte, len(pending.shares))
 	for member, share := range pending.shares {
 		shares[member] = append([]byte(nil), share...)
 	}
 	s.mu.Unlock()
 	formationStarted := time.Now()
-	decCert, err := s.controlSigner.Recover(cvDecisionCertificateV2Domain, statement, shares)
+	if len(decCert) == 0 {
+		decCert, err = s.controlSigner.Recover(cvDecisionCertificateV2Domain, statement, shares)
+	}
 	if err == nil && !s.controlSigner.VerifyRecovered(cvDecisionCertificateV2Domain, statement, decCert) {
 		err = fmt.Errorf("invalid recovered CV V2 decision certificate")
 	}
@@ -809,7 +831,11 @@ recoverDecision:
 	if err != nil {
 		return nil, err
 	}
-	for _, receiver := range s.cfg.NewRoster {
+	recipients := sortedUnique(append(append([]int(nil), s.cfg.OldRoster...), s.cfg.NewRoster...))
+	for _, receiver := range recipients {
+		if receiver == s.cfg.LocalNode {
+			continue
+		}
 		_ = s.send(receiver, cvTagHandoffV2, handoffWire)
 	}
 	return handoff, nil
@@ -890,7 +916,7 @@ func (s *cvAPDBNetworkServiceV2) RecoverAndExchangeScalarShare(
 	); err != nil {
 		return nil, fr.Element{}, nil, bls12381.G1Affine{}, fmt.Errorf("persist CV V2 scalar before release: %w", err)
 	}
-	outputWire, err := cvScalarShareOutputV2CanonicalBytes(output)
+	outputWire, err := cvScalarShareOutputV2CanonicalBytesAfterValidation(output)
 	if err != nil {
 		return nil, fr.Element{}, nil, bls12381.G1Affine{}, err
 	}
@@ -942,7 +968,7 @@ recoverPublicKey:
 		outputs = append(outputs, share)
 	}
 	s.mu.Unlock()
-	publicKey, err := cvRecoverThresholdPublicKeyV2(
+	publicKey, err := cvRecoverThresholdPublicKeyAfterValidationV2(
 		outputs, aggregate, s.cfg.LeafContext, s.cfg.Params, s.cfg.Receivers,
 	)
 	if err != nil {
@@ -965,12 +991,28 @@ func (s *cvAPDBNetworkServiceV2) validatePool(pool *cvPoolV2) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, component := range pool.Components {
-		if err := cvValidateComponentRefV2(component, s.apdbSigner); err != nil {
-			return nil, fmt.Errorf("invalid CV V2 pool component: %w", err)
-		}
+	if err := s.validateKnownComponentRefsV2(pool.Components); err != nil {
+		return nil, fmt.Errorf("invalid CV V2 pool component: %w", err)
 	}
 	return wire, nil
+}
+
+func (s *cvAPDBNetworkServiceV2) validateKnownComponentRefsV2(refs []cvComponentRefV2) error {
+	for _, ref := range refs {
+		s.mu.Lock()
+		known, ok := s.componentRefsV2[ref.Header.DealerID]
+		s.mu.Unlock()
+		if ok && equalComponentRefsV2(known, ref) {
+			continue
+		}
+		if ok {
+			return fmt.Errorf("CV V2 component reference conflicts with verified cache")
+		}
+		if err := cvValidateComponentRefV2(ref, s.apdbSigner); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *cvAPDBNetworkServiceV2) poolSlotLocked(proposer int) *cvNetworkPoolSlotV2 {
@@ -1358,12 +1400,12 @@ func (s *cvAPDBNetworkServiceV2) handleLaneOfferV2(msg Message) {
 	if !ok || !secretOK || !identityOK {
 		return
 	}
-	offer, err := cvDecodeReceiverLaneOfferV2(msg.Body, s.cfg.LeafContext, msg.From, msg.To,
+	offer, err := cvDecodeReceiverLaneOfferBeforeVerificationV2(msg.Body, s.cfg.LeafContext, msg.From, msg.To,
 		receiverIndex, &s.cfg.Receivers.encryptionPublicKeys[receiverIndex-1])
 	if err != nil {
 		return
 	}
-	evidence, _, _, err := cvVerifyDecryptAndSignACKV2(
+	evidence, _, _, err := cvVerifyDecryptAndSignACKAfterPointDecodingV2(
 		s.cfg.LeafContext, msg.From, offer, &s.cfg.Receivers.encryptionPublicKeys[receiverIndex-1],
 		secret, s.cfg.Receivers.identityPublicKeys[receiverIndex-1], identitySecret,
 	)
@@ -1392,14 +1434,15 @@ func (s *cvAPDBNetworkServiceV2) handleLaneACKV2(msg Message) {
 		return
 	}
 	if !bytes.Equal(message.OfferDigest, cvLaneOfferDigestV2(func() []byte {
-		wire, _ := cvReceiverLaneOfferV2CanonicalBytes(s.cfg.LeafContext, s.cfg.LocalNode,
-			pending.offers[message.ReceiverIndex-1], &s.cfg.Receivers.encryptionPublicKeys[message.ReceiverIndex-1])
+		wire, _ := cvReceiverLaneOfferV2CanonicalBytesAfterValidation(
+			s.cfg.LeafContext, s.cfg.LocalNode, pending.offers[message.ReceiverIndex-1],
+		)
 		return wire
 	}())) {
 		return
 	}
-	if err := cvVerifyACKV2(s.cfg.LeafContext, s.cfg.LocalNode, pending.offers[message.ReceiverIndex-1],
-		&s.cfg.Receivers.encryptionPublicKeys[message.ReceiverIndex-1],
+	if err := cvVerifyACKAfterLocalOwnershipValidationV2(
+		s.cfg.LeafContext, s.cfg.LocalNode, pending.offers[message.ReceiverIndex-1],
 		s.cfg.Receivers.identityPublicKeys[message.ReceiverIndex-1], &message.Evidence); err != nil {
 		return
 	}
@@ -1411,9 +1454,11 @@ func (s *cvAPDBNetworkServiceV2) handleLaneACKV2(msg Message) {
 	if _, duplicate := pending.acks[message.ReceiverIndex]; !duplicate {
 		pending.acks[message.ReceiverIndex] = &message.Evidence
 	}
-	if len(pending.acks) == pending.quorum {
-		pending.frozen = true
+	if len(pending.acks) >= pending.quorum {
 		cvNotifyAPDBV2(pending.ready)
+	}
+	if len(pending.acks) == len(s.cfg.NewRoster) {
+		cvNotifyAPDBV2(pending.allReady)
 	}
 	s.mu.Unlock()
 }
@@ -1542,10 +1587,6 @@ func (s *cvAPDBNetworkServiceV2) handleValidationRequest(msg Message) {
 	}
 	validatorSample := append([]int(nil), s.validatorSample...)
 	s.mu.Unlock()
-	if err := cvVerifyValidationRequestPublicV2(request, s.cfg.ExpectedContext, s.cfg.Params, eligible,
-		s.apdbSigner, s.controlSigner, s.coinSigner); err != nil {
-		return
-	}
 	statement, err := cvValidationStatementV2(validatorSample, &request.Header)
 	if err != nil {
 		return
@@ -1553,13 +1594,34 @@ func (s *cvAPDBNetworkServiceV2) handleValidationRequest(msg Message) {
 	key := string(statement)
 	s.mu.Lock()
 	record := s.validationRecords[key]
-	if record == nil {
-		record = &cvValidationRecordV2{requestWire: append([]byte(nil), msg.Body...), resultReady: make(chan struct{}, 1)}
-		s.validationRecords[key] = record
-	} else if !bytes.Equal(record.requestWire, msg.Body) {
+	if record != nil && !bytes.Equal(record.requestWire, msg.Body) {
 		s.mu.Unlock()
 		return
 	}
+	alreadyVerified := record != nil
+	s.mu.Unlock()
+	if !alreadyVerified {
+		if err := s.validateKnownComponentRefsV2(request.Pool.Components); err != nil {
+			return
+		}
+		if err := cvVerifyValidationRequestPublicAfterComponentValidationV2(request, s.cfg.ExpectedContext, s.cfg.Params, eligible,
+			s.apdbSigner, s.controlSigner, s.coinSigner); err != nil {
+			return
+		}
+		s.mu.Lock()
+		record = s.validationRecords[key]
+		if record == nil {
+			record = &cvValidationRecordV2{
+				requestWire: append([]byte(nil), msg.Body...), resultReady: make(chan struct{}, 1),
+			}
+			s.validationRecords[key] = record
+		} else if !bytes.Equal(record.requestWire, msg.Body) {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
 	localShare := append([]byte(nil), s.validationLocalShares[key]...)
 	_, inFlight := s.validationInFlight[key]
 	isValidator := cvContainsID(validatorSample, s.cfg.LocalNode)
@@ -1595,22 +1657,9 @@ func (s *cvAPDBNetworkServiceV2) validateAndSignAggregate(
 		delete(s.validationInFlight, key)
 		s.mu.Unlock()
 	}()
-	leaves := make([]*cvLeafV2, len(request.SelectedIndices))
-	for i, poolIndex := range request.SelectedIndices {
-		component := request.Pool.Components[poolIndex]
-		payload, err := s.recoverComponentForPurpose(s.ctx, &component.Lock, func(recovered []byte) error {
-			if !bytes.Equal(cvComponentPayloadDigestV2(recovered), component.Header.PayloadDigest) {
-				return fmt.Errorf("CV V2 validation component payload mismatch")
-			}
-			return nil
-		}, cvRecoveryValidatorComponentV2)
-		if err != nil {
-			return
-		}
-		leaves[i], err = cvDecodeLeafV2(payload, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators)
-		if err != nil {
-			return
-		}
+	leaves, err := s.loadValidationLeavesV2(request)
+	if err != nil {
+		return
 	}
 	aggregatePayload, err := s.recoverComponentForPurpose(s.ctx, &request.ARC, func(recovered []byte) error {
 		digest, digestErr := cvAggregatePayloadDigestV2(recovered)
@@ -1622,7 +1671,7 @@ func (s *cvAPDBNetworkServiceV2) validateAndSignAggregate(
 	if err != nil {
 		return
 	}
-	aggregate, err := cvAVerV2(aggregatePayload, leaves, s.cfg.LeafContext, s.cfg.Params, s.cfg.Receivers, s.cfg.Validators)
+	aggregate, err := cvAVerVerifiedV2(aggregatePayload, leaves, s.cfg.LeafContext, s.cfg.Params)
 	if err != nil || cvVerifyAggregateHeaderPayloadV2(&request.Header, aggregatePayload, aggregate) != nil {
 		return
 	}
@@ -1646,6 +1695,46 @@ func (s *cvAPDBNetworkServiceV2) validateAndSignAggregate(
 	if err == nil {
 		_ = s.send(request.Header.ProposerID, cvTagValidationSignatureV2, shareWire)
 	}
+}
+
+func (s *cvAPDBNetworkServiceV2) loadValidationLeavesV2(
+	request *cvValidationRequestV2,
+) ([]*cvLeafV2, error) {
+	if request == nil || len(request.SelectedIndices) != s.cfg.Params.componentCount {
+		return nil, fmt.Errorf("invalid CV V2 validation leaf selection")
+	}
+	leaves := make([]*cvLeafV2, len(request.SelectedIndices))
+	errs := make([]error, len(request.SelectedIndices))
+	workers := cvLeafVerifyWorkers(len(request.SelectedIndices))
+	jobs := make(chan int, len(request.SelectedIndices))
+	for index := range request.SelectedIndices {
+		jobs <- index
+	}
+	close(jobs)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer group.Done()
+			for index := range jobs {
+				poolIndex := request.SelectedIndices[index]
+				if poolIndex < 0 || poolIndex >= len(request.Pool.Components) {
+					errs[index] = fmt.Errorf("invalid CV V2 validation pool index")
+					continue
+				}
+				leaves[index], errs[index] = s.verifiedComponentLeafV2(
+					s.ctx, request.Pool.Components[poolIndex], cvRecoveryValidatorComponentV2,
+				)
+			}
+		}()
+	}
+	group.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return leaves, nil
 }
 
 func cvReserveValidationStatementV2(reservations map[int][]byte, proposer int, statement []byte) bool {
@@ -1756,7 +1845,9 @@ func (s *cvAPDBNetworkServiceV2) handleDecisionShare(msg Message) {
 }
 
 func (s *cvAPDBNetworkServiceV2) handleHandoff(msg Message) {
-	if !cvMemberInRosterV2(s.cfg.LocalNode, s.cfg.NewRoster) {
+	isOld := cvMemberInRosterV2(s.cfg.LocalNode, s.cfg.OldRoster)
+	isNew := cvMemberInRosterV2(s.cfg.LocalNode, s.cfg.NewRoster)
+	if !isOld && !isNew {
 		return
 	}
 	handoff, err := cvDecodeHandoffV2(msg.Body)
@@ -1764,7 +1855,22 @@ func (s *cvAPDBNetworkServiceV2) handleHandoff(msg Message) {
 		return
 	}
 	s.mu.Lock()
-	if len(s.acceptedHandoff) == 0 {
+	if isOld {
+		statement, statementErr := cvDecisionStatementV2(
+			s.cfg.ExpectedContext, &handoff.Header, &handoff.ARC,
+		)
+		if statementErr == nil {
+			key := string(statement)
+			if len(s.decisionCertificates[key]) == 0 {
+				s.decisionCertificates[key] = append([]byte(nil), handoff.DecCert...)
+			}
+			if pending := s.pendingDecisions[key]; pending != nil && len(pending.certificate) == 0 {
+				pending.certificate = append([]byte(nil), handoff.DecCert...)
+				cvNotifyAPDBV2(pending.ready)
+			}
+		}
+	}
+	if isNew && len(s.acceptedHandoff) == 0 {
 		s.acceptedHandoff = append([]byte(nil), msg.Body...)
 		cvNotifyAPDBV2(s.handoffReady)
 	}

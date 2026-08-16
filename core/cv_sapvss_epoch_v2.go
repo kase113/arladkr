@@ -103,17 +103,20 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 
 	c.runtime.setCommPhase("component_disperse")
 	leafStarted := time.Now()
-	leaf, err := oldService.BuildLeafV2(ctx)
+	leafMaterial, err := oldService.BuildLeafMaterialV2(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("build CV V2 quorum/fallback leaf: %w", err)
 	}
+	leaf := leafMaterial.leaf
 	leafLatency := time.Since(leafStarted)
-	ackCount, fallbackCount, proofBytes, leafWireBytes, err := cvLeafExperimentMetricsV2(leaf, runtime.context, runtime.receivers, runtime.validators)
+	ackCount, fallbackCount, proofBytes, leafWireBytes, err := cvLeafExperimentMetricsFromWireV2(
+		leaf, leafMaterial.wire, runtime.context,
+	)
 	if err != nil {
 		return nil, err
 	}
 	componentStarted := time.Now()
-	if _, err := oldService.PublishComponentV2(ctx, leaf); err != nil {
+	if _, err := oldService.PublishBuiltComponentV2(ctx, leafMaterial); err != nil {
 		return nil, fmt.Errorf("publish CV V2 component: %w", err)
 	}
 	componentLatency := time.Since(componentStarted)
@@ -175,7 +178,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("recover CV V2 aggregate share: %w", err)
 	}
-	aggregateWire, err := cvAggregateV2CanonicalBytes(aggregate, runtime.context, runtime.params)
+	aggregateWire, err := cvAggregateV2CanonicalBytesAfterValidation(aggregate, runtime.context, runtime.params)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +188,20 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	}
 	scalarBytes := scalar.Bytes()
 	publicKeyBytes := publicKey.Bytes()
+	serviceGraceStarted := time.Now()
+	serviceGrace := cvRecoverServiceGraceV2(c.RouteSendTimeout)
+	graceTimer := time.NewTimer(serviceGrace)
+	select {
+	case <-ctx.Done():
+	case <-graceTimer.C:
+	}
+	if !graceTimer.Stop() {
+		select {
+		case <-graceTimer.C:
+		default:
+		}
+	}
+	serviceGraceLatency := time.Since(serviceGraceStarted)
 	agreementDigest := hashBytes([]byte("ARL-CV-sAPVSS/v2-scalar-group/agreement-result"), agreementWire)
 	selectedDealers := make([]int, len(selected))
 	for i, index := range selected {
@@ -247,6 +264,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVValidatorAggregateRecoveryRecvBytes:   experimentMetrics.validatorAggregateRecoveryRecvBytes,
 		CVValidatorAggregateRecoveryLatency:     experimentMetrics.validatorAggregateRecoveryLatency,
 		CVNewAggregateRecoveryLatency:           receiverExperimentMetrics.newAggregateRecoveryLatency,
+		RecoverServiceGraceLatency:              serviceGraceLatency,
 		CVARCFormationLatency:                   experimentMetrics.arcFormationLatency,
 		CVValidationCertificateFormationLatency: experimentMetrics.validationCertificateLatency,
 		CVDecisionCertificateFormationLatency:   experimentMetrics.decisionCertificateLatency,
@@ -255,6 +273,24 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		TotalSentBytes:                          totalSent, TotalRecvBytes: totalRecv, PhaseSentBytes: phaseSent, PhaseRecvBytes: phaseRecv,
 		PerNode: []NodeOutput{{NodeID: localOld, DecidedSet: selectedDealers, Latency: time.Since(started)}},
 	}, nil
+}
+
+func cvRecoverServiceGraceV2(routeSendTimeout time.Duration) time.Duration {
+	grace := 2 * routeSendTimeout
+	// A route timeout of at least one second is used by the shared
+	// multi-node test harness and larger-committee profiles. Keep a wider
+	// holder-service window there so CPU scheduling skew cannot close the
+	// only shard responders before a slower honest receiver starts recovery.
+	if routeSendTimeout >= time.Second && grace < 10*time.Second {
+		return 10 * time.Second
+	}
+	if grace < 500*time.Millisecond {
+		return 500 * time.Millisecond
+	}
+	if grace > 10*time.Second {
+		return 10 * time.Second
+	}
+	return grace
 }
 
 func cvAddCostBreakdownV2(sent, recv map[string]uint64, services ...cvServiceExperimentMetricsV2) {
@@ -347,16 +383,28 @@ func cvLeafExperimentMetricsV2(
 	leaf *cvLeafV2, context *cvLeafContextV2,
 	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
 ) (ackCount, fallbackCount, proofBytes, leafWireBytes int, err error) {
-	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	wire, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
 	if err != nil {
 		return 0, 0, 0, 0, err
+	}
+	return cvLeafExperimentMetricsFromWireV2(leaf, wire, context)
+}
+
+func cvLeafExperimentMetricsFromWireV2(
+	leaf *cvLeafV2, wire []byte, context *cvLeafContextV2,
+) (ackCount, fallbackCount, proofBytes, leafWireBytes int, err error) {
+	if leaf == nil || context == nil || len(wire) == 0 ||
+		!bytes.Equal(leaf.Digest, hashBytes([]byte(cvLeafDigestDomainV2), wire)) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid verified CV V2 leaf metrics input")
 	}
 	for i := range leaf.Receivers {
 		if leaf.Receivers[i].ACK == nil {
 			continue
 		}
 		ackCount++
-		proofWire, proofErr := cvOwnershipProofV2CanonicalBytes(&leaf.Receivers[i].ACK.Ownership, context)
+		proofWire, proofErr := cvOwnershipProofV2CanonicalBytesAfterValidation(
+			&leaf.Receivers[i].ACK.Ownership, context,
+		)
 		if proofErr != nil {
 			return 0, 0, 0, 0, proofErr
 		}
@@ -364,7 +412,9 @@ func cvLeafExperimentMetricsV2(
 	}
 	if leaf.Fallback != nil {
 		fallbackCount = len(leaf.Fallback.ReceiverIndices)
-		linkWire, linkErr := cvFallbackLinkProofV2CanonicalBytes(&leaf.Fallback.Link, context, fallbackCount)
+		linkWire, linkErr := cvFallbackLinkProofV2CanonicalBytesAfterValidation(
+			&leaf.Fallback.Link, context, fallbackCount,
+		)
 		if linkErr != nil {
 			return 0, 0, 0, 0, linkErr
 		}

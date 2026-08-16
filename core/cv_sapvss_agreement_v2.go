@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"fmt"
+	"sync"
 )
 
 const (
@@ -201,13 +202,22 @@ func cvVerifyAgreementObjectV2(object *cvAgreementObjectV2, public cvAgreementPu
 }
 
 func cvAggregatePredicateV2(public cvAgreementPublicContextV2) func(int, []byte) bool {
+	var verified sync.Map
 	return func(_ int, candidate []byte) bool {
+		key := string(candidate)
+		if _, ok := verified.Load(key); ok {
+			return true
+		}
 		_, validators, err := cvAgreementEligibilitySamplesV2(public)
 		if err != nil {
 			return false
 		}
 		object, err := cvDecodeAgreementObjectV2(candidate, public.Params, validators)
-		return err == nil && cvVerifyAgreementObjectV2(object, public) == nil
+		if err != nil || cvVerifyAgreementObjectV2(object, public) != nil {
+			return false
+		}
+		verified.Store(key, struct{}{})
+		return true
 	}
 }
 

@@ -10,6 +10,7 @@ else
 fi
 base_port="${4:-20000}"
 epoch_timeout="${RLADKR_CV_EPOCH_TIMEOUT:-90s}"
+runner_timeout="${RLADKR_CV_RUNNER_TIMEOUT:-$epoch_timeout}"
 wait_spbc_timeout="${RLADKR_CV_WAIT_SPBC_TIMEOUT:-}"
 route_send_timeout="${RLADKR_CV_ROUTE_SEND_TIMEOUT:-}"
 apvss_mode="${RLADKR_APVSS_MODE:-ack-fallback}"
@@ -49,6 +50,10 @@ results_file="$root/cluster-results.log"
 
 if (( n <= 0 || f < 0 || n < 3 * f + 1 || epochs <= 0 || runs <= 0 )); then
   printf 'invalid committee parameters: n=%s f=%s\n' "$n" "$f" >&2
+  exit 2
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  printf 'cluster runner requires the timeout command for child-process cleanup\n' >&2
   exit 2
 fi
 if (( epochs != 1 || runs != 1 )); then
@@ -118,6 +123,23 @@ printf 'ARLADKR_CV_PORTS component=%s-%s mvba=%s-%s ephemeral=%s-%s\n' \
 
 start_at="$(( $(date +%s) + 3 ))"
 pids=()
+terminate_tree() {
+  local pid="$1"
+  local child
+  while read -r child; do
+    [[ -n "$child" ]] || continue
+    terminate_tree "$child"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+}
+cleanup_children() {
+  for pid in "${pids[@]:-}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      terminate_tree "$pid"
+    fi
+  done
+}
+trap cleanup_children INT TERM EXIT
 for ((i=0; i<n; i++)); do
   mkdir -p "$root/node-$i/store"
   node_secret_dir="$root/node-$i/private"
@@ -136,7 +158,7 @@ for ((i=0; i<n; i++)); do
     export RLADKR_CRYPTO_WORKERS="$crypto_workers"
     export RLADKR_LANE_WORKERS="$lane_workers"
     export RLADKR_LEAF_VERIFY_WORKERS="$leaf_verify_workers"
-    "$binary" -n "$n" -f "$f" -runs "$runs" -epochs "$epochs" \
+    if timeout --foreground --kill-after=5s "$runner_timeout" "$binary" -n "$n" -f "$f" -runs "$runs" -epochs "$epochs" \
       -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \
 			"${bench_timeout_args[@]}" \
@@ -148,15 +170,48 @@ for ((i=0; i<n; i++)); do
       -apvss-wait-all-acks="$apvss_wait_all_acks" \
       -comm-metrics=true -strict-network=true \
       -cv-public-key-dir "$public_dir" -cv-local-secret-dir "$node_secret_dir" \
-      -cv-local-receiver-ids "$((n+i))"
+      -cv-local-receiver-ids "$((n+i))"; then
+      child_status=0
+    else
+      child_status=$?
+    fi
+    result="$(rg '^E2E_BENCH_RESULT ' "$log" | tail -n 1 || true)"
+    if (( child_status != 0 )); then
+      printf 'NODE_%s_RUNNER_ERROR status=%s\n' "$i" "$child_status" >&2
+      exit "$child_status"
+    fi
+    if [[ "$result" != *"success_runs=1"* ]]; then
+      printf 'NODE_%s_RUNNER_ERROR missing successful benchmark result\n' "$i" >&2
+      exit 1
+    fi
   ) >"$log" 2>&1 &
   pids+=("$!")
 done
 
 status=0
-for pid in "${pids[@]}"; do
-  wait "$pid" || status=1
+remaining=("${pids[@]}")
+while ((${#remaining[@]} > 0)); do
+  finished_pid=""
+  if wait -n -p finished_pid "${remaining[@]}"; then
+    child_status=0
+  else
+    child_status=$?
+  fi
+  next=()
+  for pid in "${remaining[@]}"; do
+    [[ "$pid" == "$finished_pid" ]] || next+=("$pid")
+  done
+  remaining=("${next[@]}")
+  if (( child_status != 0 )); then
+    status=1
+    cleanup_children
+    for pid in "${remaining[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+    remaining=()
+  fi
 done
+pids=()
 
 printf 'ARLADKR_CV_RUN_DIR=%s\n' "$root"
 printf 'ARLADKR_CV_LOG_DIR=%s\n' "$log_dir"

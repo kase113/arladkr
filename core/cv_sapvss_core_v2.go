@@ -168,22 +168,18 @@ func cvProveCoreV2(
 	scalarNonces := make([]fr.Element, count)
 	blindingNonces := make([]fr.Element, count)
 	for i := 0; i < count; i++ {
-		commitments[i] = cvPointSum(
-			pointPtr(cvPointTimes(&genG1, &scalarCoefficients[i])),
-			pointPtr(cvPointTimes(&h, &blindingCoefficients[i])),
-		)
+		commitments[i] = cvPointBaseAndTimes(&scalarCoefficients[i], &h, &blindingCoefficients[i])
 		if _, err := scalarNonces[i].SetRandom(); err != nil {
 			return nil, nil, err
 		}
 		if _, err := blindingNonces[i].SetRandom(); err != nil {
 			return nil, nil, err
 		}
-		proof.NonceCommitments[i] = cvPointSum(
-			pointPtr(cvPointTimes(&genG1, &scalarNonces[i])),
-			pointPtr(cvPointTimes(&h, &blindingNonces[i])),
-		)
+		proof.NonceCommitments[i] = cvPointBaseAndTimes(&scalarNonces[i], &h, &blindingNonces[i])
 	}
-	challenge, err := cvCoreProofChallengeScalarV2(context, dealerID, commitments, proof.NonceCommitments)
+	challenge, err := cvCoreProofChallengeScalarAfterValidationV2(
+		context, dealerID, commitments, proof.NonceCommitments,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -197,6 +193,19 @@ func cvProveCoreV2(
 func cvVerifyCoreV2(
 	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, proof *cvCoreProofV2,
 ) error {
+	return cvVerifyCoreModeV2(context, dealerID, commitments, proof, true)
+}
+
+func cvVerifyCoreAfterPointDecodingV2(
+	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, proof *cvCoreProofV2,
+) error {
+	return cvVerifyCoreModeV2(context, dealerID, commitments, proof, false)
+}
+
+func cvVerifyCoreModeV2(
+	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, proof *cvCoreProofV2,
+	validatePoints bool,
+) error {
 	count := 0
 	if context != nil {
 		count = context.SharingDegree + 1
@@ -206,12 +215,16 @@ func cvVerifyCoreV2(
 		len(proof.ScalarResponses) != count || len(proof.BlindingResponses) != count {
 		return fmt.Errorf("invalid CV V2 core proof")
 	}
-	for i := 0; i < count; i++ {
-		if !cvValidG1(&commitments[i], true) || !cvValidG1(&proof.NonceCommitments[i], true) {
-			return fmt.Errorf("invalid CV V2 core proof point")
+	if validatePoints {
+		for i := 0; i < count; i++ {
+			if !cvValidG1(&commitments[i], true) || !cvValidG1(&proof.NonceCommitments[i], true) {
+				return fmt.Errorf("invalid CV V2 core proof point")
+			}
 		}
 	}
-	challenge, err := cvCoreProofChallengeScalarV2(context, dealerID, commitments, proof.NonceCommitments)
+	challenge, err := cvCoreProofChallengeScalarAfterValidationV2(
+		context, dealerID, commitments, proof.NonceCommitments,
+	)
 	if err != nil {
 		return err
 	}
@@ -220,10 +233,7 @@ func cvVerifyCoreV2(
 		return err
 	}
 	for i := 0; i < count; i++ {
-		left := cvPointSum(
-			pointPtr(cvPointTimes(&genG1, &proof.ScalarResponses[i])),
-			pointPtr(cvPointTimes(&h, &proof.BlindingResponses[i])),
-		)
+		left := cvPointBaseAndTimes(&proof.ScalarResponses[i], &h, &proof.BlindingResponses[i])
 		right := cvPointSum(&proof.NonceCommitments[i], pointPtr(cvPointTimes(&commitments[i], &challenge)))
 		if !left.Equal(&right) {
 			return fmt.Errorf("invalid CV V2 core proof equation %d", i)
@@ -239,26 +249,53 @@ func cvCoreProofChallengeScalarV2(
 	if err != nil || dealerID < 0 || len(commitments) == 0 || len(commitments) != len(nonceCommitments) {
 		return fr.Element{}, fmt.Errorf("invalid CV V2 core proof challenge")
 	}
+	return cvCoreProofChallengeScalarModeV2(contextWire, dealerID, commitments, nonceCommitments, true)
+}
+
+func cvCoreProofChallengeScalarAfterValidationV2(
+	context *cvLeafContextV2, dealerID int, commitments, nonceCommitments []bls12381.G1Affine,
+) (fr.Element, error) {
+	contextWire, err := cvLeafContextV2CanonicalBytes(context)
+	if err != nil || dealerID < 0 || len(commitments) == 0 || len(commitments) != len(nonceCommitments) {
+		return fr.Element{}, fmt.Errorf("invalid verified CV V2 core proof challenge")
+	}
+	return cvCoreProofChallengeScalarModeV2(contextWire, dealerID, commitments, nonceCommitments, false)
+}
+
+func cvCoreProofChallengeScalarModeV2(
+	contextWire []byte, dealerID int, commitments, nonceCommitments []bls12381.G1Affine,
+	validatePoints bool,
+) (fr.Element, error) {
 	var statement bytes.Buffer
 	_ = cvWriteBytes(&statement, contextWire)
 	cvWriteUint64(&statement, uint64(dealerID))
-	if err := cvWritePointVector(&statement, commitments); err != nil {
+	if err := cvWritePointVectorMode(&statement, commitments, validatePoints); err != nil {
 		return fr.Element{}, err
 	}
-	if err := cvWritePointVector(&statement, nonceCommitments); err != nil {
+	if err := cvWritePointVectorMode(&statement, nonceCommitments, validatePoints); err != nil {
 		return fr.Element{}, err
 	}
 	return cvHashToFr(cvCoreProofChallengeV2, statement.Bytes())
 }
 
 func cvCoreProofV2CanonicalBytes(proof *cvCoreProofV2, coefficientCount int) ([]byte, error) {
+	return cvCoreProofV2CanonicalBytesMode(proof, coefficientCount, true)
+}
+
+func cvCoreProofV2CanonicalBytesAfterValidation(proof *cvCoreProofV2, coefficientCount int) ([]byte, error) {
+	return cvCoreProofV2CanonicalBytesMode(proof, coefficientCount, false)
+}
+
+func cvCoreProofV2CanonicalBytesMode(
+	proof *cvCoreProofV2, coefficientCount int, validatePoints bool,
+) ([]byte, error) {
 	if proof == nil || coefficientCount <= 0 || len(proof.NonceCommitments) != coefficientCount ||
 		len(proof.ScalarResponses) != coefficientCount || len(proof.BlindingResponses) != coefficientCount {
 		return nil, fmt.Errorf("invalid CV V2 core proof wire")
 	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvCoreProofWireDomainV2))
-	if err := cvWritePointVector(&wire, proof.NonceCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, proof.NonceCommitments, validatePoints); err != nil {
 		return nil, err
 	}
 	if err := cvWriteScalarVector(&wire, proof.ScalarResponses); err != nil {

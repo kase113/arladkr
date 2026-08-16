@@ -310,6 +310,7 @@ func TestCVSAPVSSRouterEnforcesV2HandoffRecoveryDirections(t *testing.T) {
 	transport.inject(10, Message{From: 1, To: 10, Tag: cvTagHandoffV2, Body: envelope})
 	transport.inject(10, Message{From: 2, To: 10, Tag: cvTagAggregateRecoverStoreV2, Body: envelope})
 	transport.inject(10, Message{From: 11, To: 10, Tag: cvTagAggregateShareV2, Body: envelope})
+	transport.inject(1, Message{From: 2, To: 1, Tag: cvTagHandoffV2, Body: envelope})
 	transport.inject(1, Message{From: 10, To: 1, Tag: cvTagAggregateRecoverGetV2, Body: envelope})
 	transport.inject(10, Message{From: 11, To: 10, Tag: cvTagHandoffV2, Body: envelope})
 	transport.inject(1, Message{From: 2, To: 1, Tag: cvTagAggregateRecoverGetV2, Body: envelope})
@@ -325,13 +326,15 @@ func TestCVSAPVSSRouterEnforcesV2HandoffRecoveryDirections(t *testing.T) {
 			t.Fatalf("new node did not receive %s", expected)
 		}
 	}
-	select {
-	case msg := <-oldInbox:
-		if msg.Tag != cvTagAggregateRecoverGetV2 {
-			t.Fatalf("old node received unexpected V2 tag %s", msg.Tag)
+	for _, expected := range []string{cvTagHandoffV2, cvTagAggregateRecoverGetV2} {
+		select {
+		case msg := <-oldInbox:
+			if msg.Tag != expected {
+				t.Fatalf("old node received %s, want %s", msg.Tag, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("old node did not receive V2 tag %s", expected)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("old node did not receive V2 aggregate recovery request")
 	}
 	select {
 	case extra := <-oldInbox:

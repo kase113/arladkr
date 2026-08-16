@@ -104,6 +104,14 @@ func TestCVAllACKLeafV2BuildVerifyAndCodec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWireBytes, err := cvLeafWireSizeV2(context, chunks, 0)
+	if err != nil || len(wire) != wantWireBytes {
+		t.Fatalf("all-ACK V2 leaf sizing mismatch: got=%d want=%d err=%v", len(wire), wantWireBytes, err)
+	}
 	decoded, err := cvDecodeLeafV2(wire, context, receivers, validators)
 	if err != nil {
 		t.Fatal(err)
@@ -159,6 +167,42 @@ func TestCVAllACKLeafV2RejectsCryptographicMutations(t *testing.T) {
 	}
 }
 
+func TestCVLeafV2DecodedPathRejectsResignedOwnershipMutation(t *testing.T) {
+	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
+	mutated := *leaf
+	mutated.Receivers = append([]cvLeafReceiverV2(nil), leaf.Receivers...)
+	mutated.Receivers[0] = leaf.Receivers[0]
+	mutated.Receivers[0].Offer = *cvCloneReceiverLaneOfferV2(&leaf.Receivers[0].Offer)
+	mutated.Receivers[0].Offer.Ownership.ScalarCipherCommitments[0].Add(
+		&mutated.Receivers[0].Offer.Ownership.ScalarCipherCommitments[0], &genG1,
+	)
+	mutated.Receivers[0].ACK = &cvACKEvidenceV2{
+		Ownership: cvCloneOwnershipProofV2(&mutated.Receivers[0].Offer.Ownership),
+		Signature: append([]byte(nil), leaf.Receivers[0].ACK.Signature...),
+	}
+	unsigned, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(&mutated, receivers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, ok := validators.localSecrets[mutated.DealerID]
+	if !ok {
+		t.Fatal("missing dealer signing secret")
+	}
+	mutated.DealerSignature, err = cvSignValidatorV2(
+		secret, cvDealerSignatureDomainV2, hashBytes([]byte(cvDealerSignatureDomainV2), unsigned),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := cvLeafV2CanonicalBytesAfterValidation(&mutated, receivers, validators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cvDecodeLeafV2(wire, context, receivers, validators); err == nil {
+		t.Fatal("decoded V2 path accepted a resigned ownership-proof mutation")
+	}
+}
+
 func TestCVLeafV2MixedACKFallbackBuildVerifyAndCodec(t *testing.T) {
 	_, context, receivers, validators := cvAllACKLeafV2Fixture(t)
 	fallbackIndex := 1
@@ -169,6 +213,14 @@ func TestCVLeafV2MixedACKFallbackBuildVerifyAndCodec(t *testing.T) {
 	wire, err := cvLeafV2CanonicalBytes(mixed, receivers, validators)
 	if err != nil {
 		t.Fatal(err)
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWireBytes, err := cvLeafWireSizeV2(context, chunks, 1)
+	if err != nil || len(wire) != wantWireBytes {
+		t.Fatalf("mixed V2 leaf sizing mismatch: got=%d want=%d err=%v", len(wire), wantWireBytes, err)
 	}
 	decoded, err := cvDecodeLeafV2(wire, context, receivers, validators)
 	if err != nil {

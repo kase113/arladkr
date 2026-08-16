@@ -23,7 +23,7 @@ func cvBuildFallbackEvidenceV2(
 	if err != nil {
 		return nil, err
 	}
-	rangeProof, err := cvProveFallbackRangeV2(
+	rangeProof, err := cvProveFallbackRangeAfterLinkV2(
 		context, dealerID, offers, receiverPublicKeys, witnesses, link, linkWitness,
 	)
 	if err != nil {
@@ -40,6 +40,20 @@ func cvVerifyFallbackEvidenceV2(
 	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
 	receiverPublicKeys []bls12381.G1Affine, evidence *cvFallbackEvidenceV2,
 ) error {
+	return cvVerifyFallbackEvidenceModeV2(context, dealerID, offers, receiverPublicKeys, evidence, true)
+}
+
+func cvVerifyFallbackEvidenceAfterPointDecodingV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, evidence *cvFallbackEvidenceV2,
+) error {
+	return cvVerifyFallbackEvidenceModeV2(context, dealerID, offers, receiverPublicKeys, evidence, false)
+}
+
+func cvVerifyFallbackEvidenceModeV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, evidence *cvFallbackEvidenceV2, validatePoints bool,
+) error {
 	if evidence == nil || len(evidence.ReceiverIndices) != len(offers) {
 		return fmt.Errorf("invalid CV V2 fallback evidence")
 	}
@@ -48,13 +62,35 @@ func cvVerifyFallbackEvidenceV2(
 			return fmt.Errorf("CV V2 fallback evidence receiver mismatch")
 		}
 	}
-	if err := cvVerifyFallbackLinkV2(context, dealerID, offers, receiverPublicKeys, &evidence.Link); err != nil {
-		return err
+	var linkErr error
+	if validatePoints {
+		linkErr = cvVerifyFallbackLinkV2(context, dealerID, offers, receiverPublicKeys, &evidence.Link)
+	} else {
+		linkErr = cvVerifyFallbackLinkAfterPointDecodingV2(
+			context, dealerID, offers, receiverPublicKeys, &evidence.Link,
+		)
 	}
-	return cvVerifyFallbackRangeV2(context, dealerID, offers, receiverPublicKeys, &evidence.Link, &evidence.Range)
+	if linkErr != nil {
+		return linkErr
+	}
+	return cvVerifyFallbackRangeAfterLinkV2(
+		context, dealerID, offers, receiverPublicKeys, &evidence.Link, &evidence.Range,
+	)
 }
 
 func cvFallbackEvidenceV2CanonicalBytes(evidence *cvFallbackEvidenceV2, context *cvLeafContextV2) ([]byte, error) {
+	return cvFallbackEvidenceV2CanonicalBytesMode(evidence, context, true)
+}
+
+func cvFallbackEvidenceV2CanonicalBytesAfterValidation(
+	evidence *cvFallbackEvidenceV2, context *cvLeafContextV2,
+) ([]byte, error) {
+	return cvFallbackEvidenceV2CanonicalBytesMode(evidence, context, false)
+}
+
+func cvFallbackEvidenceV2CanonicalBytesMode(
+	evidence *cvFallbackEvidenceV2, context *cvLeafContextV2, validatePoints bool,
+) ([]byte, error) {
 	if evidence == nil || len(evidence.ReceiverIndices) == 0 ||
 		len(evidence.ReceiverIndices) > cvNewFaultBoundFromContextV2(context) {
 		return nil, fmt.Errorf("invalid CV V2 fallback evidence wire")
@@ -66,7 +102,15 @@ func cvFallbackEvidenceV2CanonicalBytes(evidence *cvFallbackEvidenceV2, context 
 		}
 		previous = index
 	}
-	linkWire, err := cvFallbackLinkProofV2CanonicalBytes(&evidence.Link, context, len(evidence.ReceiverIndices))
+	var linkWire []byte
+	var err error
+	if validatePoints {
+		linkWire, err = cvFallbackLinkProofV2CanonicalBytes(&evidence.Link, context, len(evidence.ReceiverIndices))
+	} else {
+		linkWire, err = cvFallbackLinkProofV2CanonicalBytesAfterValidation(
+			&evidence.Link, context, len(evidence.ReceiverIndices),
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +155,7 @@ func cvDecodeFallbackEvidenceV2(wire []byte, context *cvLeafContextV2) (*cvFallb
 		return nil, err
 	}
 	evidence := &cvFallbackEvidenceV2{ReceiverIndices: indices, Link: *link, Range: *rangeProof}
-	canonical, err := cvFallbackEvidenceV2CanonicalBytes(evidence, context)
+	canonical, err := cvFallbackEvidenceV2CanonicalBytesAfterValidation(evidence, context)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 fallback evidence")
 	}

@@ -59,6 +59,21 @@ func cvAggV2(
 	if context == nil || params.componentCount <= 0 || len(leaves) != params.componentCount {
 		return nil, fmt.Errorf("invalid CV V2 aggregate input")
 	}
+	for leafIndex, leaf := range leaves {
+		if err := cvVerifyAPVSSV2(leaf, context, receivers, validators); err != nil {
+			return nil, fmt.Errorf("verify CV V2 aggregate component %d: %w", leafIndex, err)
+		}
+	}
+	return cvAggVerifiedV2(leaves, context, params)
+}
+
+// cvAggVerifiedV2 is restricted to leaves already accepted by cvVerifyAPVSSV2.
+func cvAggVerifiedV2(
+	leaves []*cvLeafV2, context *cvLeafContextV2, params cvV2Params,
+) (*cvAggregateV2, error) {
+	if context == nil || params.componentCount <= 0 || len(leaves) != params.componentCount {
+		return nil, fmt.Errorf("invalid CV V2 aggregate input")
+	}
 	contextDigest, err := cvLeafContextDigestV2(context)
 	if err != nil {
 		return nil, err
@@ -81,8 +96,9 @@ func cvAggV2(
 	}
 	dealers := make(map[int]struct{}, len(leaves))
 	for leafIndex, leaf := range leaves {
-		if err := cvVerifyAPVSSV2(leaf, context, receivers, validators); err != nil {
-			return nil, fmt.Errorf("verify CV V2 aggregate component %d: %w", leafIndex, err)
+		if leaf == nil || len(leaf.Digest) != 32 || len(leaf.CoefficientCommitments) != context.SharingDegree+1 ||
+			len(leaf.Receivers) != len(context.NewRoster) {
+			return nil, fmt.Errorf("invalid verified CV V2 aggregate component %d", leafIndex)
 		}
 		if _, duplicate := dealers[leaf.DealerID]; duplicate {
 			return nil, fmt.Errorf("duplicate CV V2 aggregate dealer")
@@ -112,12 +128,12 @@ func cvAggV2(
 			target.Blinding.c.Add(&target.Blinding.c, &source.Blinding.c)
 		}
 	}
-	unsigned, err := cvAggregateV2UnsignedCanonicalBytes(aggregate, context, params)
+	unsigned, err := cvAggregateV2UnsignedCanonicalBytesAfterValidation(aggregate, context, params)
 	if err != nil {
 		return nil, err
 	}
 	aggregate.Digest = hashBytes([]byte(cvAggregateDigestV2Domain), unsigned)
-	if _, err := cvAggregateV2CanonicalBytes(aggregate, context, params); err != nil {
+	if _, err := cvAggregateV2CanonicalBytesAfterValidation(aggregate, context, params); err != nil {
 		return nil, err
 	}
 	return aggregate, nil
@@ -125,6 +141,25 @@ func cvAggV2(
 
 func cvAggregateV2UnsignedCanonicalBytes(
 	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+) ([]byte, error) {
+	return cvAggregateV2UnsignedCanonicalBytesMode(aggregate, context, params, true, true)
+}
+
+func cvAggregateV2UnsignedCanonicalBytesAfterPointDecoding(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+) ([]byte, error) {
+	return cvAggregateV2UnsignedCanonicalBytesMode(aggregate, context, params, false, true)
+}
+
+func cvAggregateV2UnsignedCanonicalBytesAfterValidation(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+) ([]byte, error) {
+	return cvAggregateV2UnsignedCanonicalBytesMode(aggregate, context, params, false, false)
+}
+
+func cvAggregateV2UnsignedCanonicalBytesMode(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+	validatePoints, validateEvaluations bool,
 ) ([]byte, error) {
 	contextDigest, err := cvLeafContextDigestV2(context)
 	if err != nil || aggregate == nil || params.componentCount <= 0 ||
@@ -156,7 +191,7 @@ func cvAggregateV2UnsignedCanonicalBytes(
 		cvWriteUint64(&wire, uint64(component.DealerID))
 		_ = cvWriteBytes(&wire, component.LeafDigest)
 	}
-	if err := cvWritePointVector(&wire, aggregate.CoefficientCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, aggregate.CoefficientCommitments, validatePoints); err != nil {
 		return nil, err
 	}
 	if err := cvWriteUint32(&wire, len(aggregate.Receivers)); err != nil {
@@ -165,17 +200,19 @@ func cvAggregateV2UnsignedCanonicalBytes(
 	for i := range aggregate.Receivers {
 		receiver := &aggregate.Receivers[i]
 		if receiver.ReceiverID != context.NewRoster[i] || receiver.ReceiverIndex != i+1 ||
-			!cvValidG1(&receiver.Evaluation, true) {
+			(validatePoints && !cvValidG1(&receiver.Evaluation, true)) {
 			return nil, fmt.Errorf("invalid CV V2 aggregate receiver")
 		}
-		expectedEvaluation := cvEvaluateCommitments(aggregate.CoefficientCommitments, i+1)
-		if !receiver.Evaluation.Equal(&expectedEvaluation) {
-			return nil, fmt.Errorf("CV V2 aggregate evaluation mismatch")
+		if validateEvaluations {
+			expectedEvaluation := cvEvaluateCommitments(aggregate.CoefficientCommitments, i+1)
+			if !receiver.Evaluation.Equal(&expectedEvaluation) {
+				return nil, fmt.Errorf("CV V2 aggregate evaluation mismatch")
+			}
 		}
 		cvWriteUint64(&wire, uint64(receiver.ReceiverID))
 		cvWriteUint64(&wire, uint64(receiver.ReceiverIndex))
 		cvWritePoint(&wire, &receiver.Evaluation)
-		if len(receiver.ScalarChunks) != chunks || !cvValidCiphertext(&receiver.Blinding) {
+		if len(receiver.ScalarChunks) != chunks || (validatePoints && !cvValidCiphertext(&receiver.Blinding)) {
 			return nil, fmt.Errorf("invalid CV V2 aggregate ciphertext shape")
 		}
 		if err := cvWriteUint32(&wire, chunks); err != nil {
@@ -183,7 +220,7 @@ func cvAggregateV2UnsignedCanonicalBytes(
 		}
 		for chunk := range receiver.ScalarChunks {
 			ciphertext := &receiver.ScalarChunks[chunk]
-			if !cvValidCiphertext(ciphertext) {
+			if validatePoints && !cvValidCiphertext(ciphertext) {
 				return nil, fmt.Errorf("invalid CV V2 aggregate scalar ciphertext")
 			}
 			cvWriteCiphertext(&wire, ciphertext)
@@ -196,10 +233,31 @@ func cvAggregateV2UnsignedCanonicalBytes(
 func cvAggregateV2CanonicalBytes(
 	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
 ) ([]byte, error) {
+	return cvAggregateV2CanonicalBytesMode(aggregate, context, params, true, true)
+}
+
+func cvAggregateV2CanonicalBytesAfterPointDecoding(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+) ([]byte, error) {
+	return cvAggregateV2CanonicalBytesMode(aggregate, context, params, false, true)
+}
+
+func cvAggregateV2CanonicalBytesAfterValidation(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+) ([]byte, error) {
+	return cvAggregateV2CanonicalBytesMode(aggregate, context, params, false, false)
+}
+
+func cvAggregateV2CanonicalBytesMode(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+	validatePoints, validateEvaluations bool,
+) ([]byte, error) {
 	if aggregate == nil || len(aggregate.Digest) != 32 {
 		return nil, fmt.Errorf("invalid CV V2 aggregate wire")
 	}
-	unsigned, err := cvAggregateV2UnsignedCanonicalBytes(aggregate, context, params)
+	unsigned, err := cvAggregateV2UnsignedCanonicalBytesMode(
+		aggregate, context, params, validatePoints, validateEvaluations,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +364,7 @@ func cvDecodeAggregateV2(wire []byte, context *cvLeafContextV2, params cvV2Param
 	if unsigned.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV V2 aggregate bytes")
 	}
-	canonical, err := cvAggregateV2CanonicalBytes(aggregate, context, params)
+	canonical, err := cvAggregateV2CanonicalBytesAfterPointDecoding(aggregate, context, params)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 aggregate")
 	}
@@ -334,7 +392,25 @@ func cvAVerV2(
 	if err != nil {
 		return nil, err
 	}
-	want, err := cvAggregateV2CanonicalBytes(recomputed, context, params)
+	want, err := cvAggregateV2CanonicalBytesAfterValidation(recomputed, context, params)
+	if err != nil || !bytes.Equal(payload, want) {
+		return nil, fmt.Errorf("CV V2 aggregate payload does not match selected components")
+	}
+	return decoded, nil
+}
+
+func cvAVerVerifiedV2(
+	payload []byte, leaves []*cvLeafV2, context *cvLeafContextV2, params cvV2Params,
+) (*cvAggregateV2, error) {
+	decoded, err := cvDecodeAggregateV2(payload, context, params)
+	if err != nil {
+		return nil, err
+	}
+	recomputed, err := cvAggVerifiedV2(leaves, context, params)
+	if err != nil {
+		return nil, err
+	}
+	want, err := cvAggregateV2CanonicalBytesAfterValidation(recomputed, context, params)
 	if err != nil || !bytes.Equal(payload, want) {
 		return nil, fmt.Errorf("CV V2 aggregate payload does not match selected components")
 	}

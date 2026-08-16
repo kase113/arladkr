@@ -101,7 +101,9 @@ func cvDecryptAggregateShareMeasuredV2(
 		return fr.Element{}, nil, timings, err
 	}
 	output.Proof = *proof
-	if err := cvVerifyAggregateShareV2(output, aggregate, context, params, receiverPublicKey); err != nil {
+	if err := cvVerifyAggregateShareAfterValidationV2(
+		output, aggregate, context, params, receiverPublicKey,
+	); err != nil {
 		return fr.Element{}, nil, timings, err
 	}
 	return scalar, output, timings, nil
@@ -144,11 +146,41 @@ func cvVerifyAggregateShareV2(
 	output *cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
 	params cvV2Params, receiverPublicKey *bls12381.G1Affine,
 ) error {
-	if output == nil || output.ReceiverID < 0 || output.ReceiverIndex <= 0 || len(output.AggregateDigest) != 32 ||
+	return cvVerifyAggregateShareModeV2(output, aggregate, context, params, receiverPublicKey, true, true)
+}
+
+func cvVerifyAggregateShareAfterPointDecodingV2(
+	output *cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
+	params cvV2Params, receiverPublicKey *bls12381.G1Affine,
+) error {
+	return cvVerifyAggregateShareModeV2(output, aggregate, context, params, receiverPublicKey, false, false)
+}
+
+func cvVerifyAggregateShareAfterValidationV2(
+	output *cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
+	params cvV2Params, receiverPublicKey *bls12381.G1Affine,
+) error {
+	return cvVerifyAggregateShareModeV2(output, aggregate, context, params, receiverPublicKey, false, false)
+}
+
+func cvVerifyAggregateShareModeV2(
+	output *cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
+	params cvV2Params, receiverPublicKey *bls12381.G1Affine, validatePoints, validateAggregate bool,
+) error {
+	var aggregateErr error
+	if validateAggregate {
+		aggregateErr = cvValidateAggregateShareInputsV2(
+			aggregate, context, params, outputReceiverIDV2(output), outputReceiverIndexV2(output), receiverPublicKey,
+		)
+	} else {
+		aggregateErr = cvValidateAggregateShareInputsAfterValidationV2(
+			aggregate, context, params, outputReceiverIDV2(output), outputReceiverIndexV2(output), receiverPublicKey,
+		)
+	}
+	if output == nil || aggregate == nil || output.ReceiverID < 0 || output.ReceiverIndex <= 0 || len(output.AggregateDigest) != 32 ||
 		!bytes.Equal(output.AggregateDigest, aggregate.Digest) ||
-		cvValidateAggregateShareInputsV2(aggregate, context, params, output.ReceiverID, output.ReceiverIndex, receiverPublicKey) != nil ||
-		!cvValidG1(&output.Y, true) || !cvValidG1(&output.YBlind, true) ||
-		!cvValidAggregateShareProofV2(&output.Proof) {
+		aggregateErr != nil || (validatePoints && (!cvValidG1(&output.Y, true) ||
+		!cvValidG1(&output.YBlind, true) || !cvValidAggregateShareProofV2(&output.Proof))) {
 		return fmt.Errorf("invalid CV V2 aggregate-share output")
 	}
 	receiver := &aggregate.Receivers[output.ReceiverIndex-1]
@@ -194,6 +226,20 @@ func cvVerifyAggregateShareV2(
 		return fmt.Errorf("invalid CV V2 aggregate-share blinding decryption equation")
 	}
 	return nil
+}
+
+func outputReceiverIDV2(output *cvScalarShareOutputV2) int {
+	if output == nil {
+		return -1
+	}
+	return output.ReceiverID
+}
+
+func outputReceiverIndexV2(output *cvScalarShareOutputV2) int {
+	if output == nil {
+		return -1
+	}
+	return output.ReceiverIndex
 }
 
 func cvAggregateShareChallengeV2(
@@ -281,12 +327,36 @@ func cvValidateAggregateShareInputsV2(
 	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
 	receiverID, receiverIndex int, receiverPublicKey *bls12381.G1Affine,
 ) error {
+	return cvValidateAggregateShareInputsModeV2(
+		aggregate, context, params, receiverID, receiverIndex, receiverPublicKey, true,
+	)
+}
+
+func cvValidateAggregateShareInputsAfterValidationV2(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+	receiverID, receiverIndex int, receiverPublicKey *bls12381.G1Affine,
+) error {
+	return cvValidateAggregateShareInputsModeV2(
+		aggregate, context, params, receiverID, receiverIndex, receiverPublicKey, false,
+	)
+}
+
+func cvValidateAggregateShareInputsModeV2(
+	aggregate *cvAggregateV2, context *cvLeafContextV2, params cvV2Params,
+	receiverID, receiverIndex int, receiverPublicKey *bls12381.G1Affine, validateAggregate bool,
+) error {
 	if context == nil || params.componentCount <= 0 || context.Profile.maxComponents != params.componentCount ||
 		context.SharingDegree != params.newShareDegree || params.newShareThreshold != context.SharingDegree+1 ||
 		cvValidateReceiverBindingV2(context, receiverID, receiverIndex, receiverPublicKey) != nil {
 		return fmt.Errorf("invalid CV V2 aggregate-share parameters")
 	}
-	if _, err := cvAggregateV2CanonicalBytes(aggregate, context, params); err != nil {
+	var err error
+	if validateAggregate {
+		_, err = cvAggregateV2CanonicalBytes(aggregate, context, params)
+	} else {
+		_, err = cvAggregateV2CanonicalBytesAfterValidation(aggregate, context, params)
+	}
+	if err != nil {
 		return err
 	}
 	receiver := &aggregate.Receivers[receiverIndex-1]
@@ -312,8 +382,17 @@ func cvValidAggregateShareProofV2(proof *cvAggregateShareProofV2) bool {
 }
 
 func cvScalarShareOutputV2CanonicalBytes(output *cvScalarShareOutputV2) ([]byte, error) {
+	return cvScalarShareOutputV2CanonicalBytesMode(output, true)
+}
+
+func cvScalarShareOutputV2CanonicalBytesAfterValidation(output *cvScalarShareOutputV2) ([]byte, error) {
+	return cvScalarShareOutputV2CanonicalBytesMode(output, false)
+}
+
+func cvScalarShareOutputV2CanonicalBytesMode(output *cvScalarShareOutputV2, validatePoints bool) ([]byte, error) {
 	if output == nil || len(output.AggregateDigest) != 32 || output.ReceiverID < 0 || output.ReceiverIndex <= 0 ||
-		!cvValidG1(&output.Y, true) || !cvValidG1(&output.YBlind, true) || !cvValidAggregateShareProofV2(&output.Proof) {
+		(validatePoints && (!cvValidG1(&output.Y, true) || !cvValidG1(&output.YBlind, true) ||
+			!cvValidAggregateShareProofV2(&output.Proof))) {
 		return nil, fmt.Errorf("invalid CV V2 aggregate-share wire")
 	}
 	var wire bytes.Buffer
@@ -380,7 +459,7 @@ func cvDecodeScalarShareOutputV2(
 			KeyResponse: keyResponse, ScalarResponse: scalarResponse,
 		},
 	}
-	canonical, err := cvScalarShareOutputV2CanonicalBytes(output)
+	canonical, err := cvScalarShareOutputV2CanonicalBytesAfterValidation(output)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 aggregate-share output")
 	}
@@ -388,7 +467,9 @@ func cvDecodeScalarShareOutputV2(
 	if index < 0 || index >= len(receivers.encryptionPublicKeys) {
 		return nil, fmt.Errorf("CV V2 aggregate-share receiver is outside registry")
 	}
-	if err := cvVerifyAggregateShareV2(output, aggregate, context, params, &receivers.encryptionPublicKeys[index]); err != nil {
+	if err := cvVerifyAggregateShareAfterPointDecodingV2(
+		output, aggregate, context, params, &receivers.encryptionPublicKeys[index],
+	); err != nil {
 		return nil, err
 	}
 	return output, nil
@@ -398,8 +479,31 @@ func cvRecoverThresholdPublicKeyV2(
 	outputs []*cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
 	params cvV2Params, receivers *cvReceiverKeyMaterialV2,
 ) (bls12381.G1Affine, error) {
+	return cvRecoverThresholdPublicKeyModeV2(outputs, aggregate, context, params, receivers, true)
+}
+
+func cvRecoverThresholdPublicKeyAfterValidationV2(
+	outputs []*cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
+	params cvV2Params, receivers *cvReceiverKeyMaterialV2,
+) (bls12381.G1Affine, error) {
+	return cvRecoverThresholdPublicKeyModeV2(outputs, aggregate, context, params, receivers, false)
+}
+
+func cvRecoverThresholdPublicKeyModeV2(
+	outputs []*cvScalarShareOutputV2, aggregate *cvAggregateV2, context *cvLeafContextV2,
+	params cvV2Params, receivers *cvReceiverKeyMaterialV2, validateOutputs bool,
+) (bls12381.G1Affine, error) {
 	if cvValidateReceiverMaterialForLeafV2(context, receivers) != nil || len(outputs) < params.newShareThreshold {
 		return bls12381.G1Affine{}, fmt.Errorf("insufficient CV V2 aggregate-share outputs")
+	}
+	var aggregateErr error
+	if validateOutputs {
+		_, aggregateErr = cvAggregateV2CanonicalBytes(aggregate, context, params)
+	} else {
+		_, aggregateErr = cvAggregateV2CanonicalBytesAfterValidation(aggregate, context, params)
+	}
+	if aggregateErr != nil {
+		return bls12381.G1Affine{}, aggregateErr
 	}
 	ordered := append([]*cvScalarShareOutputV2(nil), outputs...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ReceiverIndex < ordered[j].ReceiverIndex })
@@ -411,10 +515,12 @@ func cvRecoverThresholdPublicKeyV2(
 			(i > 0 && output.ReceiverIndex == ordered[i-1].ReceiverIndex) {
 			return bls12381.G1Affine{}, fmt.Errorf("invalid CV V2 aggregate-share output set")
 		}
-		if err := cvVerifyAggregateShareV2(
-			output, aggregate, context, params, &receivers.encryptionPublicKeys[output.ReceiverIndex-1],
-		); err != nil {
-			return bls12381.G1Affine{}, err
+		if validateOutputs {
+			if err := cvVerifyAggregateShareModeV2(
+				output, aggregate, context, params, &receivers.encryptionPublicKeys[output.ReceiverIndex-1], true, false,
+			); err != nil {
+				return bls12381.G1Affine{}, err
+			}
 		}
 		indices[i], shares[i], blindShares[i] = output.ReceiverIndex, output.Y, output.YBlind
 	}

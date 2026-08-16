@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -39,6 +40,16 @@ func (s *cvAPDBNetworkServiceV2) agreementPublicContextV2() (cvAgreementPublicCo
 }
 
 func (s *cvAPDBNetworkServiceV2) acceptCertifiedCandidateV2(wire []byte) (*cvAgreementObjectV2, bool, error) {
+	digest := string(hashBytes([]byte(cvCertifiedCandidateDigestV2Domain), wire))
+	s.mu.Lock()
+	cached := s.certifiedCandidatesV2[digest]
+	s.mu.Unlock()
+	if len(cached) != 0 {
+		if bytes.Equal(cached, wire) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("conflicting CV V2 certified candidate digest")
+	}
 	public, err := s.agreementPublicContextV2()
 	if err != nil {
 		return nil, false, err
@@ -55,11 +66,26 @@ func (s *cvAPDBNetworkServiceV2) acceptCertifiedCandidateV2(wire []byte) (*cvAgr
 	if err != nil {
 		return nil, false, err
 	}
-	digest := string(hashBytes([]byte(cvCertifiedCandidateDigestV2Domain), canonical))
+	return s.rememberVerifiedCertifiedCandidateV2(object, digest, canonical)
+}
+
+// rememberVerifiedCertifiedCandidateV2 is only for an object that was
+// canonicalized and fully verified immediately before this call. Network
+// input must use acceptCertifiedCandidateV2 so the provenance cannot be
+// forged by an untrusted wire payload.
+func (s *cvAPDBNetworkServiceV2) rememberVerifiedCertifiedCandidateV2(
+	object *cvAgreementObjectV2, digest string, canonical []byte,
+) (*cvAgreementObjectV2, bool, error) {
+	if object == nil || digest == "" || len(canonical) == 0 {
+		return nil, false, fmt.Errorf("invalid verified CV V2 certified candidate")
+	}
 	s.mu.Lock()
-	if _, duplicate := s.certifiedCandidatesV2[digest]; duplicate {
+	if existing := s.certifiedCandidatesV2[digest]; len(existing) != 0 {
 		s.mu.Unlock()
-		return object, false, nil
+		if bytes.Equal(existing, canonical) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("conflicting CV V2 certified candidate digest")
 	}
 	s.certifiedCandidatesV2[digest] = append([]byte(nil), canonical...)
 	s.mu.Unlock()
@@ -69,6 +95,16 @@ func (s *cvAPDBNetworkServiceV2) acceptCertifiedCandidateV2(wire []byte) (*cvAgr
 		return nil, false, s.ctx.Err()
 	}
 	return object, true, nil
+}
+
+func (s *cvAPDBNetworkServiceV2) acceptVerifiedCertifiedCandidateV2(
+	object *cvAgreementObjectV2, canonical []byte,
+) (*cvAgreementObjectV2, bool, error) {
+	if object == nil || len(canonical) == 0 {
+		return nil, false, fmt.Errorf("invalid verified CV V2 certified candidate")
+	}
+	digest := string(hashBytes([]byte(cvCertifiedCandidateDigestV2Domain), canonical))
+	return s.rememberVerifiedCertifiedCandidateV2(object, digest, canonical)
 }
 
 func (s *cvAPDBNetworkServiceV2) PublishCertifiedCandidateV2(
@@ -89,7 +125,7 @@ func (s *cvAPDBNetworkServiceV2) PublishCertifiedCandidateV2(
 	if err != nil || cvVerifyAgreementObjectV2(candidate, public) != nil {
 		return fmt.Errorf("invalid local CV V2 certified candidate")
 	}
-	if _, _, err := s.acceptCertifiedCandidateV2(wire); err != nil {
+	if _, _, err := s.acceptVerifiedCertifiedCandidateV2(candidate, wire); err != nil {
 		return err
 	}
 	sendCandidate := func() {

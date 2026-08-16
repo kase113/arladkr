@@ -19,12 +19,13 @@ func cvRunAgreementV2(
 	if err != nil {
 		return nil, nil, 0, err
 	}
+	predicate := cvAggregatePredicateV2(public)
 	wire, err := cvAgreementObjectV2CanonicalBytes(candidate, public.Params, validatorSample)
-	if err != nil || cvVerifyAgreementObjectV2(candidate, public) != nil {
+	if err != nil || !predicate(candidate.Header.ProposerID, wire) {
 		return nil, nil, 0, fmt.Errorf("invalid local CV V2 agreement candidate")
 	}
 	decidedWire, peerWait, err := runArladkrMVBADirectTCPInstance(
-		ctx, cfg, cvAgreementMVBAInstanceV2, wire, cvAggregatePredicateV2(public),
+		ctx, cfg, cvAgreementMVBAInstanceV2, wire, predicate,
 		public.ControlSigner, public.CoinSigner,
 	)
 	if err != nil {
@@ -33,8 +34,11 @@ func cvRunAgreementV2(
 	if len(decidedWire) == 0 {
 		return nil, nil, peerWait, fmt.Errorf("CV V2 agreement returned no valid object")
 	}
+	if !predicate(-1, decidedWire) {
+		return nil, nil, peerWait, fmt.Errorf("CV V2 agreement returned an invalid object")
+	}
 	decided, err := cvDecodeAgreementObjectV2(decidedWire, public.Params, validatorSample)
-	if err != nil || cvVerifyAgreementObjectV2(decided, public) != nil {
+	if err != nil {
 		return nil, nil, peerWait, fmt.Errorf("CV V2 agreement returned an invalid object")
 	}
 	canonical, err := cvAgreementObjectV2CanonicalBytes(decided, public.Params, validatorSample)

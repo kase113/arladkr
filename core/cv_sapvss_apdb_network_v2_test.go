@@ -667,7 +667,7 @@ func TestCVAPDBNetworkServiceV2FinalizesDecisionAndRelaysHandoff(t *testing.T) {
 		handoffResult <- waitErr
 	}()
 	finalized := make(chan error, len(cfg.OldCommittee))
-	for _, member := range cfg.OldCommittee {
+	finalize := func(member int) {
 		go func(node int) {
 			handoff, finalizeErr := services[node].FinalizeDecision(ctx, object)
 			if finalizeErr == nil {
@@ -676,7 +676,21 @@ func TestCVAPDBNetworkServiceV2FinalizesDecisionAndRelaysHandoff(t *testing.T) {
 			finalized <- finalizeErr
 		}(member)
 	}
-	for range cfg.OldCommittee {
+	threshold := public.ControlSigner.Threshold()
+	for _, member := range cfg.OldCommittee[:threshold] {
+		finalize(member)
+	}
+	for range threshold {
+		if err := <-finalized; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The remaining old node enters finalization only after a recovered
+	// certificate has already been relayed and cached.
+	for _, member := range cfg.OldCommittee[threshold:] {
+		finalize(member)
+	}
+	for range len(cfg.OldCommittee) - threshold {
 		if err := <-finalized; err != nil {
 			t.Fatal(err)
 		}
@@ -687,7 +701,8 @@ func TestCVAPDBNetworkServiceV2FinalizesDecisionAndRelaysHandoff(t *testing.T) {
 	if got := transport.sentCount(cvTagDecisionShareV2); got < len(cfg.OldCommittee)*(public.ControlSigner.Threshold()-1) {
 		t.Fatalf("decision phase sent only %d shares", got)
 	}
-	if got := transport.sentCount(cvTagHandoffV2); got < len(cfg.NewCommittee) {
+	minimumHandoffs := len(cfg.OldCommittee) + len(cfg.NewCommittee) - 1
+	if got := transport.sentCount(cvTagHandoffV2); got < minimumHandoffs {
 		t.Fatalf("decision phase sent only %d handoffs", got)
 	}
 }

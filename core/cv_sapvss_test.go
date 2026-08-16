@@ -36,6 +36,29 @@ func cvTestCoins(count int, start uint64) []fr.Element {
 	return coins
 }
 
+func TestCVJointScalarHelpersMatchIndependentMultiplication(t *testing.T) {
+	firstBase := cvTestScalar(7)
+	secondBase := cvTestScalar(11)
+	first := cvPointTimes(&genG1, &firstBase)
+	second := cvPointTimes(&genG1, &secondBase)
+	firstScalar := cvTestScalar(13)
+	secondScalar := cvTestScalar(17)
+	want := cvPointSum(
+		pointPtr(cvPointTimes(&first, &firstScalar)),
+		pointPtr(cvPointTimes(&second, &secondScalar)),
+	)
+	if got := cvPointJointTimes(&first, &firstScalar, &second, &secondScalar); !got.Equal(&want) {
+		t.Fatal("joint scalar multiplication changed the two-base result")
+	}
+	want = cvPointSum(
+		pointPtr(cvPointTimes(&genG1, &firstScalar)),
+		pointPtr(cvPointTimes(&second, &secondScalar)),
+	)
+	if got := cvPointBaseAndTimes(&firstScalar, &second, &secondScalar); !got.Equal(&want) {
+		t.Fatal("base joint scalar multiplication changed the result")
+	}
+}
+
 func TestCVEvaluateCommitmentsUsesCachedPowersAndMatchesNaiveSum(t *testing.T) {
 	commitments := make([]bls12381.G1Affine, 43)
 	for i := range commitments {

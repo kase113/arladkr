@@ -105,11 +105,13 @@ func runCVProposerSlotV2(
 		if selectedErr != nil {
 			return selectedErr
 		}
-		aggregate, aggregateErr := cvAggV2(leaves, runtime.context, runtime.params, runtime.receivers, runtime.validators)
+		aggregate, aggregateErr := cvAggVerifiedV2(leaves, runtime.context, runtime.params)
 		if aggregateErr != nil {
 			return aggregateErr
 		}
-		aggregatePayload, aggregateErr := cvAggregateV2CanonicalBytes(aggregate, runtime.context, runtime.params)
+		aggregatePayload, aggregateErr := cvAggregateV2CanonicalBytesAfterValidation(
+			aggregate, runtime.context, runtime.params,
+		)
 		if aggregateErr != nil {
 			return aggregateErr
 		}

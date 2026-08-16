@@ -55,8 +55,61 @@ func cvBuildLeafV2(
 	offers []*cvReceiverLaneOfferV2, acks []*cvACKEvidenceV2, partition *cvEvidencePartitionV2,
 	fallback *cvFallbackEvidenceV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
 ) (*cvLeafV2, error) {
+	return cvBuildLeafV2Mode(
+		context, dealerID, commitments, coreProof, offers, acks, partition, fallback, receivers, validators, true,
+	)
+}
+
+func cvBuildLeafAfterValidationV2(
+	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, coreProof *cvCoreProofV2,
+	offers []*cvReceiverLaneOfferV2, acks []*cvACKEvidenceV2, partition *cvEvidencePartitionV2,
+	fallback *cvFallbackEvidenceV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) (*cvLeafV2, error) {
+	return cvBuildLeafV2Mode(
+		context, dealerID, commitments, coreProof, offers, acks, partition, fallback, receivers, validators, false,
+	)
+}
+
+func cvBuildLeafV2Mode(
+	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, coreProof *cvCoreProofV2,
+	offers []*cvReceiverLaneOfferV2, acks []*cvACKEvidenceV2, partition *cvEvidencePartitionV2,
+	fallback *cvFallbackEvidenceV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+	validateEvidence bool,
+) (*cvLeafV2, error) {
+	leaf, _, err := cvBuildLeafMaterialV2Mode(
+		context, dealerID, commitments, coreProof, offers, acks, partition, fallback,
+		receivers, validators, validateEvidence,
+	)
+	return leaf, err
+}
+
+func cvBuildLeafMaterialAfterValidationV2(
+	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, coreProof *cvCoreProofV2,
+	offers []*cvReceiverLaneOfferV2, acks []*cvACKEvidenceV2, partition *cvEvidencePartitionV2,
+	fallback *cvFallbackEvidenceV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) (*cvLeafV2, []byte, error) {
+	return cvBuildLeafMaterialV2Mode(
+		context, dealerID, commitments, coreProof, offers, acks, partition, fallback, receivers, validators, false,
+	)
+}
+
+func cvBuildLeafMaterialV2Mode(
+	context *cvLeafContextV2, dealerID int, commitments []bls12381.G1Affine, coreProof *cvCoreProofV2,
+	offers []*cvReceiverLaneOfferV2, acks []*cvACKEvidenceV2, partition *cvEvidencePartitionV2,
+	fallback *cvFallbackEvidenceV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+	validateEvidence bool,
+) (*cvLeafV2, []byte, error) {
 	if context == nil || coreProof == nil || partition == nil || len(offers) != len(context.NewRoster) || len(acks) != len(offers) {
-		return nil, fmt.Errorf("invalid CV V2 leaf input")
+		return nil, nil, fmt.Errorf("invalid CV V2 leaf input")
+	}
+	if err := cvValidateEvidencePartitionV2(context, partition); err != nil {
+		return nil, nil, err
+	}
+	if err := cvValidateReceiverMaterialForLeafV2(context, receivers); err != nil {
+		return nil, nil, err
+	}
+	if err := cvValidateValidatorMaterialForLeafV2(context, validators); err != nil {
+		return nil, nil, err
 	}
 	leaf := &cvLeafV2{
 		Context: *cvCloneLeafContextV2(context), DealerID: dealerID,
@@ -69,7 +122,7 @@ func cvBuildLeafV2(
 	}
 	for i := range offers {
 		if offers[i] == nil {
-			return nil, fmt.Errorf("CV V2 leaf is missing receiver offer")
+			return nil, nil, fmt.Errorf("CV V2 leaf is missing receiver offer")
 		}
 		leaf.Receivers[i].Offer = *cvCloneReceiverLaneOfferV2(offers[i])
 		if acks[i] != nil {
@@ -79,40 +132,74 @@ func cvBuildLeafV2(
 		}
 	}
 	if fallback != nil {
-		fallbackWire, err := cvFallbackEvidenceV2CanonicalBytes(fallback, context)
-		if err != nil {
-			return nil, err
-		}
-		leaf.Fallback, err = cvDecodeFallbackEvidenceV2(fallbackWire, context)
-		if err != nil {
-			return nil, err
+		if validateEvidence {
+			fallbackWire, err := cvFallbackEvidenceV2CanonicalBytes(fallback, context)
+			if err != nil {
+				return nil, nil, err
+			}
+			leaf.Fallback, err = cvDecodeFallbackEvidenceV2(fallbackWire, context)
+			if err != nil {
+				return nil, nil, err
+			}
+		} else {
+			leaf.Fallback = cvCloneFallbackEvidenceV2(fallback)
+			if leaf.Fallback == nil {
+				return nil, nil, fmt.Errorf("invalid verified CV V2 fallback evidence")
+			}
 		}
 	}
-	if err := cvVerifyLeafStatementV2(leaf, context, receivers); err != nil {
-		return nil, err
-	}
-	if err := cvValidateValidatorMaterialForLeafV2(context, validators); err != nil {
-		return nil, err
+	if validateEvidence {
+		if err := cvVerifyLeafStatementV2(leaf, context, receivers); err != nil {
+			return nil, nil, err
+		}
 	}
 	secret, ok := validators.localSecrets[dealerID]
 	if !ok {
-		return nil, fmt.Errorf("missing local CV V2 dealer signing secret")
+		return nil, nil, fmt.Errorf("missing local CV V2 dealer signing secret")
 	}
-	unsigned, err := cvLeafV2UnsignedCanonicalBytes(leaf, receivers)
+	unsigned, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	statement := hashBytes([]byte(cvDealerSignatureDomainV2), unsigned)
 	leaf.DealerSignature, err = cvSignValidatorV2(secret, cvDealerSignatureDomainV2, statement)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	wire, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	leaf.Digest = hashBytes([]byte(cvLeafDigestDomainV2), wire)
-	return leaf, nil
+	return leaf, wire, nil
+}
+
+func cvCloneFallbackEvidenceV2(evidence *cvFallbackEvidenceV2) *cvFallbackEvidenceV2 {
+	if evidence == nil || evidence.Range.proof == nil {
+		return nil
+	}
+	out := &cvFallbackEvidenceV2{
+		ReceiverIndices: append([]int(nil), evidence.ReceiverIndices...),
+		Link: cvFallbackLinkProofV2{
+			DigitCommitments:          append([]bls12381.G1Affine(nil), evidence.Link.DigitCommitments...),
+			DigitOpeningCommitments:   append([]bls12381.G1Affine(nil), evidence.Link.DigitOpeningCommitments...),
+			ScalarCoinCommitments:     append([]bls12381.G1Affine(nil), evidence.Link.ScalarCoinCommitments...),
+			ScalarCipherCommitments:   append([]bls12381.G1Affine(nil), evidence.Link.ScalarCipherCommitments...),
+			BlindingCoinCommitments:   append([]bls12381.G1Affine(nil), evidence.Link.BlindingCoinCommitments...),
+			BlindingCipherCommitments: append([]bls12381.G1Affine(nil), evidence.Link.BlindingCipherCommitments...),
+			EvaluationCommitments:     append([]bls12381.G1Affine(nil), evidence.Link.EvaluationCommitments...),
+			DigitResponses:            append([]fr.Element(nil), evidence.Link.DigitResponses...),
+			DigitBlindResponses:       append([]fr.Element(nil), evidence.Link.DigitBlindResponses...),
+			ScalarCoinResponses:       append([]fr.Element(nil), evidence.Link.ScalarCoinResponses...),
+			BlindingCoinResponses:     append([]fr.Element(nil), evidence.Link.BlindingCoinResponses...),
+			BlindingShareResponses:    append([]fr.Element(nil), evidence.Link.BlindingShareResponses...),
+		},
+	}
+	compact := *evidence.Range.proof
+	compact.inner.left = append([]bls12381.G1Affine(nil), evidence.Range.proof.inner.left...)
+	compact.inner.right = append([]bls12381.G1Affine(nil), evidence.Range.proof.inner.right...)
+	out.Range = cvFallbackRangeProofV2{backend: evidence.Range.backend, proof: &compact}
+	return out
 }
 
 // cvVerifyAPVSSV2 is the unique verifier for both ACK and fallback evidence.
@@ -120,11 +207,32 @@ func cvVerifyAPVSSV2(
 	leaf *cvLeafV2, expectedContext *cvLeafContextV2,
 	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
 ) error {
+	return cvVerifyAPVSSModeV2(leaf, expectedContext, receivers, validators, true)
+}
+
+func cvVerifyAPVSSAfterPointDecodingV2(
+	leaf *cvLeafV2, expectedContext *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) error {
+	return cvVerifyAPVSSModeV2(leaf, expectedContext, receivers, validators, false)
+}
+
+func cvVerifyAPVSSModeV2(
+	leaf *cvLeafV2, expectedContext *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+	validatePoints bool,
+) error {
 	if leaf == nil {
 		return fmt.Errorf("nil CV V2 leaf")
 	}
-	if err := cvVerifyLeafStatementV2(leaf, expectedContext, receivers); err != nil {
-		return err
+	var statementErr error
+	if validatePoints {
+		statementErr = cvVerifyLeafStatementV2(leaf, expectedContext, receivers)
+	} else {
+		statementErr = cvVerifyLeafStatementAfterPointDecodingV2(leaf, expectedContext, receivers)
+	}
+	if statementErr != nil {
+		return statementErr
 	}
 	if err := cvValidateValidatorMaterialForLeafV2(expectedContext, validators); err != nil {
 		return err
@@ -133,7 +241,7 @@ func cvVerifyAPVSSV2(
 	if !ok {
 		return fmt.Errorf("CV V2 dealer is outside validator registry")
 	}
-	unsigned, err := cvLeafV2UnsignedCanonicalBytes(leaf, receivers)
+	unsigned, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
 	if err != nil {
 		return err
 	}
@@ -143,7 +251,7 @@ func cvVerifyAPVSSV2(
 	) {
 		return fmt.Errorf("invalid CV V2 dealer signature")
 	}
-	wire, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	wire, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
 	if err != nil {
 		return err
 	}
@@ -156,6 +264,19 @@ func cvVerifyAPVSSV2(
 
 func cvVerifyLeafStatementV2(
 	leaf *cvLeafV2, expectedContext *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2,
+) error {
+	return cvVerifyLeafStatementModeV2(leaf, expectedContext, receivers, true)
+}
+
+func cvVerifyLeafStatementAfterPointDecodingV2(
+	leaf *cvLeafV2, expectedContext *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2,
+) error {
+	return cvVerifyLeafStatementModeV2(leaf, expectedContext, receivers, false)
+}
+
+func cvVerifyLeafStatementModeV2(
+	leaf *cvLeafV2, expectedContext *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2,
+	validatePoints bool,
 ) error {
 	if leaf == nil || expectedContext == nil || leaf.DealerID < 0 ||
 		len(leaf.CoefficientCommitments) != expectedContext.SharingDegree+1 ||
@@ -174,8 +295,16 @@ func cvVerifyLeafStatementV2(
 	if !cvMemberInRosterV2(leaf.DealerID, expectedContext.OldRoster) {
 		return fmt.Errorf("CV V2 leaf dealer is outside old roster")
 	}
-	if err := cvVerifyCoreV2(expectedContext, leaf.DealerID, leaf.CoefficientCommitments, &leaf.CoreProof); err != nil {
-		return err
+	var coreErr error
+	if validatePoints {
+		coreErr = cvVerifyCoreV2(expectedContext, leaf.DealerID, leaf.CoefficientCommitments, &leaf.CoreProof)
+	} else {
+		coreErr = cvVerifyCoreAfterPointDecodingV2(
+			expectedContext, leaf.DealerID, leaf.CoefficientCommitments, &leaf.CoreProof,
+		)
+	}
+	if coreErr != nil {
+		return coreErr
 	}
 	if err := cvValidateEvidencePartitionV2(expectedContext, &leaf.Partition); err != nil {
 		return err
@@ -206,11 +335,20 @@ func cvVerifyLeafStatementV2(
 			if receiver.ACK == nil {
 				return fmt.Errorf("CV V2 ACK receiver is missing evidence")
 			}
-			if err := cvVerifyACKV2(
-				expectedContext, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
-				receivers.identityPublicKeys[i], receiver.ACK,
-			); err != nil {
-				return fmt.Errorf("invalid CV V2 receiver %d ACK: %w", i+1, err)
+			var ackErr error
+			if validatePoints {
+				ackErr = cvVerifyACKV2(
+					expectedContext, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
+					receivers.identityPublicKeys[i], receiver.ACK,
+				)
+			} else {
+				ackErr = cvVerifyACKAfterPointDecodingV2(
+					expectedContext, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
+					receivers.identityPublicKeys[i], receiver.ACK,
+				)
+			}
+			if ackErr != nil {
+				return fmt.Errorf("invalid CV V2 receiver %d ACK: %w", i+1, ackErr)
 			}
 		}
 	}
@@ -218,16 +356,38 @@ func cvVerifyLeafStatementV2(
 		if leaf.Fallback != nil {
 			return fmt.Errorf("all-ACK CV V2 leaf carries fallback evidence")
 		}
-	} else if err := cvVerifyFallbackEvidenceV2(
-		expectedContext, leaf.DealerID, fallbackOffers, fallbackKeys, leaf.Fallback,
-	); err != nil {
-		return fmt.Errorf("invalid CV V2 fallback evidence: %w", err)
+	} else {
+		var fallbackErr error
+		if validatePoints {
+			fallbackErr = cvVerifyFallbackEvidenceV2(
+				expectedContext, leaf.DealerID, fallbackOffers, fallbackKeys, leaf.Fallback,
+			)
+		} else {
+			fallbackErr = cvVerifyFallbackEvidenceAfterPointDecodingV2(
+				expectedContext, leaf.DealerID, fallbackOffers, fallbackKeys, leaf.Fallback,
+			)
+		}
+		if fallbackErr != nil {
+			return fmt.Errorf("invalid CV V2 fallback evidence: %w", fallbackErr)
+		}
 	}
 	return nil
 }
 
 func cvLeafV2UnsignedCanonicalBytes(
 	leaf *cvLeafV2, receivers *cvReceiverKeyMaterialV2,
+) ([]byte, error) {
+	return cvLeafV2UnsignedCanonicalBytesMode(leaf, receivers, true)
+}
+
+func cvLeafV2UnsignedCanonicalBytesAfterValidation(
+	leaf *cvLeafV2, receivers *cvReceiverKeyMaterialV2,
+) ([]byte, error) {
+	return cvLeafV2UnsignedCanonicalBytesMode(leaf, receivers, false)
+}
+
+func cvLeafV2UnsignedCanonicalBytesMode(
+	leaf *cvLeafV2, receivers *cvReceiverKeyMaterialV2, validateEvidence bool,
 ) ([]byte, error) {
 	if leaf == nil || cvValidateReceiverMaterialForLeafV2(&leaf.Context, receivers) != nil ||
 		cvValidateEvidencePartitionV2(&leaf.Context, &leaf.Partition) != nil ||
@@ -238,7 +398,12 @@ func cvLeafV2UnsignedCanonicalBytes(
 	if err != nil {
 		return nil, err
 	}
-	coreWire, err := cvCoreProofV2CanonicalBytes(&leaf.CoreProof, len(leaf.CoefficientCommitments))
+	var coreWire []byte
+	if validateEvidence {
+		coreWire, err = cvCoreProofV2CanonicalBytes(&leaf.CoreProof, len(leaf.CoefficientCommitments))
+	} else {
+		coreWire, err = cvCoreProofV2CanonicalBytesAfterValidation(&leaf.CoreProof, len(leaf.CoefficientCommitments))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +415,7 @@ func cvLeafV2UnsignedCanonicalBytes(
 	_ = cvWriteBytes(&wire, []byte(cvLeafUnsignedWireDomainV2))
 	_ = cvWriteBytes(&wire, contextWire)
 	cvWriteUint64(&wire, uint64(leaf.DealerID))
-	if err := cvWritePointVector(&wire, leaf.CoefficientCommitments); err != nil {
+	if err := cvWritePointVectorMode(&wire, leaf.CoefficientCommitments, validateEvidence); err != nil {
 		return nil, err
 	}
 	_ = cvWriteBytes(&wire, coreWire)
@@ -268,9 +433,17 @@ func cvLeafV2UnsignedCanonicalBytes(
 			if receiver.ACK != nil || cvWriteUint32(&wire, 1) != nil {
 				return nil, fmt.Errorf("invalid CV V2 fallback receiver wire")
 			}
-			offerWire, err := cvFallbackLaneOfferV2CanonicalBytes(
-				&leaf.Context, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
-			)
+			var offerWire []byte
+			var err error
+			if validateEvidence {
+				offerWire, err = cvFallbackLaneOfferV2CanonicalBytes(
+					&leaf.Context, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
+				)
+			} else {
+				offerWire, err = cvFallbackLaneOfferV2CanonicalBytesAfterValidation(
+					&leaf.Context, leaf.DealerID, &receiver.Offer,
+				)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -279,13 +452,25 @@ func cvLeafV2UnsignedCanonicalBytes(
 			if receiver.ACK == nil || cvWriteUint32(&wire, 0) != nil {
 				return nil, fmt.Errorf("invalid CV V2 ACK receiver wire")
 			}
-			offerWire, err := cvReceiverLaneOfferV2CanonicalBytes(
-				&leaf.Context, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
-			)
+			var offerWire, ackWire []byte
+			var err error
+			if validateEvidence {
+				offerWire, err = cvReceiverLaneOfferV2CanonicalBytes(
+					&leaf.Context, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
+				)
+			} else {
+				offerWire, err = cvReceiverLaneOfferV2CanonicalBytesAfterValidation(
+					&leaf.Context, leaf.DealerID, &receiver.Offer,
+				)
+			}
 			if err != nil {
 				return nil, err
 			}
-			ackWire, err := cvACKEvidenceV2CanonicalBytes(receiver.ACK, &leaf.Context)
+			if validateEvidence {
+				ackWire, err = cvACKEvidenceV2CanonicalBytes(receiver.ACK, &leaf.Context)
+			} else {
+				ackWire, err = cvACKEvidenceV2CanonicalBytesAfterValidation(receiver.ACK, &leaf.Context)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -299,7 +484,13 @@ func cvLeafV2UnsignedCanonicalBytes(
 		}
 		_ = cvWriteBytes(&wire, nil)
 	} else {
-		fallbackWire, err := cvFallbackEvidenceV2CanonicalBytes(leaf.Fallback, &leaf.Context)
+		var fallbackWire []byte
+		var err error
+		if validateEvidence {
+			fallbackWire, err = cvFallbackEvidenceV2CanonicalBytes(leaf.Fallback, &leaf.Context)
+		} else {
+			fallbackWire, err = cvFallbackEvidenceV2CanonicalBytesAfterValidation(leaf.Fallback, &leaf.Context)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -311,11 +502,30 @@ func cvLeafV2UnsignedCanonicalBytes(
 func cvLeafV2CanonicalBytes(
 	leaf *cvLeafV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
 ) ([]byte, error) {
+	return cvLeafV2CanonicalBytesMode(leaf, receivers, validators, true)
+}
+
+func cvLeafV2CanonicalBytesAfterValidation(
+	leaf *cvLeafV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) ([]byte, error) {
+	return cvLeafV2CanonicalBytesMode(leaf, receivers, validators, false)
+}
+
+func cvLeafV2CanonicalBytesMode(
+	leaf *cvLeafV2, receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+	validateEvidence bool,
+) ([]byte, error) {
 	if leaf == nil || len(leaf.DealerSignature) != bls12381.SizeOfG1AffineCompressed ||
 		cvValidateValidatorMaterialForLeafV2(&leaf.Context, validators) != nil {
 		return nil, fmt.Errorf("invalid CV V2 leaf wire")
 	}
-	unsigned, err := cvLeafV2UnsignedCanonicalBytes(leaf, receivers)
+	var unsigned []byte
+	var err error
+	if validateEvidence {
+		unsigned, err = cvLeafV2UnsignedCanonicalBytes(leaf, receivers)
+	} else {
+		unsigned, err = cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -349,11 +559,11 @@ func cvDecodeLeafV2(
 	}
 	leaf.DealerSignature = signature
 	leaf.Digest = hashBytes([]byte(cvLeafDigestDomainV2), wire)
-	canonical, err := cvLeafV2CanonicalBytes(leaf, receivers, validators)
+	canonical, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 leaf")
 	}
-	if err := cvVerifyAPVSSV2(leaf, expectedContext, receivers, validators); err != nil {
+	if err := cvVerifyAPVSSAfterPointDecodingV2(leaf, expectedContext, receivers, validators); err != nil {
 		return nil, err
 	}
 	return leaf, nil
@@ -439,7 +649,7 @@ func cvDecodeLeafV2Unsigned(
 				&receivers.encryptionPublicKeys[i],
 			)
 		} else {
-			offer, err = cvDecodeReceiverLaneOfferV2(
+			offer, err = cvDecodeReceiverLaneOfferBeforeVerificationV2(
 				offerWire, expectedContext, leaf.DealerID, expectedContext.NewRoster[i], i+1,
 				&receivers.encryptionPublicKeys[i],
 			)
@@ -477,7 +687,7 @@ func cvDecodeLeafV2Unsigned(
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV V2 unsigned leaf bytes")
 	}
-	canonical, err := cvLeafV2UnsignedCanonicalBytes(leaf, receivers)
+	canonical, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 unsigned leaf")
 	}

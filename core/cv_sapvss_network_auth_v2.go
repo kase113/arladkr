@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
@@ -17,6 +18,7 @@ const (
 	cvNetworkAuthV2Domain       = "ARL-CV-sAPVSS/v2-scalar-group/network-auth"
 	cvNetworkAuthV2OldBLSDomain = "ARL-CV-sAPVSS/v2-scalar-group/network-auth/old-bls"
 	cvNetworkAuthV2HeaderBytes  = 1 + 1 + 4
+	cvNetworkAuthV2CacheLimit   = 4096
 )
 
 type cvNetworkAuthenticatorV2 struct {
@@ -26,6 +28,9 @@ type cvNetworkAuthenticatorV2 struct {
 	oldLocalSecrets      map[int]fr.Element
 	receiverPublicKeys   map[int]ed25519.PublicKey
 	receiverLocalSecrets map[int]ed25519.PrivateKey
+	cacheMu              sync.Mutex
+	sealed               map[string][]byte
+	opened               map[string]struct{}
 }
 
 func newCVNetworkAuthenticatorV2(
@@ -42,6 +47,8 @@ func newCVNetworkAuthenticatorV2(
 		oldLocalSecrets:      make(map[int]fr.Element, len(validators.localSecrets)),
 		receiverPublicKeys:   make(map[int]ed25519.PublicKey, len(receivers.receiverOrder)),
 		receiverLocalSecrets: make(map[int]ed25519.PrivateKey, len(receivers.localIdentitySecrets)),
+		sealed:               make(map[string][]byte),
+		opened:               make(map[string]struct{}),
 	}
 	for i, member := range validators.memberOrder {
 		if !cvValidG2(&validators.publicKeys[i]) {
@@ -79,6 +86,14 @@ func (a *cvNetworkAuthenticatorV2) seal(from, to int, tag string, envelope []byt
 	if err != nil {
 		return nil, err
 	}
+	cacheKey := string(hashBytes([]byte(cvNetworkAuthV2Domain+"/seal-cache"), digest))
+	a.cacheMu.Lock()
+	if cached := a.sealed[cacheKey]; cached != nil {
+		wire := append([]byte(nil), cached...)
+		a.cacheMu.Unlock()
+		return wire, nil
+	}
+	a.cacheMu.Unlock()
 	algorithm := cvNetworkAuthV2OldAlgorithm
 	var signature []byte
 	if cvV2ReceiverOriginatedTag(tag) {
@@ -104,6 +119,12 @@ func (a *cvNetworkAuthenticatorV2) seal(from, to int, tag string, envelope []byt
 	binary.BigEndian.PutUint32(wire[2:6], uint32(len(envelope)))
 	copy(wire[6:], envelope)
 	copy(wire[6+len(envelope):], signature)
+	a.cacheMu.Lock()
+	if len(a.sealed) >= cvNetworkAuthV2CacheLimit {
+		a.sealed = make(map[string][]byte)
+	}
+	a.sealed[cacheKey] = append([]byte(nil), wire...)
+	a.cacheMu.Unlock()
 	return wire, nil
 }
 
@@ -121,6 +142,15 @@ func (a *cvNetworkAuthenticatorV2) open(from, to int, tag string, wire []byte) (
 	if err != nil {
 		return nil, err
 	}
+	cacheKey := string(hashBytes(
+		[]byte(cvNetworkAuthV2Domain+"/open-cache"), digest, wire[1:2], signature,
+	))
+	a.cacheMu.Lock()
+	_, cached := a.opened[cacheKey]
+	a.cacheMu.Unlock()
+	if cached {
+		return append([]byte(nil), envelope...), nil
+	}
 	if cvV2ReceiverOriginatedTag(tag) {
 		publicKey, ok := a.receiverPublicKeys[from]
 		if !ok || wire[1] != cvNetworkAuthV2NewAlgorithm || len(signature) != ed25519.SignatureSize ||
@@ -134,6 +164,12 @@ func (a *cvNetworkAuthenticatorV2) open(from, to int, tag string, wire []byte) (
 			return nil, fmt.Errorf("invalid CV V2 old-member network signature")
 		}
 	}
+	a.cacheMu.Lock()
+	if len(a.opened) >= cvNetworkAuthV2CacheLimit {
+		a.opened = make(map[string]struct{})
+	}
+	a.opened[cacheKey] = struct{}{}
+	a.cacheMu.Unlock()
 	return append([]byte(nil), envelope...), nil
 }
 

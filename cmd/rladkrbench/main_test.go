@@ -4,7 +4,21 @@ import (
 	"rladkr_go/core"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestResultProtocolLatencyUsesSlowestLocalDecision(t *testing.T) {
+	result := &core.EpochResult{PerNode: []core.NodeOutput{
+		{NodeID: 1, Latency: 1250 * time.Millisecond},
+		{NodeID: 2, Latency: 1500 * time.Millisecond},
+	}}
+	if got := resultProtocolLatencyMs(result); got != 1500 {
+		t.Fatalf("protocol latency = %.2fms, want 1500ms", got)
+	}
+	if got := resultProtocolLatencyMs(nil); got != 0 {
+		t.Fatalf("nil protocol latency = %.2fms, want 0", got)
+	}
+}
 
 func TestValidateCVV2BenchmarkShapeRejectsRotationAndResumeClaims(t *testing.T) {
 	if err := validateCVV2BenchmarkShape(1, 1); err != nil {

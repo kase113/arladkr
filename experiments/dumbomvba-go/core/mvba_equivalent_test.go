@@ -15,6 +15,41 @@ type memNet struct {
 	peers []chan ReceivedMessage
 }
 
+type blockingSendNet struct {
+	blocked  int
+	release  chan struct{}
+	attempts chan int
+}
+
+func (n *blockingSendNet) Broadcast(ProtocolMessage) error { return nil }
+
+func (n *blockingSendNet) Send(to int, _ ProtocolMessage) error {
+	n.attempts <- to
+	if to == n.blocked {
+		<-n.release
+	}
+	return nil
+}
+
+func TestBroadcastEquivalentBoundsBlockedPeer(t *testing.T) {
+	const peers = 4
+	net := &blockingSendNet{
+		blocked:  2,
+		release:  make(chan struct{}),
+		attempts: make(chan int, peers),
+	}
+	defer close(net.release)
+
+	started := time.Now()
+	broadcastEquivalent(context.Background(), net, peers, 20*time.Millisecond, ProtocolMessage{Tag: TagMVBARC})
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("blocked RC peer stalled broadcast for %v", elapsed)
+	}
+	if got := len(net.attempts); got != peers {
+		t.Fatalf("send attempts=%d want %d", got, peers)
+	}
+}
+
 func TestClassifyEquivalentMessageForExperimentMetrics(t *testing.T) {
 	tests := []struct {
 		name string
