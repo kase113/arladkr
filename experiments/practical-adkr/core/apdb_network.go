@@ -485,7 +485,7 @@ func apdbNodeIndex(nodes []int, target int) (int, bool) {
 
 func sendNetworkAPDBShard(ctx context.Context, cfg Config, from, to int, addr string, wire apdbNetworkWire) (APDBReceipt, error) {
 	for {
-		conn, err := dialWithOptionalDelay(from, to, "tcp", addr, 500*time.Millisecond)
+		conn, err := dialWithBandwidth("tcp", addr, 500*time.Millisecond)
 		if err == nil {
 			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 			if writeAPDBNetworkWire(conn, wire) == nil {
@@ -508,7 +508,7 @@ func sendNetworkAPDBShard(ctx context.Context, cfg Config, from, to int, addr st
 func sendNetworkAPDBCertificate(ctx context.Context, cfg Config, from, to int, addr string, certificate APDBCertificate) {
 	wire := apdbNetworkWire{Kind: "cert", SID: cfg.SID, Epoch: cfg.Epoch, Dealer: certificate.Sender, Holder: to, Certificate: certificate}
 	for {
-		conn, err := dialWithOptionalDelay(from, to, "tcp", addr, 500*time.Millisecond)
+		conn, err := dialWithBandwidth("tcp", addr, 500*time.Millisecond)
 		if err == nil {
 			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 			if writeAPDBNetworkWire(conn, wire) == nil {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,124 @@ func partialVerifyNetworkTimeout(cfg Config) time.Duration {
 	return timeout
 }
 
+const partialVerifyPortOffset = 12000
+
+func partialVerifyNodeAddrMap(cfg Config) (map[int]string, error) {
+	if configured := parseNodeAddrMap(cfg.PartialVerifyNodeAddrs); len(configured) > 0 {
+		return configured, nil
+	}
+	base := parseNodeAddrMap(cfg.ProtocolNodeAddrs)
+	if len(base) == 0 {
+		return nil, errors.New("partial verification requires protocol or dedicated listener addresses")
+	}
+	derived := make(map[int]string, len(base))
+	for id, addr := range base {
+		host, portText, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("derive partial verification address for node %d: %w", id, err)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port <= 0 || port+partialVerifyPortOffset > 65535 {
+			return nil, fmt.Errorf("invalid partial verification port for node %d", id)
+		}
+		derived[id] = net.JoinHostPort(host, strconv.Itoa(port+partialVerifyPortOffset))
+	}
+	return derived, nil
+}
+
+type partialVerifyService struct {
+	addresses map[int]string
+	channels  map[int]chan partialVerifyResultWire
+	listeners map[int]net.Listener
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+}
+
+func startPartialVerifyService(ctx context.Context, cfg Config, committee []int) (*partialVerifyService, error) {
+	addresses, err := partialVerifyNodeAddrMap(cfg)
+	if err != nil {
+		return nil, err
+	}
+	local := parseNodeIDSet(cfg.ProtocolLocalNodeIDs)
+	serviceCtx, cancel := context.WithCancel(ctx)
+	service := &partialVerifyService{
+		addresses: addresses,
+		channels:  make(map[int]chan partialVerifyResultWire),
+		listeners: make(map[int]net.Listener),
+		cancel:    cancel,
+	}
+	for _, recipient := range committee {
+		if _, ok := local[recipient]; !ok {
+			continue
+		}
+		addr := strings.TrimSpace(addresses[recipient])
+		_, port, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil || port == "" {
+			service.close()
+			return nil, fmt.Errorf("partial verification address for node %d is invalid", recipient)
+		}
+		listener, listenErr := net.Listen("tcp", net.JoinHostPort("0.0.0.0", port))
+		if listenErr != nil {
+			service.close()
+			return nil, fmt.Errorf("partial verification listener %d: %w", recipient, listenErr)
+		}
+		service.listeners[recipient] = listener
+		service.channels[recipient] = make(chan partialVerifyResultWire, len(committee)*len(committee)*2)
+		service.wg.Add(1)
+		go servePartialVerifyResults(serviceCtx, listener, service.channels[recipient], &service.wg)
+	}
+	if len(service.listeners) == 0 {
+		service.close()
+		return nil, errors.New("partial verification service has no local new-committee listener")
+	}
+	return service, nil
+}
+
+func servePartialVerifyResults(
+	ctx context.Context,
+	listener net.Listener,
+	out chan<- partialVerifyResultWire,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				continue
+			}
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var wire partialVerifyResultWire
+		if err := json.NewDecoder(conn).Decode(&wire); err == nil {
+			if body, marshalErr := json.Marshal(wire); marshalErr == nil {
+				recordRecvBytes(len(body))
+			}
+			select {
+			case out <- wire:
+			case <-ctx.Done():
+			}
+		}
+		_ = conn.Close()
+	}
+}
+
+func (service *partialVerifyService) close() {
+	if service == nil {
+		return
+	}
+	if service.cancel != nil {
+		service.cancel()
+	}
+	for _, listener := range service.listeners {
+		_ = listener.Close()
+	}
+	service.wg.Wait()
+}
+
 // runPartialVerificationMulticast distributes lane-local verification results
 // and accepts a transcript only after every lane has f+1 signed positive votes.
 // The f+1 threshold is sufficient because each lane is assigned to 2f+1
@@ -86,19 +205,23 @@ func runPartialVerificationMulticast(
 	verifiers []int,
 	selectedIDs []int,
 	transcripts map[int]*DXTTranscript,
+	service *partialVerifyService,
 	dxt *DXTBackend,
 	tracef func(string, ...any),
 ) ([]int, map[string]int, error) {
 	if len(selectedIDs) == 0 {
 		return nil, nil, nil
 	}
-	addrMap := parseNodeAddrMap(cfg.ProtocolNodeAddrs)
+	if service == nil {
+		return nil, nil, errors.New("partial verification persistent service is unavailable")
+	}
+	addrMap := service.addresses
 	configuredLocal := parseNodeIDSet(cfg.ProtocolLocalNodeIDs)
 	localIDs := make([]int, 0, len(configuredLocal))
 	verifierSet := make(map[int]struct{}, len(verifiers))
 	for _, id := range verifiers {
 		verifierSet[id] = struct{}{}
-		if _, ok := configuredLocal[id]; ok {
+		if _, ok := configuredLocal[id]; ok && service.channels[id] != nil {
 			localIDs = append(localIDs, id)
 		}
 	}
@@ -133,57 +256,31 @@ func runPartialVerificationMulticast(
 	}
 
 	stageCtx, cancel := context.WithTimeout(ctx, partialVerifyNetworkTimeout(cfg))
-	defer cancel()
 	wireCh := make(chan partialVerifyResultWire, len(verifiers)*len(selectedIDs)*2)
-	lnByID := make(map[int]net.Listener, len(localIDs))
-	var listenerWG sync.WaitGroup
-	cleanupListeners := func() {
-		cancel()
-		for _, ln := range lnByID {
-			_ = ln.Close()
-		}
-		listenerWG.Wait()
-	}
-	defer cleanupListeners()
-
+	var relayWG sync.WaitGroup
 	for _, verifier := range localIDs {
-		_, port, err := net.SplitHostPort(addrMap[verifier])
-		if err != nil || strings.TrimSpace(port) == "" {
-			return nil, nil, fmt.Errorf("invalid partial verification address for verifier %d", verifier)
-		}
-		ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", port))
-		if err != nil {
-			return nil, nil, fmt.Errorf("partial verification listener %d: %w", verifier, err)
-		}
-		lnByID[verifier] = ln
-		listenerWG.Add(1)
-		go func(_ int, listener net.Listener) {
-			defer listenerWG.Done()
+		source := service.channels[verifier]
+		relayWG.Add(1)
+		go func(in <-chan partialVerifyResultWire) {
+			defer relayWG.Done()
 			for {
-				conn, err := listener.Accept()
-				if err != nil {
-					select {
-					case <-stageCtx.Done():
-						return
-					default:
-						continue
-					}
-				}
-				_ = conn.SetReadDeadline(time.Now().Add(partialVerifyNetworkTimeout(cfg)))
-				var wire partialVerifyResultWire
-				if err := json.NewDecoder(conn).Decode(&wire); err == nil {
-					if body, mErr := json.Marshal(wire); mErr == nil {
-						recordRecvBytes(len(body))
-					}
+				select {
+				case wire := <-in:
 					select {
 					case wireCh <- wire:
-					default:
+					case <-stageCtx.Done():
+						return
 					}
+				case <-stageCtx.Done():
+					return
 				}
-				_ = conn.Close()
 			}
-		}(verifier, ln)
+		}(source)
 	}
+	defer func() {
+		cancel()
+		relayWG.Wait()
+	}()
 
 	transcriptDigests := make(map[int][]byte, len(selectedIDs))
 	for _, dealer := range selectedIDs {
@@ -302,7 +399,7 @@ func runPartialVerificationMulticast(
 							return
 						default:
 						}
-						conn, dialErr := dialWithOptionalDelay(from, to, "tcp", addr, 500*time.Millisecond)
+						conn, dialErr := dialWithBandwidth("tcp", addr, 500*time.Millisecond)
 						if dialErr == nil {
 							_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 							recordSentBytes(len(body))

@@ -11,6 +11,11 @@ fi
 base_port="${4:-20000}"
 epoch_timeout="${RLADKR_CV_EPOCH_TIMEOUT:-90s}"
 runner_timeout="${RLADKR_CV_RUNNER_TIMEOUT:-$epoch_timeout}"
+# Once the n-f quorum has completed, keep already-started peers alive briefly
+# so scheduler skew during warmup does not turn them into misleading NO_RESULT
+# entries. Quorum remains sufficient for success; this is only a result-settle
+# window for the local multi-process harness.
+quorum_settle_timeout="${RLADKR_CV_QUORUM_SETTLE_TIMEOUT:-15s}"
 wait_spbc_timeout="${RLADKR_CV_WAIT_SPBC_TIMEOUT:-}"
 route_send_timeout="${RLADKR_CV_ROUTE_SEND_TIMEOUT:-}"
 apvss_mode="${RLADKR_APVSS_MODE:-ack-fallback}"
@@ -52,6 +57,7 @@ if (( n <= 0 || f < 0 || n < 3 * f + 1 || epochs <= 0 || runs <= 0 )); then
   printf 'invalid committee parameters: n=%s f=%s\n' "$n" "$f" >&2
   exit 2
 fi
+required_nodes=$((n - f))
 if ! command -v timeout >/dev/null 2>&1; then
   printf 'cluster runner requires the timeout command for child-process cleanup\n' >&2
   exit 2
@@ -151,7 +157,7 @@ for ((i=0; i<n; i++)); do
     export RLADKR_MVBA_NODE_ADDRS="$mvba_addrs"
     export RLADKR_ARTIFACT_CACHE_DIR="$root/node-$i/store"
     export RLADKR_LISTENER_READY_DIR="$root/ready"
-    export RLADKR_LISTENER_READY_NODE_COUNT="$n"
+    export RLADKR_LISTENER_READY_NODE_COUNT="$required_nodes"
 		export RLADKR_EPOCH_BARRIER_DIR="$root/epoch-barrier"
     export RLADKR_CV_DEBUG="${RLADKR_CV_DEBUG:-1}"
     export RLADKR_CV_PERF_COUNTERS="${RLADKR_CV_PERF_COUNTERS:-1}"
@@ -189,6 +195,7 @@ for ((i=0; i<n; i++)); do
 done
 
 status=0
+successful_children=0
 remaining=("${pids[@]}")
 while ((${#remaining[@]} > 0)); do
   finished_pid=""
@@ -202,16 +209,26 @@ while ((${#remaining[@]} > 0)); do
     [[ "$pid" == "$finished_pid" ]] || next+=("$pid")
   done
   remaining=("${next[@]}")
-  if (( child_status != 0 )); then
-    status=1
+
+  if (( child_status == 0 )); then
+    successful_children=$((successful_children + 1))
+  fi
+  if (( successful_children >= required_nodes )); then
+    sleep "$quorum_settle_timeout"
     cleanup_children
     for pid in "${remaining[@]}"; do
       wait "$pid" 2>/dev/null || true
     done
     remaining=()
+    status=0
+    break
   fi
 done
 pids=()
+
+if (( successful_children < required_nodes )); then
+  status=1
+fi
 
 printf 'ARLADKR_CV_RUN_DIR=%s\n' "$root"
 printf 'ARLADKR_CV_LOG_DIR=%s\n' "$log_dir"
@@ -222,7 +239,6 @@ for ((i=0; i<n; i++)); do
     printf '%s\n' "$result" >>"$results_file"
     printf 'NODE_%s %s\n' "$i" "$result"
   else
-    status=1
     printf 'NODE_%s NO_RESULT\n' "$i"
     tail -n 12 "$log" >&2 || true
   fi

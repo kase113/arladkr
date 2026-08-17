@@ -46,6 +46,10 @@ type Config struct {
 	ProtocolNodeAddrs string
 	// ProtocolLocalNodeIDs selects locally hosted ids (old+new) for DXT/APDB stage listeners.
 	ProtocolLocalNodeIDs string
+	// PartialVerifyNodeAddrs maps new-committee verifier ids to the dedicated
+	// partial-result multicast listeners. If empty, addresses are derived from
+	// ProtocolNodeAddrs in a separate port namespace.
+	PartialVerifyNodeAddrs string
 	// DXTNodeAddrs optionally gives setup-long DXT lane/transcript listener
 	// addresses. If empty, ports are derived from ProtocolNodeAddrs.
 	DXTNodeAddrs string
@@ -63,10 +67,6 @@ type Config struct {
 	AblationMode    string
 	CommMetrics     bool
 
-	// Delay injection configuration for local multi-process WAN simulation.
-	DelayInjectionEnabled bool
-	DelayMatrixFile       string
-	DelayNodeCount        int
 	// StrictNetwork makes benchmark runs fail if protocol phases fall back to
 	// process-local shortcuts instead of the configured network transport.
 	StrictNetwork bool

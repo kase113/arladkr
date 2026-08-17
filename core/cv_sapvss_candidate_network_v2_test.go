@@ -111,12 +111,45 @@ func TestCVCertifiedCandidateV2AcceptsRelaysAndSuppressesDuplicates(t *testing.T
 	if !cvCandidateRelaySentForTest(transport, receiver, relay) {
 		t.Fatalf("node %d accepted but did not relay candidate received from %d", receiver, relay)
 	}
+	// ACKs stop the per-peer retry loop. Allow relay workers to finish and
+	// ensure no sender/receiver pair emits periodic duplicate full candidates.
+	time.Sleep(150 * time.Millisecond)
+	if transport.sentCount(cvTagCertifiedCandidateACKV2) == 0 {
+		t.Fatal("candidate delivery did not produce an authenticated ACK")
+	}
+	if countCVCandidateAfterACKForTest(transport, relay, receiver) != 0 {
+		t.Fatalf("candidate publisher sent a full candidate after peer ACK")
+	}
+	if countCVCandidatePairForTest(transport, relay, receiver) > cvCandidateFanoutMaxAttemptsV2 {
+		t.Fatalf("candidate publisher exceeded bounded retry budget")
+	}
 	cancel()
 	if err := <-published; err != context.Canceled {
 		t.Fatalf("candidate publisher shutdown error=%v", err)
 	}
 	if !bytes.Equal(got.Header.AggregateDigest, object.Header.AggregateDigest) {
 		t.Fatal("relayed candidate changed aggregate digest")
+	}
+}
+
+func TestCVCertifiedCandidateACKV2Codec(t *testing.T) {
+	digest := string(hashBytes([]byte("candidate-ack-test")))
+	wire, err := cvEncodeCertifiedCandidateACKV2(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := cvDecodeCertifiedCandidateACKV2(wire)
+	if err != nil || got != digest {
+		t.Fatalf("ACK round trip digest=%x err=%v", []byte(got), err)
+	}
+	for _, mutated := range [][]byte{
+		wire[:len(wire)-1],
+		append(append([]byte(nil), wire...), 0),
+		append([]byte("wrong-domain"), wire[len(cvCertifiedCandidateACKV2Domain):]...),
+	} {
+		if _, err := cvDecodeCertifiedCandidateACKV2(mutated); err == nil {
+			t.Fatal("malformed candidate ACK accepted")
+		}
 	}
 }
 
@@ -129,4 +162,38 @@ func cvCandidateRelaySentForTest(transport *cvRouterTestTransport, from, exclude
 		}
 	}
 	return false
+}
+
+func countCVCandidatePairForTest(transport *cvRouterTestTransport, from, to int) int {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	count := 0
+	for _, message := range transport.sent {
+		if message.Tag == cvTagCertifiedCandidateV2 && message.From == from && message.To == to {
+			count++
+		}
+	}
+	return count
+}
+
+func countCVCandidateAfterACKForTest(transport *cvRouterTestTransport, from, to int) int {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	ackIndex := -1
+	for index, message := range transport.sent {
+		if message.Tag == cvTagCertifiedCandidateACKV2 && message.From == to && message.To == from {
+			ackIndex = index
+			break
+		}
+	}
+	if ackIndex < 0 {
+		return 0
+	}
+	count := 0
+	for _, message := range transport.sent[ackIndex+1:] {
+		if message.Tag == cvTagCertifiedCandidateV2 && message.From == from && message.To == to {
+			count++
+		}
+	}
+	return count
 }

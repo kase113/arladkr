@@ -411,7 +411,7 @@ func (b *DXTBackend) StartRecipientService(timeout time.Duration) (func(), error
 				}
 				sig := signAck(sk, req.Dealer, recipientID, req.Commitment)
 				ack := dxtDealAck{Recipient: recipientID, Sig: sig}
-				dial, err := dialWithOptionalDelay(recipientID, req.Dealer, "tcp", req.ReplyAddr, timeout)
+				dial, err := dialWithBandwidth("tcp", req.ReplyAddr, timeout)
 				if err != nil {
 					continue
 				}
@@ -579,7 +579,7 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 				go func() {
 					defer sendWG.Done()
 					for {
-						conn, dialErr := dialWithOptionalDelay(dealer, rid, "tcp", addr, 300*time.Millisecond)
+						conn, dialErr := dialWithBandwidth("tcp", addr, 300*time.Millisecond)
 						if dialErr == nil {
 							_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 							if body, marshalErr := json.Marshal(req); marshalErr == nil {

@@ -54,18 +54,20 @@ func TestCVAddCostBreakdownMapsProtocolTerms(t *testing.T) {
 		newAggregateRecoverySentBytes: 15, newAggregateRecoveryRecvBytes: 16,
 		tagSentBytes: map[string]uint64{
 			cvTagCoinShareV2: 21, cvTagValidationRequestV2: 22, cvTagCertifiedCandidateV2: 23,
-			cvTagHandoffV2: 24, cvTagAggregateShareV2: 25, cvTagAPDBStoreV2: 999,
+			cvTagCertifiedCandidateACKV2: 26,
+			cvTagHandoffV2:               24, cvTagAggregateShareV2: 25, cvTagAPDBStoreV2: 999,
 		},
 		tagRecvBytes: map[string]uint64{
 			cvTagPoolOfferV2: 31, cvTagValidationSignatureV2: 32, cvTagCertifiedCandidateV2: 33,
-			cvTagDecisionShareV2: 34, cvTagAggregateShareV2: 35, cvTagAPDBStoreV2: 999,
+			cvTagCertifiedCandidateACKV2: 36,
+			cvTagDecisionShareV2:         34, cvTagAggregateShareV2: 35, cvTagAPDBStoreV2: 999,
 		},
 	}
 	cvAddCostBreakdownV2(sent, recv, metrics)
 	for name, want := range map[string]uint64{
 		"component_apdb_dispersal": 11, "aggregate_apdb_dispersal": 13,
 		"new_aggregate_recovery": 15, "pool_coin": 21, "validation_request": 22,
-		"candidate_relay": 23, "decision_handoff": 24, "new_share_exchange": 25,
+		"candidate_relay": 49, "decision_handoff": 24, "new_share_exchange": 25,
 	} {
 		if sent[name] != want {
 			t.Fatalf("sent %s=%d want %d", name, sent[name], want)
@@ -74,7 +76,7 @@ func TestCVAddCostBreakdownMapsProtocolTerms(t *testing.T) {
 	for name, want := range map[string]uint64{
 		"component_apdb_dispersal": 12, "aggregate_apdb_dispersal": 14,
 		"new_aggregate_recovery": 16, "pool_coin": 31, "validation_request": 32,
-		"candidate_relay": 33, "decision_handoff": 34, "new_share_exchange": 35,
+		"candidate_relay": 69, "decision_handoff": 34, "new_share_exchange": 35,
 	} {
 		if recv[name] != want {
 			t.Fatalf("recv %s=%d want %d", name, recv[name], want)

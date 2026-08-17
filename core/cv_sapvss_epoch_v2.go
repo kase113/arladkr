@@ -300,7 +300,7 @@ func cvAddCostBreakdownV2(sent, recv map[string]uint64, services ...cvServiceExp
 	tagGroups := map[string][]string{
 		"pool_coin":          {cvTagCoinShareV2, cvTagPoolOfferV2, cvTagPoolCertShareV2, cvTagPoolCertV2},
 		"validation_request": {cvTagValidationRequestV2, cvTagValidationSignatureV2, cvTagValidationResultV2},
-		"candidate_relay":    {cvTagCertifiedCandidateV2},
+		"candidate_relay":    {cvTagCertifiedCandidateV2, cvTagCertifiedCandidateACKV2},
 		"decision_handoff":   {cvTagDecisionShareV2, cvTagHandoffV2},
 		"new_share_exchange": {cvTagAggregateShareV2},
 	}

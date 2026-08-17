@@ -50,6 +50,7 @@ const (
 	cvTagLaneACKV2               = "CV_V2_LANE_ACK"
 	cvTagComponentRefV2          = "CV_V2_COMPONENT_REF"
 	cvTagCertifiedCandidateV2    = "CV_V2_CERTIFIED_CANDIDATE"
+	cvTagCertifiedCandidateACKV2 = "CV_V2_CERTIFIED_CANDIDATE_ACK"
 )
 
 func cvAllowedNetworkTag(tag string) bool {
@@ -88,7 +89,8 @@ func cvAllowedNetworkTag(tag string) bool {
 		cvTagDecisionShareV2,
 		cvTagAggregateShareV2:
 		return true
-	case cvTagLaneOfferV2, cvTagLaneACKV2, cvTagComponentRefV2, cvTagCertifiedCandidateV2:
+	case cvTagLaneOfferV2, cvTagLaneACKV2, cvTagComponentRefV2, cvTagCertifiedCandidateV2,
+		cvTagCertifiedCandidateACKV2:
 		return true
 	default:
 		return false

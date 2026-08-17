@@ -245,13 +245,6 @@ func (n *mvbaTCPNet) Send(to int, msg dmvba.ProtocolMessage) error {
 	}
 	poolKey := practicalMVBAPoolKey(addr, msg, n.hub.poolLanes)
 	traceMVBATCP("send_begin from=%d to=%d tag=%d round=%d leader=%d addr=%s", n.id, to, msg.Tag, msg.Round, msg.Leader, addr)
-	// Pipeline-delay model (default): apply the one-way propagation delay HERE,
-	// before acquiring the per-peer connection lock, so concurrent sends to the
-	// same peer sleep in parallel instead of serializing behind each other's
-	// sleep. Legacy mode keeps the sleep inside Write (under the pool lock).
-	if !mvbaLegacyDelay() {
-		delayBeforeSend(n.id, to, "")
-	}
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(wire); err != nil {
 		n.hub.recordMVBANetSend(n.id, practicalMVBANetTag(msg), time.Since(sendStart), 0, false, false, 0, err)
@@ -304,7 +297,7 @@ func (n *mvbaTCPNet) Send(to int, msg dmvba.ProtocolMessage) error {
 	var dErr error
 	reconnects := 0
 	for attempt := 0; attempt < n.hub.retries; attempt++ {
-		conn, dErr = mvbaDial(n.id, to, "tcp", addr, n.hub.dialTO)
+		conn, dErr = dialWithBandwidth("tcp", addr, n.hub.dialTO)
 		if dErr == nil {
 			reconnects++
 			break

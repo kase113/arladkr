@@ -175,7 +175,7 @@ func (service *dxtNetworkService) handleLane(localID int, raw []byte) {
 		return
 	}
 	ack := dxtDealAck{Recipient: localID, Sig: signAck(sk, req.Dealer, localID, req.Commitment)}
-	conn, err := dialWithOptionalDelay(localID, req.Dealer, "tcp", req.ReplyAddr, dxtNetworkTimeout())
+	conn, err := dialWithBandwidth("tcp", req.ReplyAddr, dxtNetworkTimeout())
 	if err != nil {
 		return
 	}
@@ -275,7 +275,7 @@ func sendDXTTranscript(ctx context.Context, cfg Config, dealer, holder int, addr
 		if err := ctx.Err(); err != nil || time.Now().After(deadline) {
 			return false
 		}
-		conn, err := dialWithOptionalDelay(dealer, holder, "tcp", addr, 300*time.Millisecond)
+		conn, err := dialWithBandwidth("tcp", addr, 300*time.Millisecond)
 		if err != nil {
 			time.Sleep(25 * time.Millisecond)
 			continue

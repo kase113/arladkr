@@ -35,9 +35,9 @@ func main() {
 		n              = flag.Int("n", 10, "paper-style committee size; old and new committees both have n members")
 		f              = flag.Int("f", -1, "byzantine threshold; -1 derives floor((n-1)/3) from committee size")
 		kappa          = flag.Int("kappa", 0, "explicit selected transcript count; 0 uses kappa-profile")
-		kappaProfile   = flag.String("kappa-profile", "matched-lifetime", "automatic kappa profile: practical-original|matched-single-epoch|matched-lifetime|deterministic-inclusion")
+		kappaProfile   = flag.String("kappa-profile", "matched-lifetime", "automatic kappa profile: practical-original|matched-single-epoch|matched-lifetime|high-assurance|deterministic-inclusion")
 		kappaFailProb  = flag.Float64("kappa-failure-prob", 1e-10, "per-epoch failure target for practical-original")
-		kappaBits      = flag.Float64("kappa-security-bits", 128, "matched statistical security bits")
+		kappaBits      = flag.Float64("kappa-security-bits", 0, "matched statistical security bits; 0 uses the selected profile default")
 		kappaLifeEpoch = flag.Uint64("kappa-lifetime-epochs", 525600, "maximum reconfigurations used by matched-lifetime and union-bound reporting")
 		runs           = flag.Int("runs", 3, "number of benchmark runs")
 		timeout        = flag.Duration("timeout", 30*time.Second, "timeout per run")
@@ -171,14 +171,7 @@ func main() {
 		CoinNodeAddrs:            coinAddrsVal,
 		AblationMode:             *ablationMode,
 		CommMetrics:              *commMetrics,
-		DelayInjectionEnabled:    strings.TrimSpace(os.Getenv("PRACTICAL_DELAY_ENABLE")) == "1",
-		DelayMatrixFile:          strings.TrimSpace(os.Getenv("PRACTICAL_DELAY_MATRIX_FILE")),
 		StrictNetwork:            *strictNetwork,
-	}
-	if v := strings.TrimSpace(os.Getenv("PRACTICAL_DELAY_NODE_COUNT")); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-			cfg.DelayNodeCount = parsed
-		}
 	}
 	if *setupKeygen {
 		digest, err := core.GeneratePracticalSetupProvision(*setupOutputDir, cfg)

@@ -135,7 +135,7 @@ func runAPDBDispersal(
 						Signature: sig,
 					},
 				}
-				dial, err := dialWithOptionalDelay(nodeID, req.Dealer, "tcp", req.Reply, receiptTO)
+				dial, err := dialWithBandwidth("tcp", req.Reply, receiptTO)
 				if err != nil {
 					continue
 				}
@@ -215,7 +215,7 @@ func runAPDBDispersal(
 			if !ok || strings.TrimSpace(addr) == "" {
 				continue
 			}
-			conn, err := dialWithOptionalDelay(dealer, nodeID, "tcp", addr, receiptTO)
+			conn, err := dialWithBandwidth("tcp", addr, receiptTO)
 			if err != nil {
 				continue
 			}

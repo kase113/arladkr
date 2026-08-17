@@ -337,6 +337,14 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 		return failWithPartial(err, "setup")
 	}
 	defer compService.close()
+	partialVerifyService, err := startPartialVerifyService(ctx, cfg, newC)
+	if err != nil {
+		if cfg.StrictNetwork {
+			return failWithPartial(err, "setup")
+		}
+		tracef("phase=setup_partial_verify_service_unavailable err=%v", err)
+	}
+	defer partialVerifyService.close()
 
 	recipSignPub := signingKeys.recipientPublic
 	recipSignPriv := signingKeys.recipientPrivate
@@ -592,7 +600,7 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 		}
 	} else {
 		verified, positiveVotes, multicastErr := runPartialVerificationMulticast(
-			ctx, cfg, newC, selectedIDs, recoveredTranscripts, dxt, tracef,
+			ctx, cfg, newC, selectedIDs, recoveredTranscripts, partialVerifyService, dxt, tracef,
 		)
 		if multicastErr != nil {
 			if cfg.StrictNetwork {
@@ -904,7 +912,7 @@ func recastListenerReady(
 		return false
 	default:
 	}
-	conn, err := dialWithOptionalDelay(fromID, target, "tcp", addr, 250*time.Millisecond)
+	conn, err := dialWithBandwidth("tcp", addr, 250*time.Millisecond)
 	if err != nil {
 		return false
 	}
@@ -1138,7 +1146,7 @@ func runRecastRecovery(
 					}
 					return
 				}
-				conn, err := dialWithOptionalDelay(fromID, toID, "tcp", addr, attemptTO)
+				conn, err := dialWithBandwidth("tcp", addr, attemptTO)
 				if err != nil {
 					if time.Now().Add(retryBackoff).After(deadlineAt) {
 						if onDialFail != nil {

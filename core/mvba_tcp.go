@@ -442,13 +442,6 @@ func (n *arladkrTCPNet) Send(to int, msg dmvba.ProtocolMessage) error {
 		n.hub.recordMVBANetSend(n.id, arlMVBANetTag(msg), time.Since(sendStart), 0, false, false, 0, err)
 		return err
 	}
-	// Pipeline-delay model (default): apply the one-way propagation delay HERE,
-	// before acquiring any per-peer connection lock, so concurrent sends to the
-	// same peer sleep in parallel instead of serializing behind each other's
-	// sleep. Legacy mode keeps the sleep inside Write (under the pool lock).
-	if !arlMVBALegacyDelay() {
-		arlDelayBeforeSend(n.id, to)
-	}
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(wire); err != nil {
 		n.hub.recordMVBANetSend(n.id, arlMVBANetTag(msg), time.Since(sendStart), 0, false, false, 0, err)
@@ -483,7 +476,7 @@ func (n *arladkrTCPNet) Send(to int, msg dmvba.ProtocolMessage) error {
 	// Dial new connection with retry.
 	reconnects := 0
 	for attempt := 0; attempt < n.hub.retries; attempt++ {
-		conn, err := arlMVBADial(n.id, to, "tcp", addr, n.hub.dialTO)
+		conn, err := arlDialWithBandwidth("tcp", addr, n.hub.dialTO)
 		if err != nil {
 			time.Sleep(time.Duration(attempt+1) * n.hub.backoff)
 			continue
@@ -668,7 +661,7 @@ func (n *arladkrTCPNet) sendWithConnReuse(to int, addr string, msg dmvba.Protoco
 	}
 	n.hub.poolMu.Unlock()
 	for attempt := 0; attempt < n.hub.retries; attempt++ {
-		conn, err := arlMVBADial(n.id, to, "tcp", addr, n.hub.dialTO)
+		conn, err := arlDialWithBandwidth("tcp", addr, n.hub.dialTO)
 		if err != nil {
 			time.Sleep(time.Duration(attempt+1) * n.hub.backoff)
 			continue

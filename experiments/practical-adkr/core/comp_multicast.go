@@ -309,7 +309,7 @@ func sendCompKeyWire(ctx context.Context, cfg Config, from, to int, addr string,
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		conn, dialErr := dialWithOptionalDelay(from, to, "tcp", addr, timeout)
+		conn, dialErr := dialWithBandwidth("tcp", addr, timeout)
 		if dialErr == nil {
 			_ = conn.SetDeadline(time.Now().Add(timeout))
 			recordSentBytes(len(raw))

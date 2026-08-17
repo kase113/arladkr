@@ -121,6 +121,39 @@ func TestResolvePracticalKappaMatchesTenYear128BitTable(t *testing.T) {
 	}
 }
 
+func TestResolvePracticalKappaHighAssuranceProfile(t *testing.T) {
+	selection, err := ResolvePracticalKappaForCommittee(128, -1, 0, KappaPolicy{
+		Profile: KappaProfileHighAssurance,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.LifetimeEpochs != 525600 {
+		t.Fatalf("high-assurance epochs=%d, want 525600", selection.LifetimeEpochs)
+	}
+	targetLog2 := -64 - math.Log2(float64(selection.LifetimeEpochs))
+	if selection.EpochFailureLog2 > targetLog2 {
+		t.Fatalf("high-assurance epoch log2=%g exceeds target %g", selection.EpochFailureLog2, targetLog2)
+	}
+	if selection.LifetimeSecurityBits < 64 {
+		t.Fatalf("high-assurance lifetime security=%g, want at least 64 bits", selection.LifetimeSecurityBits)
+	}
+	alias, err := ResolvePracticalKappaForCommittee(128, -1, 0, KappaPolicy{Profile: "high-assurance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias.Kappa != selection.Kappa || alias.LifetimeEpochs != selection.LifetimeEpochs {
+		t.Fatalf("high-assurance alias=%+v differs from canonical profile=%+v", alias, selection)
+	}
+	compact, err := ResolvePracticalKappaForCommittee(128, -1, 0, KappaPolicy{Profile: "highassurance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compact.Kappa != selection.Kappa || compact.LifetimeEpochs != selection.LifetimeEpochs {
+		t.Fatalf("highassurance alias=%+v differs from canonical profile=%+v", compact, selection)
+	}
+}
+
 func TestCoinAndConfigRejectKappaClamping(t *testing.T) {
 	digest := sha256.Sum256([]byte("coin input"))
 	if _, err := selectByThresholdCoin([]int{0, 1, 2, 3, 4}, 6, []byte("signature"), digest[:]); err == nil {

@@ -110,38 +110,39 @@ type runStat struct {
 }
 
 type benchResultInput struct {
-	setupBundleDigest        string
-	n                        int
-	fOld                     int
-	fNew                     int
-	kappa                    int
-	runs                     int
-	timeoutMs                int64
-	apvssProvider            string
-	apvssMode                string
-	apvssBackendStatus       string
-	apvssFullProofProfile    string
-	apvssFallbackProfile     string
-	apvssForcedFallbackCount int
-	apvssWaitAllACKs         bool
-	experimentalAPVSS        bool
-	apvssOutput              string
-	securityProfile          string
-	deriveMode               string
-	arcMode                  string
-	agreementPath            string
-	cvAPVSSMode              string
-	successRuns              int
-	attemptedEpochs          int
-	totalAttemptLatencyMs    float64
-	localNodes               []int
-	requiredCompleted        int
-	ablationMode             string
-	commMetrics              bool
-	cvSampling               core.CVV2SamplingReport
-	cvSamplingEpochs         int
-	cvSamplingUnionBound     string
-	stats                    []runStat
+	setupBundleDigest          string
+	n                          int
+	fOld                       int
+	fNew                       int
+	kappa                      int
+	runs                       int
+	timeoutMs                  int64
+	apvssProvider              string
+	apvssMode                  string
+	apvssBackendStatus         string
+	apvssFullProofProfile      string
+	apvssFallbackProfile       string
+	apvssForcedFallbackCount   int
+	apvssWaitAllACKs           bool
+	experimentalAPVSS          bool
+	apvssOutput                string
+	securityProfile            string
+	deriveMode                 string
+	arcMode                    string
+	agreementPath              string
+	cvAPVSSMode                string
+	successRuns                int
+	attemptedEpochs            int
+	totalAttemptLatencyMs      float64
+	totalAttemptServiceGraceMs float64
+	localNodes                 []int
+	requiredCompleted          int
+	ablationMode               string
+	commMetrics                bool
+	cvSampling                 core.CVV2SamplingReport
+	cvSamplingEpochs           int
+	cvSamplingUnionBound       string
+	stats                      []runStat
 }
 
 func main() {
@@ -215,9 +216,8 @@ func main() {
 	}
 
 	// Distributed start barrier: wait until --start-at before proceeding.
-	// All peer processes launched with the same timestamp will begin
-	// RunEpoch simultaneously, so every listener is already bound when
-	// waitForRemoteNodeReadiness probes them.
+	// Peer processes then bind their listeners and wait for the old-committee
+	// n-f quorum before entering RunEpoch.
 	if *startAt > 0 {
 		now := time.Now().Unix()
 		if now < *startAt {
@@ -340,6 +340,7 @@ func main() {
 	stats := make([]runStat, 0, *runs*(*epochs))
 	attemptedEpochs := 0
 	totalAttemptLatencyMs := 0.0
+	totalAttemptServiceGraceMs := 0.0
 	agreementPath := ""
 	cvAPVSSMode := ""
 
@@ -446,9 +447,11 @@ func main() {
 				break
 			}
 			barrierCtx, barrierCancel := context.WithTimeout(context.Background(), runTimeoutValue)
-			barrierErr := waitForBenchmarkEpoch(
+			recoverServiceGraceMs := float64(res.RecoverServiceGraceLatency.Microseconds()) / 1000.0
+			totalAttemptServiceGraceMs += recoverServiceGraceMs
+			barrierErr := waitForBenchmarkEpochQuorum(
 				barrierCtx, epochBarrierDir, cfg.SID, i+1, globalEpoch,
-				old, localNodeIDs, resultDigest,
+				old, localNodeIDs, resultDigest, *n-oldFaults,
 			)
 			barrierCancel()
 			if barrierErr != nil {
@@ -485,7 +488,7 @@ func main() {
 				mvbaPeerWaitMs:                        float64(res.MVBAPeerWaitLatency.Microseconds()) / 1000.0,
 				agreeAggMs:                            float64(res.AgreeAggLatency.Microseconds()) / 1000.0,
 				recoverBarrierWaitMs:                  float64(res.RecoverBarrierWaitLatency.Microseconds()) / 1000.0,
-				recoverServiceGraceMs:                 float64(res.RecoverServiceGraceLatency.Microseconds()) / 1000.0,
+				recoverServiceGraceMs:                 recoverServiceGraceMs,
 				recoverMs:                             float64(res.RecoverLatency.Microseconds()) / 1000.0,
 				recoverOnlyMs:                         float64(res.RecoverOnlyLatency.Microseconds()) / 1000.0,
 				recoverVerifyMs:                       float64(res.RecoverVerifyLatency.Microseconds()) / 1000.0,
@@ -577,38 +580,39 @@ func main() {
 		return
 	}
 	line := formatBenchResult(benchResultInput{
-		setupBundleDigest:        setupBundleDigest,
-		n:                        *n,
-		fOld:                     oldFaults,
-		fNew:                     newFaults,
-		kappa:                    effectiveKappa,
-		runs:                     *runs,
-		timeoutMs:                runTimeoutValue.Milliseconds(),
-		apvssProvider:            "cv-sapvss",
-		apvssMode:                apvssModeName,
-		apvssBackendStatus:       backendStatus,
-		apvssFullProofProfile:    resultFullProofProfile,
-		apvssFallbackProfile:     resultFallbackProfile,
-		apvssForcedFallbackCount: *apvssForcedFallbackCount,
-		apvssWaitAllACKs:         *apvssWaitAllACKs,
-		experimentalAPVSS:        *allowExperimentalAPVSS,
-		apvssOutput:              "scalar-plus-group-blinding",
-		securityProfile:          "cv-sapvss-v2-scalar-group-academic-experiment",
-		deriveMode:               "scalar-share-proof-v2",
-		arcMode:                  "v2-apdb-aggregate-lock",
-		agreementPath:            agreementPath,
-		cvAPVSSMode:              cvAPVSSMode,
-		successRuns:              successRuns,
-		attemptedEpochs:          attemptedEpochs,
-		totalAttemptLatencyMs:    totalAttemptLatencyMs,
-		localNodes:               append([]int(nil), localNodeIDs...),
-		requiredCompleted:        requiredCompleted,
-		ablationMode:             strings.ToLower(strings.TrimSpace(*ablationMode)),
-		commMetrics:              *commMetrics,
-		cvSampling:               sampling,
-		cvSamplingEpochs:         len(stats),
-		cvSamplingUnionBound:     samplingUnionBound,
-		stats:                    stats,
+		setupBundleDigest:          setupBundleDigest,
+		n:                          *n,
+		fOld:                       oldFaults,
+		fNew:                       newFaults,
+		kappa:                      effectiveKappa,
+		runs:                       *runs,
+		timeoutMs:                  runTimeoutValue.Milliseconds(),
+		apvssProvider:              "cv-sapvss",
+		apvssMode:                  apvssModeName,
+		apvssBackendStatus:         backendStatus,
+		apvssFullProofProfile:      resultFullProofProfile,
+		apvssFallbackProfile:       resultFallbackProfile,
+		apvssForcedFallbackCount:   *apvssForcedFallbackCount,
+		apvssWaitAllACKs:           *apvssWaitAllACKs,
+		experimentalAPVSS:          *allowExperimentalAPVSS,
+		apvssOutput:                "scalar-plus-group-blinding",
+		securityProfile:            "cv-sapvss-v2-scalar-group-academic-experiment",
+		deriveMode:                 "scalar-share-proof-v2",
+		arcMode:                    "v2-apdb-aggregate-lock",
+		agreementPath:              agreementPath,
+		cvAPVSSMode:                cvAPVSSMode,
+		successRuns:                successRuns,
+		attemptedEpochs:            attemptedEpochs,
+		totalAttemptLatencyMs:      totalAttemptLatencyMs,
+		totalAttemptServiceGraceMs: totalAttemptServiceGraceMs,
+		localNodes:                 append([]int(nil), localNodeIDs...),
+		requiredCompleted:          requiredCompleted,
+		ablationMode:               strings.ToLower(strings.TrimSpace(*ablationMode)),
+		commMetrics:                *commMetrics,
+		cvSampling:                 sampling,
+		cvSamplingEpochs:           len(stats),
+		cvSamplingUnionBound:       samplingUnionBound,
+		stats:                      stats,
 	})
 	traceBenchMain(localNodeIDs, "before_final_print", fmt.Sprintf("success_runs=%d stats=%d", successRuns, len(stats)))
 	fmt.Println(line)
@@ -841,6 +845,14 @@ func boolToFloat(v bool) float64 {
 	return 0
 }
 
+func reportedLatencyMs(stat runStat) float64 {
+	latency := stat.latencyMs - stat.recoverServiceGraceMs
+	if latency < 0 {
+		return 0
+	}
+	return latency
+}
+
 func formatBenchResult(in benchResultInput) string {
 	agreementPath := strings.TrimSpace(in.agreementPath)
 	if agreementPath == "" {
@@ -855,13 +867,22 @@ func formatBenchResult(in benchResultInput) string {
 		arcMode = "header-only-recovery-obligation"
 	}
 	successRate := float64(in.successRuns) / float64(in.runs)
-	meanLatency := meanOf(in.stats, func(s runStat) float64 { return s.latencyMs })
+	meanRawLatency := meanOf(in.stats, func(s runStat) float64 { return s.latencyMs })
+	meanLatency := meanOf(in.stats, reportedLatencyMs)
+	meanRawAllLatency := meanRawLatency
 	meanAllLatency := meanLatency
 	if in.attemptedEpochs > 0 {
-		meanAllLatency = in.totalAttemptLatencyMs / float64(in.attemptedEpochs)
+		attempts := float64(in.attemptedEpochs)
+		meanRawAllLatency = in.totalAttemptLatencyMs / attempts
+		meanAllLatency = (in.totalAttemptLatencyMs - in.totalAttemptServiceGraceMs) / attempts
+		if meanAllLatency < 0 {
+			meanAllLatency = 0
+		}
 	}
-	p50Latency := quantileOf(in.stats, 0.50, func(s runStat) float64 { return s.latencyMs })
-	p95Latency := quantileOf(in.stats, 0.95, func(s runStat) float64 { return s.latencyMs })
+	meanRawP50Latency := quantileOf(in.stats, 0.50, func(s runStat) float64 { return s.latencyMs })
+	meanRawP95Latency := quantileOf(in.stats, 0.95, func(s runStat) float64 { return s.latencyMs })
+	p50Latency := quantileOf(in.stats, 0.50, reportedLatencyMs)
+	p95Latency := quantileOf(in.stats, 0.95, reportedLatencyMs)
 	meanSetup := meanOf(in.stats, func(s runStat) float64 { return s.setupMs })
 	meanRecoverBarrierWait := meanOf(in.stats, func(s runStat) float64 { return s.recoverBarrierWaitMs })
 	meanRecoverServiceGrace := meanOf(in.stats, func(s runStat) float64 { return s.recoverServiceGraceMs })
@@ -869,10 +890,7 @@ func formatBenchResult(in benchResultInput) string {
 	if meanOnline < 0 {
 		meanOnline = 0
 	}
-	meanOnlinePhaseWall := meanOnline - meanRecoverServiceGrace
-	if meanOnlinePhaseWall < 0 {
-		meanOnlinePhaseWall = 0
-	}
+	meanOnlinePhaseWall := meanOnline
 	meanOnlineActiveKnown := meanOf(in.stats, func(s runStat) float64 {
 		active := 0.0
 		active += s.disperseLocalBuildMs
@@ -998,6 +1016,10 @@ func formatBenchResult(in benchResultInput) string {
 		len(in.localNodes),
 		in.requiredCompleted,
 		hashSummary,
+	)
+	line += fmt.Sprintf(
+		" latency_reporting=service_grace_adjusted mean_raw_latency_ms=%.2f mean_raw_all_latency_ms=%.2f p50_raw_latency_ms=%.2f p95_raw_latency_ms=%.2f",
+		meanRawLatency, meanRawAllLatency, meanRawP50Latency, meanRawP95Latency,
 	)
 	line += fmt.Sprintf(
 		" cv_failure_target=%s cv_proposer_sample=%d cv_validator_sample=%d cv_validator_threshold=%d cv_proposer_failure_bound=%s cv_validator_soundness_failure_bound=%s cv_validator_liveness_failure_bound=%s cv_validator_combined_failure_bound=%s cv_contributor_sampling_failure_bound=%s cv_epoch_sampling_failure_bound=%s cv_sampling_epochs=%d cv_experiment_sampling_union_bound=%s",

@@ -41,11 +41,9 @@ func waitForListenerReadyMarkers(dir string, nodeCount int, timeout time.Duratio
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		ready := 0
-		for id := 0; id < nodeCount; id++ {
-			if _, err := os.Stat(listenerReadyMarkerPath(dir, id)); err == nil {
-				ready++
-			}
+		ready, err := countListenerReadyMarkers(dir)
+		if err != nil {
+			return fmt.Errorf("read listener-ready barrier: %w", err)
 		}
 		if ready >= nodeCount {
 			return nil
@@ -55,6 +53,33 @@ func waitForListenerReadyMarkers(dir string, nodeCount int, timeout time.Duratio
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func countListenerReadyMarkers(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	ready := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "node-") || !strings.HasSuffix(name, ".ready") {
+			continue
+		}
+		idText := strings.TrimSuffix(strings.TrimPrefix(name, "node-"), ".ready")
+		id, parseErr := strconv.Atoi(idText)
+		if parseErr != nil || id < 0 {
+			continue
+		}
+		ready++
+	}
+	return ready, nil
 }
 
 type tcpLoopbackTransport struct {
@@ -81,34 +106,75 @@ type tcpLoopbackPoolConn struct {
 }
 
 func waitForRemoteNodeReadiness(cfg Config, t *tcpLoopbackTransport, nodes []int) error {
-	localSet := nodeSet(filterNodeIDs(cfg.LocalNodeIDs, nodes))
+	readinessNodes := sortedUnique(cfg.OldCommittee)
+	if len(readinessNodes) == 0 {
+		readinessNodes = sortedUnique(nodes)
+	}
+	localSet := nodeSet(filterNodeIDs(cfg.LocalNodeIDs, readinessNodes))
 	if len(localSet) == 0 {
 		return nil
 	}
+	ordered := readinessNodes
+	faults := cfg.FOld
+	if faults <= 0 && cfg.OldFaults > 0 {
+		faults = cfg.OldFaults
+	}
+	required := len(ordered) - faults
+	if required <= 0 {
+		required = 1
+	}
 	deadline := time.Now().Add(3 * cfg.WaitSPBCTimeout)
-	for _, id := range sortedUnique(nodes) {
-		if _, isLocal := localSet[id]; isLocal {
+	ready := make(map[int]struct{}, len(localSet))
+	for id := range localSet {
+		ready[id] = struct{}{}
+	}
+	configuredRemote := false
+	for _, id := range ordered {
+		if _, ok := ready[id]; ok {
 			continue
 		}
-		for {
+		t.mu.RLock()
+		addr := t.addrByID[id]
+		t.mu.RUnlock()
+		if strings.TrimSpace(addr) != "" {
+			configuredRemote = true
+			break
+		}
+	}
+	if !configuredRemote {
+		return nil
+	}
+	var lastErr error
+	for {
+		for _, id := range ordered {
+			if _, ok := ready[id]; ok {
+				continue
+			}
 			t.mu.RLock()
 			addr := t.addrByID[id]
 			t.mu.RUnlock()
 			if strings.TrimSpace(addr) == "" {
-				break
+				continue
 			}
 			conn, err := net.DialTimeout("tcp", addr, t.dialTO)
 			if err == nil {
 				_ = conn.Close()
-				break
+				ready[id] = struct{}{}
+				continue
 			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("remote node %d listener not ready at %s: %w", id, addr, err)
-			}
-			time.Sleep(10 * time.Millisecond)
+			lastErr = fmt.Errorf("remote node %d listener not ready at %s: %w", id, addr, err)
 		}
+		if len(ready) >= required {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("remote readiness timeout: ready=%d/%d: %w", len(ready), required, lastErr)
+			}
+			return fmt.Errorf("remote readiness timeout: ready=%d/%d", len(ready), required)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return nil
 }
 
 func NewTCPLoopbackTransportWithOptions(
@@ -153,6 +219,9 @@ func NewTCPLoopbackTransportWithOptions(
 	listenerReadyDir := strings.TrimSpace(os.Getenv("RLADKR_LISTENER_READY_DIR"))
 	listenerReadyNodeCount, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_LISTENER_READY_NODE_COUNT")))
 	listenerReadyTimeout := durationEnvMs("RLADKR_LISTENER_READY_TIMEOUT_MS", 120000*time.Millisecond)
+	// The shared marker barrier counts old committee nodes. Receiver
+	// listeners are colocated with their old node and do not add quorum votes.
+	oldNodeSet := nodeSet(cfg.OldCommittee)
 	for _, id := range ordered {
 		if _, isLocal := localSet[id]; isLocal {
 			addr := fmt.Sprintf("%s:0", bindHost)
@@ -193,9 +262,16 @@ func NewTCPLoopbackTransportWithOptions(
 			t.inbox[id] = make(chan Message, buffer)
 			t.wg.Add(1)
 			go t.acceptLoop(id, ln)
-			if err := writeListenerReadyMarker(listenerReadyDir, id, t.addrByID[id]); err != nil {
-				_ = t.Close()
-				return nil, err
+			if len(cfg.OldCommittee) == 0 {
+				if err := writeListenerReadyMarker(listenerReadyDir, id, t.addrByID[id]); err != nil {
+					_ = t.Close()
+					return nil, err
+				}
+			} else if _, isOld := oldNodeSet[id]; isOld {
+				if err := writeListenerReadyMarker(listenerReadyDir, id, t.addrByID[id]); err != nil {
+					_ = t.Close()
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -212,6 +288,9 @@ func NewTCPLoopbackTransportWithOptions(
 		return nil, err
 	}
 	if err := waitForRemoteNodeReadiness(Config{
+		OldCommittee:      append([]int(nil), cfg.OldCommittee...),
+		FOld:              cfg.FOld,
+		OldFaults:         cfg.OldFaults,
 		LocalNodeIDs:      append([]int(nil), localNodes...),
 		WaitSPBCTimeout:   10 * time.Second,
 		SendRetryMax:      3,
@@ -276,7 +355,7 @@ func (t *tcpLoopbackTransport) Send(msg Message) error {
 }
 
 func (t *tcpLoopbackTransport) sendRemoteShortConn(addr string, msg Message, frame []byte, wireBytes int) error {
-	conn, err := arlDialWithOptionalDelay(msg.From, msg.To, "tcp", addr, t.dialTO)
+	conn, err := arlDialWithBandwidth("tcp", addr, t.dialTO)
 	if err != nil {
 		return err
 	}
@@ -309,7 +388,7 @@ func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, frame 
 		t.poolMu.Unlock()
 	}
 
-	conn, err := arlDialWithOptionalDelay(msg.From, msg.To, "tcp", addr, t.dialTO)
+	conn, err := arlDialWithBandwidth("tcp", addr, t.dialTO)
 	if err != nil {
 		return err
 	}

@@ -74,3 +74,22 @@ func TestBenchmarkEpochBarrierWaitsForAllAndRejectsMismatch(t *testing.T) {
 		t.Fatal("mismatched result was not rejected")
 	}
 }
+
+func TestBenchmarkEpochBarrierAcceptsQuorum(t *testing.T) {
+	dir := t.TempDir()
+	committee := []int{0, 1, 2}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	errs := make(chan error, 2)
+	for _, id := range []int{0, 2} {
+		id := id
+		go func() {
+			errs <- waitForBenchmarkEpochQuorum(ctx, dir, "sid", 1, 1, committee, []int{id}, "same", 2)
+		}()
+	}
+	for range []int{0, 2} {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

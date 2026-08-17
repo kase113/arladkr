@@ -186,3 +186,54 @@ func TestWaitForRemoteNodeReadiness_SucceedsOnceRemoteListenerAppears(t *testing
 		t.Fatalf("waitForRemoteNodeReadiness failed: %v", err)
 	}
 }
+
+func TestWaitForRemoteNodeReadiness_UsesAnyQuorum(t *testing.T) {
+	listeners := make([]net.Listener, 0, 2)
+	addresses := make(map[int]string, 2)
+	for _, id := range []int{1, 3} {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, ln)
+		addresses[id] = ln.Addr().String()
+		go func(listener net.Listener) {
+			for {
+				conn, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
+				_ = conn.Close()
+			}
+		}(ln)
+	}
+	defer func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+	}()
+
+	cfg := Config{FOld: 1, OldFaults: 1, LocalNodeIDs: []int{0}, WaitSPBCTimeout: 100 * time.Millisecond}
+	transport := &tcpLoopbackTransport{
+		addrByID: make(map[int]string), dialTO: 20 * time.Millisecond,
+	}
+	for id, addr := range addresses {
+		transport.addrByID[id] = addr
+	}
+	if err := waitForRemoteNodeReadiness(cfg, transport, []int{0, 1, 2, 3}); err != nil {
+		t.Fatalf("quorum readiness failed: %v", err)
+	}
+}
+
+func TestWaitForListenerReadyMarkersCountsAnyNodeIDs(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeListenerReadyMarker(dir, 2, "127.0.0.1:20002"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeListenerReadyMarker(dir, 5, "127.0.0.1:20005"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForListenerReadyMarkers(dir, 2, time.Second); err != nil {
+		t.Fatalf("listener marker quorum failed: %v", err)
+	}
+}

@@ -80,7 +80,6 @@ for id in $(seq 0 $((N - 1))); do
   "${epoch_barrier_env[@]}" \
   RLADKR_RANDOM_SEED="${RLADKR_RANDOM_SEED:-practical-adkr-multiprocess-n${N}}" \
   PRACTICAL_STRICT_NETWORK=1 \
-  PRACTICAL_DELAY_ENABLE="${PRACTICAL_DELAY_ENABLE:-0}" \
   "${BIN}" \
     -n "${N}" -f "${F}" -kappa "${KAPPA}" -runs "${PRACTICAL_MP_RUNS:-1}" \
     -timeout "${PRACTICAL_MP_TIMEOUT:-120s}" \

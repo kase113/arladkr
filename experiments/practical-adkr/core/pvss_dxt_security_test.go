@@ -111,6 +111,25 @@ func TestPartialVerifyResultSignatureBindsDigestAndLanes(t *testing.T) {
 	}
 }
 
+func TestPartialVerifyNodeAddrMapUsesDedicatedNamespace(t *testing.T) {
+	cfg := Config{ProtocolNodeAddrs: "10=127.0.0.1:19000,11=127.0.0.1:19001"}
+	got, err := partialVerifyNodeAddrMap(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[10] != "127.0.0.1:31000" || got[11] != "127.0.0.1:31001" {
+		t.Fatalf("derived partial addresses=%v", got)
+	}
+	cfg.PartialVerifyNodeAddrs = "10=127.0.0.1:32000"
+	override, err := partialVerifyNodeAddrMap(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if override[10] != "127.0.0.1:32000" {
+		t.Fatalf("dedicated partial address override=%v", override)
+	}
+}
+
 func TestEncryptedDLogProofBindsPedersenRandomness(t *testing.T) {
 	curve := elliptic.P256()
 	order := curve.Params().N

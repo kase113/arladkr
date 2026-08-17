@@ -12,6 +12,7 @@ const (
 	KappaProfilePracticalOriginal KappaProfile = "practical-original"
 	KappaProfileMatchedSingle     KappaProfile = "matched-single-epoch"
 	KappaProfileMatchedLifetime   KappaProfile = "matched-lifetime"
+	KappaProfileHighAssurance     KappaProfile = "high-assurance"
 	KappaProfileDeterministic     KappaProfile = "deterministic-inclusion"
 	KappaProfileExplicit          KappaProfile = "explicit"
 )
@@ -22,6 +23,11 @@ type KappaPolicy struct {
 	MatchedSecurityBits   float64
 	LifetimeEpochs        uint64
 }
+
+const (
+	defaultHighAssuranceBits   = 64
+	defaultHighAssuranceEpochs = 525600
+)
 
 type KappaSelection struct {
 	Kappa                     int
@@ -67,10 +73,10 @@ func resolvePracticalKappa(n, f, explicit int, policy KappaPolicy) (KappaSelecti
 	}
 	population := 2*f + 1
 	epochs := policy.LifetimeEpochs
-	if epochs == 0 {
-		epochs = 1
-	}
 	if explicit > 0 {
+		if epochs == 0 {
+			epochs = 1
+		}
 		if explicit > population {
 			return KappaSelection{}, fmt.Errorf("explicit kappa=%d exceeds 2f+1=%d", explicit, population)
 		}
@@ -83,6 +89,13 @@ func resolvePracticalKappa(n, f, explicit int, policy KappaPolicy) (KappaSelecti
 	profile, err := normalizeKappaProfile(policy.Profile)
 	if err != nil {
 		return KappaSelection{}, err
+	}
+	if epochs == 0 {
+		if profile == KappaProfileHighAssurance {
+			epochs = defaultHighAssuranceEpochs
+		} else {
+			epochs = 1
+		}
 	}
 	targetLog2 := 0.0
 	switch profile {
@@ -113,6 +126,15 @@ func resolvePracticalKappa(n, f, explicit int, policy KappaPolicy) (KappaSelecti
 			return KappaSelection{}, fmt.Errorf("invalid matched security bits")
 		}
 		targetLog2 = -bits - math.Log2(float64(epochs))
+	case KappaProfileHighAssurance:
+		bits := policy.MatchedSecurityBits
+		if bits == 0 {
+			bits = defaultHighAssuranceBits
+		}
+		if bits <= 0 || math.IsNaN(bits) || math.IsInf(bits, 0) {
+			return KappaSelection{}, fmt.Errorf("invalid high-assurance security bits")
+		}
+		targetLog2 = -bits - math.Log2(float64(epochs))
 	case KappaProfileDeterministic:
 		return practicalKappaSelection(f, f+1, profile, epochs, math.Inf(-1)), nil
 	default:
@@ -135,6 +157,8 @@ func normalizeKappaProfile(profile KappaProfile) (KappaProfile, error) {
 		return KappaProfileMatchedSingle, nil
 	case "matched-lifetime", "lifetime":
 		return KappaProfileMatchedLifetime, nil
+	case "high-assurance", "highassurance":
+		return KappaProfileHighAssurance, nil
 	case "deterministic-inclusion", "deterministic":
 		return KappaProfileDeterministic, nil
 	default:

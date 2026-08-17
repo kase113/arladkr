@@ -4,10 +4,231 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
 const cvCertifiedCandidateDigestV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/certified-candidate-digest"
+
+const (
+	cvCertifiedCandidateACKV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/certified-candidate-ack"
+	cvCandidateFanoutMaxAttemptsV2  = 4
+	cvCandidateFanoutMaxParallelV2  = 4
+	cvCandidateFanoutRetryBaseV2    = 100 * time.Millisecond
+)
+
+type cvCandidateFanoutStateV2 struct {
+	mu     sync.Mutex
+	acked  map[int]struct{}
+	notify chan struct{}
+	refs   int
+}
+
+func (s *cvCandidateFanoutStateV2) markACK(peer int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.acked == nil {
+		s.acked = make(map[int]struct{})
+	}
+	s.acked[peer] = struct{}{}
+	notify := s.notify
+	s.mu.Unlock()
+	if notify != nil {
+		select {
+		case notify <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *cvCandidateFanoutStateV2) isACKed(peer int) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	_, ok := s.acked[peer]
+	s.mu.Unlock()
+	return ok
+}
+
+func cvCertifiedCandidateDigestV2(wire []byte) string {
+	return string(hashBytes([]byte(cvCertifiedCandidateDigestV2Domain), wire))
+}
+
+func cvEncodeCertifiedCandidateACKV2(digest string) ([]byte, error) {
+	if len(digest) != 32 {
+		return nil, fmt.Errorf("invalid CV V2 certified candidate ACK digest")
+	}
+	wire := make([]byte, len(cvCertifiedCandidateACKV2Domain)+len(digest))
+	copy(wire, []byte(cvCertifiedCandidateACKV2Domain))
+	copy(wire[len(cvCertifiedCandidateACKV2Domain):], []byte(digest))
+	return wire, nil
+}
+
+func cvDecodeCertifiedCandidateACKV2(wire []byte) (string, error) {
+	domain := []byte(cvCertifiedCandidateACKV2Domain)
+	if len(wire) != len(domain)+32 || !bytes.Equal(wire[:len(domain)], domain) {
+		return "", fmt.Errorf("invalid CV V2 certified candidate ACK")
+	}
+	return string(wire[len(domain):]), nil
+}
+
+func (s *cvAPDBNetworkServiceV2) candidateFanoutStateV2(digest string) *cvCandidateFanoutStateV2 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.candidateFanoutV2 == nil {
+		s.candidateFanoutV2 = make(map[string]*cvCandidateFanoutStateV2)
+	}
+	state := s.candidateFanoutV2[digest]
+	if state == nil {
+		state = &cvCandidateFanoutStateV2{acked: make(map[int]struct{}), notify: make(chan struct{}, 1)}
+		s.candidateFanoutV2[digest] = state
+	}
+	state.refs++
+	return state
+}
+
+func (s *cvAPDBNetworkServiceV2) releaseCandidateFanoutStateV2(digest string, state *cvCandidateFanoutStateV2) {
+	if s == nil || state == nil {
+		return
+	}
+	s.mu.Lock()
+	if current := s.candidateFanoutV2[digest]; current == state {
+		state.refs--
+		if state.refs <= 0 {
+			delete(s.candidateFanoutV2, digest)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *cvAPDBNetworkServiceV2) markCertifiedCandidateACKV2(digest string, peer int) {
+	if s == nil || len(digest) != 32 {
+		return
+	}
+	s.mu.Lock()
+	state := s.candidateFanoutV2[digest]
+	s.mu.Unlock()
+	if state != nil {
+		state.markACK(peer)
+	}
+}
+
+func (s *cvAPDBNetworkServiceV2) cachedCertifiedCandidateWireV2(digest string) []byte {
+	if s == nil || digest == "" {
+		return nil
+	}
+	s.mu.Lock()
+	wire := append([]byte(nil), s.certifiedCandidatesV2[digest]...)
+	s.mu.Unlock()
+	return wire
+}
+
+func (s *cvAPDBNetworkServiceV2) waitCertifiedCandidateACKV2(
+	ctx context.Context, state *cvCandidateFanoutStateV2, peer int, delay time.Duration,
+) bool {
+	if state.isACKed(peer) {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.ctx.Done():
+			return false
+		case <-state.notify:
+			if state.isACKed(peer) {
+				return true
+			}
+		case <-timer.C:
+			return state.isACKed(peer)
+		}
+	}
+}
+
+func (s *cvAPDBNetworkServiceV2) sendCertifiedCandidatePeerV2(
+	ctx context.Context, state *cvCandidateFanoutStateV2, peer int, digest string, wire []byte,
+) error {
+	for attempt := 0; attempt < cvCandidateFanoutMaxAttemptsV2; attempt++ {
+		if state.isACKed(peer) {
+			return nil
+		}
+		delay := cvCandidateFanoutRetryBaseV2 << attempt
+		if err := s.send(peer, cvTagCertifiedCandidateV2, wire); err == nil {
+			if s.waitCertifiedCandidateACKV2(ctx, state, peer, delay) {
+				return nil
+			}
+		} else if ctx.Err() != nil || s.ctx.Err() != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return s.ctx.Err()
+		} else if s.waitCertifiedCandidateACKV2(ctx, state, peer, delay) {
+			return nil
+		}
+	}
+	if state.isACKed(peer) {
+		return nil
+	}
+	return fmt.Errorf("CV V2 candidate ACK timeout from peer %d for %x", peer, []byte(digest))
+}
+
+// fanoutCandidateV2 sends one canonical candidate to each peer with bounded
+// parallelism. A peer is retried only until it ACKs or the bounded attempt
+// budget is exhausted; successful peers are never included in later retries.
+func (s *cvAPDBNetworkServiceV2) fanoutCandidateV2(
+	ctx context.Context, digest string, wire []byte, excluded int,
+) error {
+	if s == nil || ctx == nil || len(digest) != 32 || len(wire) == 0 {
+		return fmt.Errorf("invalid CV V2 candidate fanout")
+	}
+	peers := make([]int, 0, len(s.cfg.OldRoster))
+	for _, member := range s.cfg.OldRoster {
+		if member != s.cfg.LocalNode && member != excluded {
+			peers = append(peers, member)
+		}
+	}
+	if len(peers) == 0 {
+		return nil
+	}
+	state := s.candidateFanoutStateV2(digest)
+	defer s.releaseCandidateFanoutStateV2(digest, state)
+	parallel := cvCandidateFanoutMaxParallelV2
+	if parallel > len(peers) {
+		parallel = len(peers)
+	}
+	sem := make(chan struct{}, parallel)
+	errs := make(chan error, len(peers))
+	var workers sync.WaitGroup
+	for _, peer := range peers {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+		peer := peer
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			defer func() { <-sem }()
+			errs <- s.sendCertifiedCandidatePeerV2(ctx, state, peer, digest, wire)
+		}()
+	}
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (s *cvAPDBNetworkServiceV2) agreementPublicContextV2() (cvAgreementPublicContextV2, error) {
 	if s == nil {
@@ -40,7 +261,7 @@ func (s *cvAPDBNetworkServiceV2) agreementPublicContextV2() (cvAgreementPublicCo
 }
 
 func (s *cvAPDBNetworkServiceV2) acceptCertifiedCandidateV2(wire []byte) (*cvAgreementObjectV2, bool, error) {
-	digest := string(hashBytes([]byte(cvCertifiedCandidateDigestV2Domain), wire))
+	digest := cvCertifiedCandidateDigestV2(wire)
 	s.mu.Lock()
 	cached := s.certifiedCandidatesV2[digest]
 	s.mu.Unlock()
@@ -103,7 +324,7 @@ func (s *cvAPDBNetworkServiceV2) acceptVerifiedCertifiedCandidateV2(
 	if object == nil || len(canonical) == 0 {
 		return nil, false, fmt.Errorf("invalid verified CV V2 certified candidate")
 	}
-	digest := string(hashBytes([]byte(cvCertifiedCandidateDigestV2Domain), canonical))
+	digest := cvCertifiedCandidateDigestV2(canonical)
 	return s.rememberVerifiedCertifiedCandidateV2(object, digest, canonical)
 }
 
@@ -128,24 +349,19 @@ func (s *cvAPDBNetworkServiceV2) PublishCertifiedCandidateV2(
 	if _, _, err := s.acceptVerifiedCertifiedCandidateV2(candidate, wire); err != nil {
 		return err
 	}
-	sendCandidate := func() {
-		for _, member := range s.cfg.OldRoster {
-			if member != s.cfg.LocalNode {
-				_ = s.send(member, cvTagCertifiedCandidateV2, wire)
-			}
-		}
+	digest := cvCertifiedCandidateDigestV2(wire)
+	if cached := s.cachedCertifiedCandidateWireV2(digest); len(cached) != 0 {
+		wire = cached
 	}
-	sendCandidate()
-	retry := time.NewTicker(100 * time.Millisecond)
-	defer retry.Stop()
+	if err := s.fanoutCandidateV2(ctx, digest, wire, -1); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.ctx.Done():
 			return s.ctx.Err()
-		case <-retry.C:
-			sendCandidate()
 		}
 	}
 }
@@ -176,13 +392,22 @@ func (s *cvAPDBNetworkServiceV2) CertifiedCandidateCountV2() int {
 }
 
 func (s *cvAPDBNetworkServiceV2) handleCertifiedCandidateV2(msg Message) {
+	digest := cvCertifiedCandidateDigestV2(msg.Body)
 	_, accepted, err := s.acceptCertifiedCandidateV2(msg.Body)
-	if err != nil || !accepted {
+	if err != nil {
 		return
 	}
-	for _, member := range s.cfg.OldRoster {
-		if member != s.cfg.LocalNode && member != msg.From {
-			_ = s.send(member, cvTagCertifiedCandidateV2, msg.Body)
-		}
+	if ack, encodeErr := cvEncodeCertifiedCandidateACKV2(digest); encodeErr == nil {
+		_ = s.send(msg.From, cvTagCertifiedCandidateACKV2, ack)
 	}
+	if !accepted {
+		return
+	}
+	relayWire := s.cachedCertifiedCandidateWireV2(digest)
+	if len(relayWire) == 0 {
+		relayWire = append([]byte(nil), msg.Body...)
+	}
+	go func() {
+		_ = s.fanoutCandidateV2(s.ctx, digest, relayWire, msg.From)
+	}()
 }

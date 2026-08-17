@@ -197,6 +197,7 @@ type cvAPDBNetworkServiceV2 struct {
 	localComponentRefV2    []byte
 	componentRefUpdatesV2  chan struct{}
 	certifiedCandidatesV2  map[string][]byte
+	candidateFanoutV2      map[string]*cvCandidateFanoutStateV2
 	certifiedCandidateChV2 chan *cvAgreementObjectV2
 	experimentMetrics      cvServiceExperimentMetricsV2
 	done                   chan struct{}
@@ -289,6 +290,7 @@ func newCVAPDBNetworkServiceV2(
 		rejectedComponentsV2:   make(map[int]struct{}),
 		componentRefUpdatesV2:  make(chan struct{}, 1),
 		certifiedCandidatesV2:  make(map[string][]byte, cfg.Params.proposerSampleSize),
+		candidateFanoutV2:      make(map[string]*cvCandidateFanoutStateV2),
 		certifiedCandidateChV2: make(chan *cvAgreementObjectV2, cfg.Params.proposerSampleSize),
 		experimentMetrics: cvServiceExperimentMetricsV2{
 			tagSentBytes: make(map[string]uint64), tagRecvBytes: make(map[string]uint64),
@@ -1387,6 +1389,11 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 		s.handleComponentRefV2(msg)
 	case cvTagCertifiedCandidateV2:
 		s.handleCertifiedCandidateV2(msg)
+	case cvTagCertifiedCandidateACKV2:
+		digest, err := cvDecodeCertifiedCandidateACKV2(msg.Body)
+		if err == nil {
+			s.markCertifiedCandidateACKV2(digest, msg.From)
+		}
 	}
 }
 

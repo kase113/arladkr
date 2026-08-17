@@ -405,7 +405,7 @@ func sendThresholdCoinShare(ctx context.Context, cfg Config, from, to int, addr 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		conn, dialErr := dialWithOptionalDelay(from, to, "tcp", addr, timeout)
+		conn, dialErr := dialWithBandwidth("tcp", addr, timeout)
 		if dialErr == nil {
 			_ = conn.SetDeadline(time.Now().Add(timeout))
 			recordSentBytes(len(raw))

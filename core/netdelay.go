@@ -2,7 +2,6 @@ package core
 
 import (
 	"bufio"
-	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -13,10 +12,7 @@ import (
 	"time"
 )
 
-type arlDelayConfig struct {
-	enabled              bool
-	nodeCount            int
-	matrix               [][]int
+type arlBandwidthConfig struct {
 	bandwidthBytesPerSec float64
 	bandwidthScope       string
 	bandwidthStateFile   string
@@ -24,14 +20,14 @@ type arlDelayConfig struct {
 }
 
 var (
-	arlDelayOnce sync.Once
-	arlDelayCfg  arlDelayConfig
-	arlBandwidth arlBandwidthLimiter
-	arlBwSocket  arlBandwidthSocketClient
+	arlBandwidthOnce sync.Once
+	arlBandwidthCfg  arlBandwidthConfig
+	arlBandwidth     arlBandwidthLimiter
+	arlBwSocket      arlBandwidthSocketClient
 )
 
-func loadArlDelayConfigFromEnv() arlDelayConfig {
-	cfg := arlDelayConfig{
+func loadArlBandwidthConfigFromEnv() arlBandwidthConfig {
+	cfg := arlBandwidthConfig{
 		bandwidthBytesPerSec: arlBandwidthBytesPerSecondFromEnv(),
 	}
 	if cfg.bandwidthBytesPerSec > 0 {
@@ -39,33 +35,6 @@ func loadArlDelayConfigFromEnv() arlDelayConfig {
 		cfg.bandwidthStateFile = strings.TrimSpace(os.Getenv("RLADKR_BANDWIDTH_STATE_FILE"))
 		cfg.bandwidthSocket = strings.TrimSpace(os.Getenv("RLADKR_BANDWIDTH_SOCKET"))
 	}
-	if strings.TrimSpace(os.Getenv("RLADKR_DELAY_ENABLE")) != "1" {
-		return cfg
-	}
-	path := strings.TrimSpace(os.Getenv("RLADKR_DELAY_MATRIX_FILE"))
-	if path == "" {
-		return cfg
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return cfg
-	}
-	var matrix [][]int
-	if err := json.Unmarshal(raw, &matrix); err != nil {
-		return cfg
-	}
-	nodeCount := len(matrix)
-	if env := strings.TrimSpace(os.Getenv("RLADKR_DELAY_NODE_COUNT")); env != "" {
-		if n, err := strconv.Atoi(env); err == nil && n > 0 {
-			nodeCount = n
-		}
-	}
-	if nodeCount <= 0 || len(matrix) == 0 {
-		return cfg
-	}
-	cfg.enabled = true
-	cfg.nodeCount = nodeCount
-	cfg.matrix = matrix
 	return cfg
 }
 
@@ -92,55 +61,18 @@ func arlBandwidthScopeFromEnv(name string) string {
 	}
 }
 
-func arlDelayConfigValue() arlDelayConfig {
-	arlDelayOnce.Do(func() {
-		arlDelayCfg = loadArlDelayConfigFromEnv()
+func arlBandwidthConfigValue() arlBandwidthConfig {
+	arlBandwidthOnce.Do(func() {
+		arlBandwidthCfg = loadArlBandwidthConfigFromEnv()
 	})
-	return arlDelayCfg
+	return arlBandwidthCfg
 }
 
-func arlDelaySlot(id, nodeCount int) int {
-	if nodeCount <= 0 {
-		return id
-	}
-	if id < 0 {
-		return id
-	}
-	return id % nodeCount
-}
-
-func arlDelayDuration(fromID, toID int) time.Duration {
-	cfg := arlDelayConfigValue()
-	if !cfg.enabled || cfg.nodeCount <= 0 {
-		return 0
-	}
-	src := arlDelaySlot(fromID, cfg.nodeCount)
-	dst := arlDelaySlot(toID, cfg.nodeCount)
-	if src < 0 || dst < 0 || src >= len(cfg.matrix) || dst >= len(cfg.matrix[src]) {
-		return 0
-	}
-	delayMs := cfg.matrix[src][dst]
-	if delayMs <= 0 {
-		return 0
-	}
-	return time.Duration(delayMs) * time.Millisecond
-}
-
-func arlDelayBeforeSend(fromID, toID int) {
-	if delay := arlDelayDuration(fromID, toID); delay > 0 {
-		time.Sleep(delay)
-	}
-}
-
-type arlDelayedWriteConn struct {
+type arlBandwidthWriteConn struct {
 	net.Conn
-	delay time.Duration
 }
 
-func (c *arlDelayedWriteConn) Write(p []byte) (int, error) {
-	if c.delay > 0 {
-		time.Sleep(c.delay)
-	}
+func (c *arlBandwidthWriteConn) Write(p []byte) (int, error) {
 	arlThrottleBandwidth(len(p))
 	return c.Conn.Write(p)
 }
@@ -154,7 +86,7 @@ func arlThrottleBandwidth(n int) {
 	if n <= 0 {
 		return
 	}
-	cfg := arlDelayConfigValue()
+	cfg := arlBandwidthConfigValue()
 	bytesPerSec := cfg.bandwidthBytesPerSec
 	if bytesPerSec <= 0 {
 		return
@@ -287,48 +219,13 @@ func arlThrottleSharedBandwidth(n int, bytesPerSec float64, stateFile string) {
 	}
 }
 
-func arlDialWithOptionalDelay(fromID, toID int, network, addr string, timeout time.Duration) (net.Conn, error) {
+func arlDialWithBandwidth(network, addr string, timeout time.Duration) (net.Conn, error) {
 	conn, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
 		return nil, err
 	}
-	delay := arlDelayDuration(fromID, toID)
-	if delay <= 0 && arlDelayConfigValue().bandwidthBytesPerSec <= 0 {
+	if arlBandwidthConfigValue().bandwidthBytesPerSec <= 0 {
 		return conn, nil
 	}
-	return &arlDelayedWriteConn{Conn: conn, delay: delay}, nil
-}
-
-// arlDialBandwidthOnly dials a connection that models bandwidth throttling but
-// NOT propagation delay. It is used by the MVBA transport's pipeline-delay mode:
-// the one-way propagation delay is applied by the caller with arlDelayBeforeSend
-// BEFORE acquiring the per-peer connection lock, so concurrent sends no longer
-// serialize behind each other's sleep (see mvba_tcp.go).
-func arlDialBandwidthOnly(network, addr string, timeout time.Duration) (net.Conn, error) {
-	conn, err := net.DialTimeout(network, addr, timeout)
-	if err != nil {
-		return nil, err
-	}
-	if arlDelayConfigValue().bandwidthBytesPerSec <= 0 {
-		return conn, nil
-	}
-	return &arlDelayedWriteConn{Conn: conn, delay: 0}, nil
-}
-
-// arlMVBALegacyDelay reports whether the MVBA transport should use the legacy
-// delay model (time.Sleep inside Write, executed while holding the pooled
-// connection lock). Default is the pipeline model; set RLADKR_MVBA_LEGACY_DELAY=1
-// to restore the legacy behavior for A/B comparison.
-func arlMVBALegacyDelay() bool {
-	return strings.TrimSpace(os.Getenv("RLADKR_MVBA_LEGACY_DELAY")) == "1"
-}
-
-// arlMVBADial dials for the MVBA transport, honoring the delay model in effect.
-// Legacy mode embeds the propagation delay in Write; pipeline mode dials a
-// bandwidth-only connection (delay is applied out-of-lock by the caller).
-func arlMVBADial(fromID, toID int, network, addr string, timeout time.Duration) (net.Conn, error) {
-	if arlMVBALegacyDelay() {
-		return arlDialWithOptionalDelay(fromID, toID, network, addr, timeout)
-	}
-	return arlDialBandwidthOnly(network, addr, timeout)
+	return &arlBandwidthWriteConn{Conn: conn}, nil
 }

@@ -2,7 +2,6 @@ package core
 
 import (
 	"bufio"
-	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -12,10 +11,7 @@ import (
 	"time"
 )
 
-type practicalDelayConfig struct {
-	enabled              bool
-	nodeCount            int
-	matrix               [][]int
+type practicalBandwidthConfig struct {
 	bandwidthBytesPerSec float64
 	bandwidthScope       string
 	bandwidthStateFile   string
@@ -23,14 +19,14 @@ type practicalDelayConfig struct {
 }
 
 var (
-	delayOnce sync.Once
-	delayCfg  practicalDelayConfig
-	bandwidth practicalBandwidthLimiter
-	bwSocket  practicalBandwidthSocketClient
+	bandwidthConfigOnce sync.Once
+	bandwidthConfig     practicalBandwidthConfig
+	bandwidth           practicalBandwidthLimiter
+	bwSocket            practicalBandwidthSocketClient
 )
 
-func loadDelayConfigFromEnv() practicalDelayConfig {
-	cfg := practicalDelayConfig{
+func loadBandwidthConfigFromEnv() practicalBandwidthConfig {
+	cfg := practicalBandwidthConfig{
 		bandwidthBytesPerSec: bandwidthBytesPerSecondFromEnv(),
 	}
 	if cfg.bandwidthBytesPerSec > 0 {
@@ -38,33 +34,6 @@ func loadDelayConfigFromEnv() practicalDelayConfig {
 		cfg.bandwidthStateFile = stringsTrim(os.Getenv("PRACTICAL_BANDWIDTH_STATE_FILE"))
 		cfg.bandwidthSocket = stringsTrim(os.Getenv("PRACTICAL_BANDWIDTH_SOCKET"))
 	}
-	if stringsTrim(os.Getenv("PRACTICAL_DELAY_ENABLE")) != "1" {
-		return cfg
-	}
-	path := stringsTrim(os.Getenv("PRACTICAL_DELAY_MATRIX_FILE"))
-	if path == "" {
-		return cfg
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return cfg
-	}
-	var matrix [][]int
-	if err := json.Unmarshal(raw, &matrix); err != nil {
-		return cfg
-	}
-	nodeCount := len(matrix)
-	if env := stringsTrim(os.Getenv("PRACTICAL_DELAY_NODE_COUNT")); env != "" {
-		if n, err := strconv.Atoi(env); err == nil && n > 0 {
-			nodeCount = n
-		}
-	}
-	if nodeCount <= 0 || len(matrix) == 0 {
-		return cfg
-	}
-	cfg.enabled = true
-	cfg.nodeCount = nodeCount
-	cfg.matrix = matrix
 	return cfg
 }
 
@@ -91,49 +60,18 @@ func bandwidthScopeFromEnv(name string) string {
 	}
 }
 
-func delayConfig() practicalDelayConfig {
-	delayOnce.Do(func() {
-		delayCfg = loadDelayConfigFromEnv()
+func bandwidthConfigValue() practicalBandwidthConfig {
+	bandwidthConfigOnce.Do(func() {
+		bandwidthConfig = loadBandwidthConfigFromEnv()
 	})
-	return delayCfg
+	return bandwidthConfig
 }
 
-func normalizedDelaySlot(id, nodeCount int) int {
-	if nodeCount <= 0 {
-		return id
-	}
-	if id < 0 {
-		return id
-	}
-	return id % nodeCount
-}
-
-func delayBeforeSend(fromID, toID int, _ string) {
-	cfg := delayConfig()
-	if !cfg.enabled || cfg.nodeCount <= 0 {
-		return
-	}
-	src := normalizedDelaySlot(fromID, cfg.nodeCount)
-	dst := normalizedDelaySlot(toID, cfg.nodeCount)
-	if src < 0 || dst < 0 || src >= len(cfg.matrix) || dst >= len(cfg.matrix[src]) {
-		return
-	}
-	delayMs := cfg.matrix[src][dst]
-	if delayMs <= 0 {
-		return
-	}
-	time.Sleep(time.Duration(delayMs) * time.Millisecond)
-}
-
-type delayedWriteConn struct {
+type bandwidthWriteConn struct {
 	net.Conn
-	delay time.Duration
 }
 
-func (c *delayedWriteConn) Write(p []byte) (int, error) {
-	if c.delay > 0 {
-		time.Sleep(c.delay)
-	}
+func (c *bandwidthWriteConn) Write(p []byte) (int, error) {
 	throttleBandwidth(len(p))
 	return c.Conn.Write(p)
 }
@@ -147,7 +85,7 @@ func throttleBandwidth(n int) {
 	if n <= 0 {
 		return
 	}
-	cfg := delayConfig()
+	cfg := bandwidthConfigValue()
 	bytesPerSec := cfg.bandwidthBytesPerSec
 	if bytesPerSec <= 0 {
 		return
@@ -280,65 +218,15 @@ func throttleSharedBandwidth(n int, bytesPerSec float64, stateFile string) {
 	}
 }
 
-func delayDuration(fromID, toID int) time.Duration {
-	cfg := delayConfig()
-	if !cfg.enabled || cfg.nodeCount <= 0 {
-		return 0
-	}
-	src := normalizedDelaySlot(fromID, cfg.nodeCount)
-	dst := normalizedDelaySlot(toID, cfg.nodeCount)
-	if src < 0 || dst < 0 || src >= len(cfg.matrix) || dst >= len(cfg.matrix[src]) {
-		return 0
-	}
-	delayMs := cfg.matrix[src][dst]
-	if delayMs <= 0 {
-		return 0
-	}
-	return time.Duration(delayMs) * time.Millisecond
-}
-
-func dialWithOptionalDelay(fromID, toID int, network, addr string, timeout time.Duration) (net.Conn, error) {
+func dialWithBandwidth(network, addr string, timeout time.Duration) (net.Conn, error) {
 	conn, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
 		return nil, err
 	}
-	delay := delayDuration(fromID, toID)
-	if delay <= 0 && delayConfig().bandwidthBytesPerSec <= 0 {
+	if bandwidthConfigValue().bandwidthBytesPerSec <= 0 {
 		return conn, nil
 	}
-	return &delayedWriteConn{Conn: conn, delay: delay}, nil
-}
-
-func dialPlain(network, addr string, timeout time.Duration) (net.Conn, error) {
-	conn, err := net.DialTimeout(network, addr, timeout)
-	if err != nil {
-		return nil, err
-	}
-	if delayConfig().bandwidthBytesPerSec <= 0 {
-		return conn, nil
-	}
-	return &delayedWriteConn{Conn: conn}, nil
-}
-
-// mvbaLegacyDelay reports whether the MVBA transport should use the legacy delay
-// model (time.Sleep inside Write, executed while holding the pooled connection
-// lock). Default is the pipeline model; set PRACTICAL_MVBA_LEGACY_DELAY=1 to
-// restore the legacy behavior for A/B comparison.
-func mvbaLegacyDelay() bool {
-	return stringsTrim(os.Getenv("PRACTICAL_MVBA_LEGACY_DELAY")) == "1"
-}
-
-// mvbaDial dials for the MVBA transport, honoring the delay model in effect.
-// Legacy mode embeds the propagation delay in Write (dialWithOptionalDelay);
-// pipeline mode dials a bandwidth-only connection — the one-way propagation
-// delay is applied by the caller with delayBeforeSend BEFORE acquiring the
-// per-peer connection lock, so concurrent sends no longer serialize behind
-// each other's sleep (see mvba_dumbo_adapter.go).
-func mvbaDial(fromID, toID int, network, addr string, timeout time.Duration) (net.Conn, error) {
-	if mvbaLegacyDelay() {
-		return dialWithOptionalDelay(fromID, toID, network, addr, timeout)
-	}
-	return dialPlain(network, addr, timeout)
+	return &bandwidthWriteConn{Conn: conn}, nil
 }
 
 func stringsTrim(s string) string {
