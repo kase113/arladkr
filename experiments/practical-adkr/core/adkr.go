@@ -493,7 +493,7 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	setCommPhase("mvba_agree")
 	tracef("phase=mvba_begin")
 	mvbaCtx, mvbaCancel := boundedMVBAContext(ctx)
-	mvbaDecision, mvbaBreakdown, mvbaErr := decideByDumboMVBA(mvbaCtx, cfg, old, proposals, apdbCerts, dealerEDPub)
+	mvbaDecision, mvbaBreakdown, mvbaErr := decideByDumboMVBA(mvbaCtx, cfg, old, proposals, apdbCerts, dealerEDPub, coinKeys)
 	mvbaCancel()
 	var decidedSet []int
 	if mvbaDecision != nil {

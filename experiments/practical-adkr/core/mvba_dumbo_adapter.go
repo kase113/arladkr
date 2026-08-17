@@ -3,8 +3,6 @@ package core
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
@@ -142,32 +140,6 @@ func digestSignerMsg(domain string, digest []byte) []byte {
 	out = append(out, 0)
 	out = append(out, digest...)
 	return out
-}
-
-func practicalMVBATBLSBundle(cfg Config, old []int) (*dmvba.TBLSKeyBundle, error) {
-	seed := benchmarkSeed()
-	if seed == "" {
-		if cfg.StrictNetwork {
-			return nil, fmt.Errorf("strict Practical MVBA setup requires RLADKR_RANDOM_SEED")
-		}
-		return dmvba.GenerateTBLSKeyBundle(len(old), cfg.F)
-	}
-	stream := practicalMVBADeterministicStream(seed, cfg.SID, old, cfg.F)
-	return dmvba.GenerateDeterministicTBLSKeyBundle(len(old), cfg.F, stream)
-}
-
-func practicalMVBADeterministicStream(seed, sid string, old []int, f int) cipher.Stream {
-	material, _ := json.Marshal(struct {
-		Domain string `json:"domain"`
-		Seed   string `json:"seed"`
-		SID    string `json:"sid"`
-		Old    []int  `json:"old"`
-		F      int    `json:"f"`
-	}{"practical-adkr:mvba:tbls:v1", seed, sid, append([]int(nil), old...), f})
-	key := sha256.Sum256(append([]byte("key\x00"), material...))
-	iv := sha256.Sum256(append([]byte("iv\x00"), material...))
-	block, _ := aes.NewCipher(key[:])
-	return cipher.NewCTR(block, iv[:aes.BlockSize])
 }
 
 type mvbaTCPNet struct {
@@ -880,6 +852,7 @@ func decideByDumboMVBA(
 	proposals map[int][]int,
 	certificates map[int]APDBCertificate,
 	nodePub map[int]ed25519.PublicKey,
+	thresholdKeys *thresholdCoinKeySet,
 ) (*practicalMVBADecision, practicalMVBABreakdown, error) {
 	breakdown := practicalMVBABreakdown{}
 	start := time.Now()
@@ -994,9 +967,13 @@ func decideByDumboMVBA(
 		float64(routeTimeout.Microseconds())/1000.0,
 	)
 
-	tblsBundle, err := practicalMVBATBLSBundle(cfg, old)
-	if err != nil {
-		return nil, breakdown, fmt.Errorf("MVBA threshold signing setup: %w", err)
+	if thresholdKeys == nil || thresholdKeys.threshold != n-cfg.F || len(thresholdKeys.nodeIDs) != n {
+		return nil, breakdown, fmt.Errorf("MVBA requires the configured high-threshold old-committee key set")
+	}
+	for i, nodeID := range old {
+		if thresholdKeys.nodeIDs[i] != nodeID {
+			return nil, breakdown, fmt.Errorf("MVBA threshold key committee mismatch")
+		}
 	}
 
 	outs := make([]dmvba.ProposalValue, n)
@@ -1068,7 +1045,7 @@ func decideByDumboMVBA(
 		go func() {
 			defer wg.Done()
 			traceMVBA("node_begin id=%d payload_bytes=%d", nid, len(inputs[nid].Payload))
-			signer, signerErr := dmvba.NewTBLSSigner(nid, tblsBundle)
+			signer, signerErr := thresholdKeys.signer(old[nid])
 			if signerErr != nil {
 				errs[nid] = fmt.Errorf("MVBA signer %d: %w", old[nid], signerErr)
 				return
