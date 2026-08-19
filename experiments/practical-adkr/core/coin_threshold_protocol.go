@@ -133,7 +133,7 @@ func runThresholdCoin(
 	if err != nil {
 		return nil, nil, err
 	}
-	if keys == nil || keys.threshold != len(old)-cfg.F || len(keys.nodeIDs) != len(old) {
+	if keys == nil || keys.threshold != len(old)-cfg.F || keys.lowThreshold != cfg.F+1 || len(keys.nodeIDs) != len(old) {
 		return nil, nil, fmt.Errorf("threshold coin key/config mismatch")
 	}
 	for i := range old {
@@ -264,18 +264,59 @@ func (keys *thresholdCoinKeySet) signer(nodeID int) (dmvba.ThresholdSigner, erro
 	if !ok {
 		return nil, fmt.Errorf("threshold coin node %d has no private share", nodeID)
 	}
-	return dmvba.NewBLS12381Signer(
+	high := dmvba.NewBLS12381Signer(
 		index,
 		share,
 		keys.groupPublic,
 		keys.sharePublic,
 		len(keys.nodeIDs),
 		keys.threshold,
-	), nil
+	)
+	lowShare, ok := keys.lowPrivateShare[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("threshold coin node %d has no low-threshold private share", nodeID)
+	}
+	low := dmvba.NewBLS12381Signer(
+		index, lowShare, keys.lowGroupPublic, keys.lowSharePublic,
+		len(keys.nodeIDs), keys.lowThreshold,
+	)
+	return &dualThresholdSigner{high: high, low: low}, nil
+}
+
+type dualThresholdSigner struct {
+	high dmvba.ThresholdSigner
+	low  dmvba.ThresholdSigner
+}
+
+func (s *dualThresholdSigner) ID() int { return s.high.ID() }
+
+func (s *dualThresholdSigner) selectSigner(domain string) dmvba.ThresholdSigner {
+	switch strings.ToUpper(strings.TrimSpace(domain)) {
+	case "PD_STORED", "PD_LOCKED":
+		return s.high
+	default:
+		return s.low
+	}
+}
+
+func (s *dualThresholdSigner) Threshold(domain string) int {
+	return s.selectSigner(domain).Threshold(domain)
+}
+func (s *dualThresholdSigner) Sign(domain string, digest []byte) ([]byte, error) {
+	return s.selectSigner(domain).Sign(domain, digest)
+}
+func (s *dualThresholdSigner) Verify(from int, domain string, digest, sig []byte) bool {
+	return s.selectSigner(domain).Verify(from, domain, digest, sig)
+}
+func (s *dualThresholdSigner) Recover(domain string, digest []byte, shares map[int][]byte) ([]byte, error) {
+	return s.selectSigner(domain).Recover(domain, digest, shares)
+}
+func (s *dualThresholdSigner) VerifyRecovered(domain string, digest, sig []byte) bool {
+	return s.selectSigner(domain).VerifyRecovered(domain, digest, sig)
 }
 
 func recoverThresholdCoinLocally(keys *thresholdCoinKeySet, digest []byte) ([]byte, error) {
-	shares := make(map[int][]byte, keys.threshold)
+	shares := make(map[int][]byte, keys.lowThreshold)
 	var combiner dmvba.ThresholdSigner
 	for _, nodeID := range keys.nodeIDs {
 		signer, err := keys.signer(nodeID)
@@ -294,11 +335,11 @@ func recoverThresholdCoinLocally(keys *thresholdCoinKeySet, digest []byte) ([]by
 			return nil, fmt.Errorf("locally generated threshold coin share failed verification")
 		}
 		shares[index] = share
-		if len(shares) == keys.threshold {
+		if len(shares) == keys.lowThreshold {
 			break
 		}
 	}
-	if combiner == nil || len(shares) < keys.threshold {
+	if combiner == nil || len(shares) < keys.lowThreshold {
 		return nil, fmt.Errorf("insufficient local threshold coin shares")
 	}
 	recovered, err := combiner.Recover(thresholdCoinBLSDomain, digest, shares)
@@ -325,8 +366,8 @@ func collectThresholdCoinShares(
 		out <- thresholdCoinOutput{recipient: recipient, err: err}
 		return
 	}
-	shares := make(map[int][]byte, keys.threshold)
-	for len(shares) < keys.threshold {
+	shares := make(map[int][]byte, keys.lowThreshold)
+	for len(shares) < keys.lowThreshold {
 		select {
 		case <-ctx.Done():
 			out <- thresholdCoinOutput{recipient: recipient, err: ctx.Err()}

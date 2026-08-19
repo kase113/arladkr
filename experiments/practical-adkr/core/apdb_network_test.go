@@ -7,10 +7,44 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestNetworkAPDBReadinessAllowsCrossRegionRTT(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var wire apdbNetworkWire
+		if readAPDBNetworkWire(conn, &wire) != nil {
+			return
+		}
+		time.Sleep(350 * time.Millisecond)
+		_ = writeAPDBNetworkWire(conn, apdbNetworkWire{Kind: "ready-ack", SID: wire.SID, Epoch: wire.Epoch, Holder: 1})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cfg := Config{SID: "apdb-cross-region-readiness", Epoch: 1, F: 1}
+	addresses := map[int]string{0: "127.0.0.1:1", 1: listener.Addr().String(), 2: "127.0.0.1:1"}
+	if err := waitNetworkAPDBReady(ctx, cfg, []int{0, 1, 2}, addresses, map[int]net.Listener{0: nil}); err != nil {
+		t.Fatalf("cross-region readiness: %v", err)
+	}
+	<-served
+}
 
 func TestAPDBMerkleProofAllShardsN4(t *testing.T) {
 	testAPDBMerkleProofAllShards(t, 4)

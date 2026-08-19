@@ -17,7 +17,18 @@ import (
 	"time"
 )
 
-const dxtTranscriptWireKind = "transcript"
+const (
+	dxtTranscriptWireKind = "transcript"
+	dxtReadyWireKind      = "dxt-ready-v1"
+	dxtReadyAckWireKind   = "dxt-ready-ack-v1"
+)
+
+type dxtReadyWire struct {
+	Kind   string `json:"kind"`
+	SID    string `json:"sid"`
+	Epoch  uint64 `json:"epoch"`
+	NodeID int    `json:"node_id"`
+}
 
 type dxtTranscriptWire struct {
 	Kind             string         `json:"kind"`
@@ -130,11 +141,15 @@ func (service *dxtNetworkService) serve(localID int, listener net.Listener) {
 			if err := json.NewDecoder(conn).Decode(&raw); err != nil {
 				return
 			}
-			recordRecvBytes(len(raw) + 1)
 			var header struct {
 				Kind string `json:"kind"`
 			}
 			_ = json.Unmarshal(raw, &header)
+			if header.Kind == dxtReadyWireKind {
+				service.handleReady(localID, conn, raw)
+				return
+			}
+			recordRecvBytes(len(raw) + 1)
 			if header.Kind == dxtTranscriptWireKind {
 				service.handleTranscript(localID, conn, raw)
 				return
@@ -142,6 +157,74 @@ func (service *dxtNetworkService) serve(localID int, listener net.Listener) {
 			service.handleLane(localID, raw)
 		}()
 	}
+}
+
+func (service *dxtNetworkService) handleReady(localID int, conn net.Conn, raw []byte) {
+	var request dxtReadyWire
+	if err := json.Unmarshal(raw, &request); err != nil || request.SID != service.cfg.SID ||
+		request.Epoch != service.cfg.Epoch || request.NodeID != localID {
+		return
+	}
+	_ = json.NewEncoder(conn).Encode(dxtReadyWire{
+		Kind: dxtReadyAckWireKind, SID: service.cfg.SID, Epoch: service.cfg.Epoch, NodeID: localID,
+	})
+}
+
+func (service *dxtNetworkService) waitForReceiverQuorum(ctx context.Context, receivers []int, threshold int) error {
+	if threshold <= 0 || threshold > len(receivers) {
+		return fmt.Errorf("invalid DXT receiver readiness threshold: %d/%d", threshold, len(receivers))
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		results := make(chan bool, len(receivers))
+		for _, receiver := range receivers {
+			receiver := receiver
+			if service.listeners[receiver] != nil {
+				results <- true
+				continue
+			}
+			go func() {
+				results <- probeDXTReady(ctx, service.cfg, receiver, service.addresses[receiver])
+			}()
+		}
+		ready := 0
+		for range receivers {
+			if <-results {
+				ready++
+			}
+		}
+		if ready >= threshold {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for DXT receiver readiness: ready=%d need=%d: %w", ready, threshold, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func probeDXTReady(ctx context.Context, cfg Config, receiver int, addr string) bool {
+	if strings.TrimSpace(addr) == "" {
+		return false
+	}
+	dialer := net.Dialer{Timeout: 250 * time.Millisecond}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	request := dxtReadyWire{Kind: dxtReadyWireKind, SID: cfg.SID, Epoch: cfg.Epoch, NodeID: receiver}
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return false
+	}
+	var ack dxtReadyWire
+	if err := json.NewDecoder(conn).Decode(&ack); err != nil {
+		return false
+	}
+	return ack.Kind == dxtReadyAckWireKind && ack.SID == cfg.SID && ack.Epoch == cfg.Epoch && ack.NodeID == receiver
 }
 
 func (service *dxtNetworkService) handleLane(localID int, raw []byte) {

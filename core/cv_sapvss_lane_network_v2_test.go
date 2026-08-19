@@ -3,10 +3,26 @@ package core
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+type cvLaneSendFailureTransport struct {
+	*cvRouterTestTransport
+	failedReceiver int
+}
+
+func (t *cvLaneSendFailureTransport) Send(msg Message) error {
+	if msg.Tag == cvTagLaneOfferV2 && msg.To == t.failedReceiver {
+		t.mu.Lock()
+		t.sent = append(t.sent, Message{From: msg.From, To: msg.To, Tag: msg.Tag, Body: append([]byte(nil), msg.Body...)})
+		t.mu.Unlock()
+		return fmt.Errorf("receiver %d unavailable", msg.To)
+	}
+	return t.cvRouterTestTransport.Send(msg)
+}
 
 func TestCVV2NetworkLeafCompletesWithFNewSilentReceivers(t *testing.T) {
 	if testing.Short() {
@@ -63,7 +79,10 @@ func TestCVV2NetworkLeafCompletesWithFNewSilentReceivers(t *testing.T) {
 	dealer := cfg.OldCommittee[0]
 	silentReceiver := cfg.NewCommittee[len(cfg.NewCommittee)-1]
 	localNodes := sortedUnique(append([]int{dealer}, cfg.NewCommittee...))
-	transport := newCVRouterTestTransport(localNodes, 512)
+	transport := &cvLaneSendFailureTransport{
+		cvRouterTestTransport: newCVRouterTestTransport(localNodes, 512),
+		failedReceiver:        silentReceiver,
+	}
 	router, err := newCVSAPVSSRouterWithReceivers(context.Background(), transport, cfg.SID, cfg.Epoch,
 		cfg.OldCommittee, cfg.NewCommittee, localNodes, 256, auth)
 	if err != nil {

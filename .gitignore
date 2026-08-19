@@ -22,3 +22,17 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# Terraform local state and provider cache
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/

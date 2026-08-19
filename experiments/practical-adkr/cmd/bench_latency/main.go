@@ -258,13 +258,13 @@ func main() {
 		}
 		totalLatencyAllRuns += attemptMs
 		if err != nil {
+			fmt.Printf("PRACTICAL_RUN_ERROR run=%d err=%q\n", i, err)
+			fmt.Fprintf(os.Stderr, "run=%d failed: %v\n", i, err)
 			if perr, ok := err.(*core.PartialResultError); ok && perr != nil && perr.Result != nil {
 				res = perr.Result
 			} else {
-				fmt.Fprintf(os.Stderr, "run=%d failed: %v\n", i, err)
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "run=%d failed: %v\n", i, err)
 		}
 		if res == nil {
 			fmt.Fprintf(os.Stderr, "run=%d failed: %v\n", i, err)

@@ -20,23 +20,30 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-const thresholdCoinSetupVersion = 1
+const thresholdCoinSetupVersion = 2
 
 type thresholdCoinKeySet struct {
-	threshold    int
-	nodeIDs      []int
-	nodeIndex    map[int]int
-	groupPublic  bls12381.G2Affine
-	sharePublic  []bls12381.G2Affine
-	privateShare map[int]fr.Element
+	threshold       int
+	nodeIDs         []int
+	nodeIndex       map[int]int
+	groupPublic     bls12381.G2Affine
+	sharePublic     []bls12381.G2Affine
+	privateShare    map[int]fr.Element
+	lowThreshold    int
+	lowGroupPublic  bls12381.G2Affine
+	lowSharePublic  []bls12381.G2Affine
+	lowPrivateShare map[int]fr.Element
 }
 
 type thresholdCoinPublicArtifact struct {
-	Version      int      `json:"version"`
-	Threshold    int      `json:"threshold"`
-	NodeIDs      []int    `json:"node_ids"`
-	GroupPublic  []byte   `json:"group_public"`
-	SharePublics [][]byte `json:"share_publics"`
+	Version         int      `json:"version"`
+	Threshold       int      `json:"threshold"`
+	NodeIDs         []int    `json:"node_ids"`
+	GroupPublic     []byte   `json:"group_public"`
+	SharePublics    [][]byte `json:"share_publics"`
+	LowThreshold    int      `json:"low_threshold"`
+	LowGroupPublic  []byte   `json:"low_group_public"`
+	LowSharePublics [][]byte `json:"low_share_publics"`
 }
 
 type thresholdCoinPrivateArtifact struct {
@@ -45,6 +52,7 @@ type thresholdCoinPrivateArtifact struct {
 	Index        int    `json:"index"`
 	PublicDigest []byte `json:"public_digest"`
 	Share        []byte `json:"share"`
+	LowShare     []byte `json:"low_share"`
 }
 
 var thresholdCoinKeyCache sync.Map
@@ -148,9 +156,33 @@ func thresholdCoinLocalOldIDs(cfg Config, old []int) []int {
 }
 
 func generateThresholdCoinKeys(old []int, f int) (*thresholdCoinKeySet, error) {
-	threshold := len(old) - f
-	if threshold <= f || threshold > len(old) {
-		return nil, fmt.Errorf("invalid high-threshold coin threshold=%d", threshold)
+	high, err := generateThresholdCoinMaterial(old, len(old)-f)
+	if err != nil {
+		return nil, err
+	}
+	low, err := generateThresholdCoinMaterial(old, f+1)
+	if err != nil {
+		return nil, err
+	}
+	return &thresholdCoinKeySet{
+		threshold: high.threshold, nodeIDs: append([]int(nil), old...), nodeIndex: high.nodeIndex,
+		groupPublic: high.groupPublic, sharePublic: high.sharePublic, privateShare: high.privateShare,
+		lowThreshold: low.threshold, lowGroupPublic: low.groupPublic, lowSharePublic: low.sharePublic,
+		lowPrivateShare: low.privateShare,
+	}, nil
+}
+
+type thresholdCoinMaterial struct {
+	threshold    int
+	nodeIndex    map[int]int
+	groupPublic  bls12381.G2Affine
+	sharePublic  []bls12381.G2Affine
+	privateShare map[int]fr.Element
+}
+
+func generateThresholdCoinMaterial(old []int, threshold int) (*thresholdCoinMaterial, error) {
+	if threshold <= 0 || threshold > len(old) {
+		return nil, fmt.Errorf("invalid threshold coin threshold=%d", threshold)
 	}
 	var coefficients []fr.Element
 	for {
@@ -189,14 +221,7 @@ func generateThresholdCoinKeys(old []int, f int) (*thresholdCoinKeySet, error) {
 	}
 	var groupPublic bls12381.G2Affine
 	groupPublic.ScalarMultiplication(&g2, coefficients[0].BigInt(new(big.Int)))
-	return &thresholdCoinKeySet{
-		threshold:    threshold,
-		nodeIDs:      append([]int(nil), old...),
-		nodeIndex:    index,
-		groupPublic:  groupPublic,
-		sharePublic:  sharePublic,
-		privateShare: private,
-	}, nil
+	return &thresholdCoinMaterial{threshold: threshold, nodeIndex: index, groupPublic: groupPublic, sharePublic: sharePublic, privateShare: private}, nil
 }
 
 func thresholdCoinPublicPath(cacheDir string, old []int, f int) string {
@@ -216,14 +241,20 @@ func thresholdCoinPrivatePath(publicPath string, nodeID int) string {
 
 func writeThresholdCoinArtifacts(publicPath string, keys *thresholdCoinKeySet) error {
 	public := thresholdCoinPublicArtifact{
-		Version:      thresholdCoinSetupVersion,
-		Threshold:    keys.threshold,
-		NodeIDs:      append([]int(nil), keys.nodeIDs...),
-		GroupPublic:  keys.groupPublic.Marshal(),
-		SharePublics: make([][]byte, len(keys.sharePublic)),
+		Version:         thresholdCoinSetupVersion,
+		Threshold:       keys.threshold,
+		NodeIDs:         append([]int(nil), keys.nodeIDs...),
+		GroupPublic:     keys.groupPublic.Marshal(),
+		SharePublics:    make([][]byte, len(keys.sharePublic)),
+		LowThreshold:    keys.lowThreshold,
+		LowGroupPublic:  keys.lowGroupPublic.Marshal(),
+		LowSharePublics: make([][]byte, len(keys.lowSharePublic)),
 	}
 	for i := range keys.sharePublic {
 		public.SharePublics[i] = keys.sharePublic[i].Marshal()
+	}
+	for i := range keys.lowSharePublic {
+		public.LowSharePublics[i] = keys.lowSharePublic[i].Marshal()
 	}
 	publicRaw, err := json.Marshal(&public)
 	if err != nil {
@@ -232,12 +263,14 @@ func writeThresholdCoinArtifacts(publicPath string, keys *thresholdCoinKeySet) e
 	publicDigest := sha256.Sum256(publicRaw)
 	for i, id := range keys.nodeIDs {
 		share := keys.privateShare[id]
+		lowShare := keys.lowPrivateShare[id]
 		private := thresholdCoinPrivateArtifact{
 			Version:      thresholdCoinSetupVersion,
 			NodeID:       id,
 			Index:        i,
 			PublicDigest: append([]byte(nil), publicDigest[:]...),
 			Share:        share.Marshal(),
+			LowShare:     lowShare.Marshal(),
 		}
 		raw, marshalErr := json.Marshal(&private)
 		if marshalErr != nil {
@@ -296,7 +329,9 @@ func readThresholdCoinPublicArtifact(path string) (*thresholdCoinPublicArtifact,
 		return nil, nil, err
 	}
 	if artifact.Version != thresholdCoinSetupVersion || artifact.Threshold <= 0 ||
-		len(artifact.NodeIDs) == 0 || len(artifact.SharePublics) != len(artifact.NodeIDs) {
+		artifact.LowThreshold <= 0 || len(artifact.NodeIDs) == 0 ||
+		len(artifact.SharePublics) != len(artifact.NodeIDs) ||
+		len(artifact.LowSharePublics) != len(artifact.NodeIDs) {
 		return nil, nil, fmt.Errorf("invalid threshold coin public artifact")
 	}
 	return &artifact, raw, nil
@@ -313,6 +348,7 @@ func thresholdCoinKeysFromArtifacts(
 		return nil, fmt.Errorf("decode threshold coin group public key: %w", err)
 	}
 	sharePublic := make([]bls12381.G2Affine, len(artifact.SharePublics))
+	lowSharePublic := make([]bls12381.G2Affine, len(artifact.LowSharePublics))
 	nodeIndex := make(map[int]int, len(artifact.NodeIDs))
 	for i, raw := range artifact.SharePublics {
 		if i > 0 && artifact.NodeIDs[i-1] >= artifact.NodeIDs[i] {
@@ -323,8 +359,18 @@ func thresholdCoinKeysFromArtifacts(
 		}
 		nodeIndex[artifact.NodeIDs[i]] = i
 	}
+	var lowGroupPublic bls12381.G2Affine
+	if err := lowGroupPublic.Unmarshal(artifact.LowGroupPublic); err != nil {
+		return nil, fmt.Errorf("decode low threshold coin group public key: %w", err)
+	}
+	for i, raw := range artifact.LowSharePublics {
+		if err := lowSharePublic[i].Unmarshal(raw); err != nil {
+			return nil, fmt.Errorf("decode low threshold coin share public key: %w", err)
+		}
+	}
 	publicDigest := sha256.Sum256(publicRaw)
 	privateShares := make(map[int]fr.Element, len(loadIDs))
+	lowPrivateShares := make(map[int]fr.Element, len(loadIDs))
 	_, _, _, g2 := bls12381.Generators()
 	for _, id := range loadIDs {
 		index, ok := nodeIndex[id]
@@ -353,14 +399,28 @@ func thresholdCoinKeysFromArtifacts(
 			return nil, fmt.Errorf("threshold coin private/public share mismatch for node %d", id)
 		}
 		privateShares[id] = share
+		var lowShare fr.Element
+		if err := lowShare.SetBytesCanonical(private.LowShare); err != nil {
+			return nil, fmt.Errorf("decode low threshold coin private share for node %d: %w", id, err)
+		}
+		var expectedLow bls12381.G2Affine
+		expectedLow.ScalarMultiplication(&g2, lowShare.BigInt(new(big.Int)))
+		if !bytes.Equal(expectedLow.Marshal(), lowSharePublic[index].Marshal()) {
+			return nil, fmt.Errorf("low threshold coin private/public share mismatch for node %d", id)
+		}
+		lowPrivateShares[id] = lowShare
 	}
 	return &thresholdCoinKeySet{
-		threshold:    artifact.Threshold,
-		nodeIDs:      append([]int(nil), artifact.NodeIDs...),
-		nodeIndex:    nodeIndex,
-		groupPublic:  groupPublic,
-		sharePublic:  sharePublic,
-		privateShare: privateShares,
+		threshold:       artifact.Threshold,
+		nodeIDs:         append([]int(nil), artifact.NodeIDs...),
+		nodeIndex:       nodeIndex,
+		groupPublic:     groupPublic,
+		sharePublic:     sharePublic,
+		privateShare:    privateShares,
+		lowThreshold:    artifact.LowThreshold,
+		lowGroupPublic:  lowGroupPublic,
+		lowSharePublic:  lowSharePublic,
+		lowPrivateShare: lowPrivateShares,
 	}, nil
 }
 

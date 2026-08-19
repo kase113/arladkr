@@ -121,7 +121,7 @@ func (service *compKeyService) close() {
 }
 
 func compKeyDerivationTimeout(cfg Config) time.Duration {
-	timeout := durationFromEnvMsOr("PRACTICAL_KEY_DERIVE_TIMEOUT_MS", 15*time.Second)
+	timeout := durationFromEnvMsOr("PRACTICAL_KEY_DERIVE_TIMEOUT_MS", 45*time.Second)
 	if cfg.RouteSendTimeout > 0 && 12*cfg.RouteSendTimeout > timeout {
 		timeout = 12 * cfg.RouteSendTimeout
 	}
@@ -183,6 +183,9 @@ func runCompKeyDerivationMulticast(
 		if service.channels[recipient] == nil || service.listeners[recipient] == nil {
 			return nil, nil, nil, nil, fmt.Errorf("CompProve persistent service missing local node %d", recipient)
 		}
+	}
+	if err := waitCompKeyServiceReady(stageCtx, cfg, newCommittee, service); err != nil {
+		return nil, nil, nil, nil, err
 	}
 
 	prepared := make(map[int]compKeyWire, len(localIDs))
@@ -252,6 +255,70 @@ func runCompKeyDerivationMulticast(
 	return newShares, group, public, completionCertificates, nil
 }
 
+func waitCompKeyServiceReady(ctx context.Context, cfg Config, committee []int, service *compKeyService) error {
+	need := len(committee) - cfg.F
+	if service == nil || need <= 0 {
+		return errors.New("invalid CompProve readiness configuration")
+	}
+	dialTimeout := durationFromEnvMsOr("PRACTICAL_COMPPROVE_READY_DIAL_TIMEOUT_MS", time.Second)
+	ioTimeout := durationFromEnvMsOr("PRACTICAL_COMPPROVE_READY_IO_TIMEOUT_MS", 2*time.Second)
+
+	for {
+		ready := 0
+		remote := make([]int, 0, len(committee))
+		for _, id := range committee {
+			if service.listeners[id] != nil {
+				ready++
+			} else {
+				remote = append(remote, id)
+			}
+		}
+		if ready >= need {
+			return nil
+		}
+
+		results := make(chan bool, len(remote))
+		for _, id := range remote {
+			id := id
+			go func() {
+				conn, err := dialWithBandwidth("tcp", service.addresses[id], dialTimeout)
+				if err != nil {
+					results <- false
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+				wire := compKeyWire{Kind: "ready", SID: cfg.SID, Epoch: cfg.Epoch, Recipient: id}
+				if json.NewEncoder(conn).Encode(wire) != nil {
+					results <- false
+					return
+				}
+				var ack compKeyWire
+				results <- json.NewDecoder(conn).Decode(&ack) == nil && ack.Kind == "ready-ack" &&
+					ack.SID == cfg.SID && ack.Epoch == cfg.Epoch && ack.Recipient == id
+			}()
+		}
+		for range remote {
+			select {
+			case ok := <-results:
+				if ok {
+					ready++
+					if ready >= need {
+						return nil
+					}
+				}
+			case <-ctx.Done():
+				return fmt.Errorf("CompProve readiness: reachable=%d need=%d: %w", ready, need, ctx.Err())
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("CompProve readiness: reachable=%d need=%d: %w", ready, need, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 func serveCompKeyWires(ctx context.Context, cfg Config, recipient int, listener net.Listener, out chan<- compKeyWire, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
@@ -303,9 +370,10 @@ func sendCompKeyWire(ctx context.Context, cfg Config, from, to int, addr string,
 		return
 	}
 	timeout := cfg.RouteSendTimeout
-	if timeout <= 0 {
-		timeout = 500 * time.Millisecond
+	if timeout < 2*time.Second {
+		timeout = 2 * time.Second
 	}
+	timeout = durationFromEnvMsOr("PRACTICAL_COMPPROVE_ROUTE_TIMEOUT_MS", timeout)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {

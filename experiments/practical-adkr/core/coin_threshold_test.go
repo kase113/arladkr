@@ -33,25 +33,26 @@ func TestThresholdCoinHighThresholdAndUniqueRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validShare, err := combiner.Sign(thresholdCoinBLSDomain, digest)
+	const highDomain = "PD_STORED"
+	validShare, err := combiner.Sign(highDomain, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	forgedShare := append([]byte(nil), validShare...)
 	forgedShare[len(forgedShare)-1] ^= 1
-	if combiner.Verify(keys.nodeIndex[0], thresholdCoinBLSDomain, digest, forgedShare) {
+	if combiner.Verify(keys.nodeIndex[0], highDomain, digest, forgedShare) {
 		t.Fatal("accepted a forged threshold coin share")
 	}
 	insufficient := make(map[int][]byte, keys.threshold-1)
 	for _, nodeID := range old[:keys.threshold-1] {
 		signer, _ := keys.signer(nodeID)
-		share, signErr := signer.Sign(thresholdCoinBLSDomain, digest)
+		share, signErr := signer.Sign(highDomain, digest)
 		if signErr != nil {
 			t.Fatal(signErr)
 		}
 		insufficient[keys.nodeIndex[nodeID]] = share
 	}
-	if _, err := combiner.Recover(thresholdCoinBLSDomain, digest, insufficient); err == nil {
+	if _, err := combiner.Recover(highDomain, digest, insufficient); err == nil {
 		t.Fatal("recovered threshold coin signature with fewer than n-f shares")
 	}
 }

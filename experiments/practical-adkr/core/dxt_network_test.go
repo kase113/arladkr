@@ -7,6 +7,59 @@ import (
 	"time"
 )
 
+func TestNetworkDXTReceiverReadinessWaitsForQuorum(t *testing.T) {
+	old := []int{0, 1, 2, 3}
+	newCommittee := []int{10, 11, 12, 13}
+	allIDs := append(append([]int(nil), old...), newCommittee...)
+	addresses := buildAddrCSV(allIDs, nextTestBase(300))
+	cfg := Config{
+		SID: "network-dxt-readiness", Epoch: 4, OldCommittee: old, NewCommittee: newCommittee, F: 1,
+		ProtocolNodeAddrs: addresses, DXTNodeAddrs: addresses, ProtocolLocalNodeIDs: "0,10",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first, err := startDXTNetworkService(ctx, cfg, old, &DXTBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.close()
+
+	ready := make(chan error, 1)
+	go func() { ready <- first.waitForReceiverQuorum(ctx, newCommittee, 3) }()
+	select {
+	case err := <-ready:
+		t.Fatalf("readiness returned before quorum: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	services := make([]*dxtNetworkService, 0, 2)
+	for index := 1; index <= 2; index++ {
+		processCfg := cfg
+		processCfg.ProtocolLocalNodeIDs = fmt.Sprintf("%d,%d", old[index], newCommittee[index])
+		service, startErr := startDXTNetworkService(ctx, processCfg, old, &DXTBackend{})
+		if startErr != nil {
+			t.Fatalf("start delayed DXT node %d: %v", index, startErr)
+		}
+		services = append(services, service)
+		defer service.close()
+	}
+	if err := <-ready; err != nil {
+		t.Fatalf("wait for receiver quorum: %v", err)
+	}
+	resetCommStats(true)
+	if !probeDXTReady(ctx, cfg, newCommittee[0], parseNodeAddrMap(addresses)[newCommittee[0]]) {
+		t.Fatal("readiness probe rejected the matching run context")
+	}
+	if sent, received := commStats(); sent != 0 || received != 0 {
+		t.Fatalf("readiness traffic entered protocol byte metrics: sent=%d received=%d", sent, received)
+	}
+	wrongContext := cfg
+	wrongContext.Epoch++
+	if probeDXTReady(ctx, wrongContext, newCommittee[0], parseNodeAddrMap(addresses)[newCommittee[0]]) {
+		t.Fatal("readiness probe accepted the wrong epoch")
+	}
+}
+
 func TestNetworkDXTCompletesWithoutAllReceiversOrDealers(t *testing.T) {
 	old := []int{0, 1, 2, 3}
 	newCommittee := []int{10, 11, 12, 13}

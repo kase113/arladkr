@@ -2449,6 +2449,16 @@ func loadOrComputeDistributedDXTCache(
 	dxt.networkService = service
 	dxt.externalReceivers = true
 	defer func() { dxt.externalReceivers = false }()
+	readyThreshold := 2*cfg.F + 1
+	if readyThreshold < cfg.F+1 {
+		readyThreshold = cfg.F + 1
+	}
+	readyStart := time.Now()
+	if err := service.waitForReceiverQuorum(ctx, newC, readyThreshold); err != nil {
+		return nil, nil, nil, err
+	}
+	cacheTimings["dxt_network_wait"] += time.Since(readyStart)
+	tracef("phase=dxt_network_receivers_ready ready=%d/%d wait_ms=%.2f", readyThreshold, len(newC), float64(time.Since(readyStart).Microseconds())/1000.0)
 	buildStart := time.Now()
 	transcripts := make(map[int]*DXTTranscript, len(localDealers))
 	for _, dealer := range localDealers {

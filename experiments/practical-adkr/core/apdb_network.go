@@ -529,31 +529,60 @@ func sendNetworkAPDBCertificate(ctx context.Context, cfg Config, from, to int, a
 }
 
 func waitNetworkAPDBReady(ctx context.Context, cfg Config, old []int, addrMap map[int]string, local map[int]net.Listener) error {
+	dialTimeout := durationFromEnvMsOr("PRACTICAL_APDB_READY_DIAL_TIMEOUT_MS", time.Second)
+	ioTimeout := durationFromEnvMsOr("PRACTICAL_APDB_READY_IO_TIMEOUT_MS", 2*time.Second)
+	need := len(old) - cfg.F
+	lastReachable := 0
 	for {
 		reachable := 0
+		remote := make([]int, 0, len(old))
 		for _, id := range old {
 			if _, ok := local[id]; ok {
 				reachable++
 				continue
 			}
-			conn, err := net.DialTimeout("tcp", addrMap[id], 100*time.Millisecond)
-			if err != nil {
-				continue
-			}
-			_ = conn.SetDeadline(time.Now().Add(200 * time.Millisecond))
-			_ = writeAPDBNetworkWire(conn, apdbNetworkWire{Kind: "ready", SID: cfg.SID, Epoch: cfg.Epoch, Holder: id})
-			var ack apdbNetworkWire
-			if readAPDBNetworkWire(conn, &ack) == nil && ack.Kind == "ready-ack" && ack.Holder == id {
-				reachable++
-			}
-			_ = conn.Close()
+			remote = append(remote, id)
 		}
-		if reachable >= len(old)-cfg.F {
+		if reachable >= need {
 			return nil
 		}
+
+		results := make(chan bool, len(remote))
+		for _, id := range remote {
+			id := id
+			go func() {
+				conn, err := net.DialTimeout("tcp", addrMap[id], dialTimeout)
+				if err != nil {
+					results <- false
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+				if writeAPDBNetworkWire(conn, apdbNetworkWire{Kind: "ready", SID: cfg.SID, Epoch: cfg.Epoch, Holder: id}) != nil {
+					results <- false
+					return
+				}
+				var ack apdbNetworkWire
+				results <- readAPDBNetworkWire(conn, &ack) == nil && ack.Kind == "ready-ack" && ack.Holder == id
+			}()
+		}
+		for range remote {
+			select {
+			case ok := <-results:
+				if ok {
+					reachable++
+					if reachable >= need {
+						return nil
+					}
+				}
+			case <-ctx.Done():
+				return fmt.Errorf("network APDB readiness: reachable=%d need=%d: %w", reachable, need, ctx.Err())
+			}
+		}
+		lastReachable = reachable
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("network APDB readiness: reachable=%d need=%d: %w", reachable, len(old)-cfg.F, ctx.Err())
+			return fmt.Errorf("network APDB readiness: reachable=%d need=%d: %w", lastReachable, need, ctx.Err())
 		case <-time.After(50 * time.Millisecond):
 		}
 	}

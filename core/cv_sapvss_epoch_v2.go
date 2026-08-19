@@ -20,6 +20,20 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if c.runtime == nil {
 		c.runtime = newRuntimeCommMetrics(c.CommMetrics)
 	}
+	transport := c.protocolTransport
+	ownedTransport := false
+	if transport == nil {
+		nodes := sortedUnique(append(append([]int(nil), c.OldCommittee...), c.NewCommittee...))
+		var transportErr error
+		transport, transportErr = newAgreementTransport(c, nodes, len(nodes)*256)
+		if transportErr != nil {
+			return nil, transportErr
+		}
+		ownedTransport = true
+	}
+	if ownedTransport {
+		defer transport.Close()
+	}
 	runtime := c.cvRuntimeV2
 	if runtime == nil {
 		var err error
@@ -41,19 +55,6 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		return nil, err
 	}
 
-	transport := c.protocolTransport
-	ownedTransport := false
-	if transport == nil {
-		nodes := sortedUnique(append(append([]int(nil), c.OldCommittee...), c.NewCommittee...))
-		transport, err = newAgreementTransport(c, nodes, len(nodes)*256)
-		if err != nil {
-			return nil, err
-		}
-		ownedTransport = true
-	}
-	if ownedTransport {
-		defer transport.Close()
-	}
 	router, err := newCVSAPVSSRouterWithReceivers(
 		ctx, transport, c.SID, c.Epoch, c.OldCommittee, c.NewCommittee,
 		[]int{localOld, localReceiver}, (len(c.OldCommittee)+len(c.NewCommittee))*256, runtime.authenticator,

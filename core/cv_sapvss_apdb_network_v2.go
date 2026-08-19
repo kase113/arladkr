@@ -57,6 +57,16 @@ const (
 	cvRecoveryNewAggregateV2
 )
 
+const (
+	cvControlRetryIntervalV2 = 250 * time.Millisecond
+	cvFanoutMaxParallelV2    = 16
+)
+
+type cvFanoutSendResultV2 struct {
+	wireBytes int
+	err       error
+}
+
 type cvServiceExperimentMetricsV2 struct {
 	proposerRecoverySentBytes           uint64
 	proposerRecoveryRecvBytes           uint64
@@ -784,14 +794,10 @@ func (s *cvAPDBNetworkServiceV2) FinalizeDecision(
 		}
 		s.mu.Unlock()
 	}()
-	retry := time.NewTicker(100 * time.Millisecond)
+	retry := time.NewTicker(cvControlRetryIntervalV2)
 	defer retry.Stop()
 	for {
-		for _, member := range s.cfg.OldRoster {
-			if member != s.cfg.LocalNode {
-				_ = s.send(member, cvTagDecisionShareV2, shareWire)
-			}
-		}
+		s.sendFanoutMeasuredV2(s.cfg.OldRoster, s.cfg.LocalNode, cvTagDecisionShareV2, shareWire)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -834,12 +840,7 @@ recoverDecision:
 		return nil, err
 	}
 	recipients := sortedUnique(append(append([]int(nil), s.cfg.OldRoster...), s.cfg.NewRoster...))
-	for _, receiver := range recipients {
-		if receiver == s.cfg.LocalNode {
-			continue
-		}
-		_ = s.send(receiver, cvTagHandoffV2, handoffWire)
-	}
+	s.sendFanoutMeasuredV2(recipients, s.cfg.LocalNode, cvTagHandoffV2, handoffWire)
 	return handoff, nil
 }
 
@@ -944,14 +945,10 @@ func (s *cvAPDBNetworkServiceV2) RecoverAndExchangeScalarShare(
 		}
 		s.mu.Unlock()
 	}()
-	retry := time.NewTicker(100 * time.Millisecond)
+	retry := time.NewTicker(cvControlRetryIntervalV2)
 	defer retry.Stop()
 	for {
-		for _, receiver := range s.cfg.NewRoster {
-			if receiver != s.cfg.LocalNode {
-				_ = s.send(receiver, cvTagAggregateShareV2, outputWire)
-			}
-		}
+		s.sendFanoutMeasuredV2(s.cfg.NewRoster, s.cfg.LocalNode, cvTagAggregateShareV2, outputWire)
 		select {
 		case <-ctx.Done():
 			return nil, fr.Element{}, nil, bls12381.G1Affine{}, ctx.Err()
@@ -1240,11 +1237,10 @@ func (s *cvAPDBNetworkServiceV2) runRecovery(
 	}
 	defer s.unregisterRecovery(key, pending, aggregate)
 	sent := 0
-	for _, holder := range collector.RequestRecipients() {
-		wireBytes, sendErr := s.sendMeasured(holder, requestTag, request)
-		if sendErr == nil {
+	for _, result := range s.sendFanoutMeasuredV2(collector.RequestRecipients(), -1, requestTag, request) {
+		if result.err == nil {
 			sent++
-			s.recordRecoveryBytesV2(purpose, true, wireBytes)
+			s.recordRecoveryBytesV2(purpose, true, result.wireBytes)
 		}
 	}
 	if sent < collector.dataShards {
@@ -1948,6 +1944,51 @@ func (s *cvAPDBNetworkServiceV2) sendMeasured(to int, tag string, payload []byte
 	wireBytes := tcpMessageFrameFixedBytes + len(tag) + len(wire)
 	s.recordTagBytesV2(tag, true, wireBytes)
 	return wireBytes, nil
+}
+
+// sendFanoutMeasuredV2 bounds goroutine count while allowing independent TCP
+// destinations to make progress concurrently. It preserves the recipient set
+// and returns only after every attempted send has completed.
+func (s *cvAPDBNetworkServiceV2) sendFanoutMeasuredV2(
+	recipients []int, excluded int, tag string, payload []byte,
+) []cvFanoutSendResultV2 {
+	targets := make([]int, 0, len(recipients))
+	for _, recipient := range recipients {
+		if recipient != excluded {
+			targets = append(targets, recipient)
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	parallel := cvFanoutMaxParallelV2
+	if parallel > len(targets) {
+		parallel = len(targets)
+	}
+	jobs := make(chan int)
+	results := make(chan cvFanoutSendResultV2, len(targets))
+	var workers sync.WaitGroup
+	for range parallel {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for target := range jobs {
+				wireBytes, err := s.sendMeasured(target, tag, payload)
+				results <- cvFanoutSendResultV2{wireBytes: wireBytes, err: err}
+			}
+		}()
+	}
+	for _, target := range targets {
+		jobs <- target
+	}
+	close(jobs)
+	workers.Wait()
+	close(results)
+	out := make([]cvFanoutSendResultV2, 0, len(targets))
+	for result := range results {
+		out = append(out, result)
+	}
+	return out
 }
 
 func (s *cvAPDBNetworkServiceV2) recordTagBytesV2(tag string, sent bool, n int) {

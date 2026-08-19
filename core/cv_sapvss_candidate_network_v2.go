@@ -14,14 +14,14 @@ const (
 	cvCertifiedCandidateACKV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/certified-candidate-ack"
 	cvCandidateFanoutMaxAttemptsV2  = 4
 	cvCandidateFanoutMaxParallelV2  = 4
-	cvCandidateFanoutRetryBaseV2    = 100 * time.Millisecond
+	cvCandidateFanoutRetryBaseV2    = 250 * time.Millisecond
 )
 
 type cvCandidateFanoutStateV2 struct {
-	mu     sync.Mutex
-	acked  map[int]struct{}
-	notify chan struct{}
-	refs   int
+	mu      sync.Mutex
+	acked   map[int]struct{}
+	waiters map[int]chan struct{}
+	refs    int
 }
 
 func (s *cvCandidateFanoutStateV2) markACK(peer int) {
@@ -32,15 +32,15 @@ func (s *cvCandidateFanoutStateV2) markACK(peer int) {
 	if s.acked == nil {
 		s.acked = make(map[int]struct{})
 	}
-	s.acked[peer] = struct{}{}
-	notify := s.notify
-	s.mu.Unlock()
-	if notify != nil {
-		select {
-		case notify <- struct{}{}:
-		default:
-		}
+	if _, duplicate := s.acked[peer]; duplicate {
+		s.mu.Unlock()
+		return
 	}
+	s.acked[peer] = struct{}{}
+	if waiter := s.waiters[peer]; waiter != nil {
+		close(waiter)
+	}
+	s.mu.Unlock()
 }
 
 func (s *cvCandidateFanoutStateV2) isACKed(peer int) bool {
@@ -51,6 +51,23 @@ func (s *cvCandidateFanoutStateV2) isACKed(peer int) bool {
 	_, ok := s.acked[peer]
 	s.mu.Unlock()
 	return ok
+}
+
+func (s *cvCandidateFanoutStateV2) ackedSignal(peer int) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.waiters == nil {
+		s.waiters = make(map[int]chan struct{})
+	}
+	if waiter := s.waiters[peer]; waiter != nil {
+		return waiter
+	}
+	waiter := make(chan struct{})
+	s.waiters[peer] = waiter
+	if _, ok := s.acked[peer]; ok {
+		close(waiter)
+	}
+	return waiter
 }
 
 func cvCertifiedCandidateDigestV2(wire []byte) string {
@@ -83,7 +100,9 @@ func (s *cvAPDBNetworkServiceV2) candidateFanoutStateV2(digest string) *cvCandid
 	}
 	state := s.candidateFanoutV2[digest]
 	if state == nil {
-		state = &cvCandidateFanoutStateV2{acked: make(map[int]struct{}), notify: make(chan struct{}, 1)}
+		state = &cvCandidateFanoutStateV2{
+			acked: make(map[int]struct{}), waiters: make(map[int]chan struct{}),
+		}
 		s.candidateFanoutV2[digest] = state
 	}
 	state.refs++
@@ -129,24 +148,18 @@ func (s *cvAPDBNetworkServiceV2) cachedCertifiedCandidateWireV2(digest string) [
 func (s *cvAPDBNetworkServiceV2) waitCertifiedCandidateACKV2(
 	ctx context.Context, state *cvCandidateFanoutStateV2, peer int, delay time.Duration,
 ) bool {
-	if state.isACKed(peer) {
-		return true
-	}
+	acked := state.ackedSignal(peer)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-s.ctx.Done():
-			return false
-		case <-state.notify:
-			if state.isACKed(peer) {
-				return true
-			}
-		case <-timer.C:
-			return state.isACKed(peer)
-		}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.ctx.Done():
+		return false
+	case <-acked:
+		return true
+	case <-timer.C:
+		return state.isACKed(peer)
 	}
 }
 
@@ -393,12 +406,18 @@ func (s *cvAPDBNetworkServiceV2) CertifiedCandidateCountV2() int {
 
 func (s *cvAPDBNetworkServiceV2) handleCertifiedCandidateV2(msg Message) {
 	digest := cvCertifiedCandidateDigestV2(msg.Body)
+	// This ACK confirms delivery of an authenticated envelope, not candidate
+	// validity. Sending it before expensive verification avoids WAN retries
+	// while preserving the verification gate below.
+	if ack, err := cvEncodeCertifiedCandidateACKV2(digest); err == nil {
+		_ = s.send(msg.From, cvTagCertifiedCandidateACKV2, ack)
+	}
+	if cached := s.cachedCertifiedCandidateWireV2(digest); bytes.Equal(cached, msg.Body) {
+		return
+	}
 	_, accepted, err := s.acceptCertifiedCandidateV2(msg.Body)
 	if err != nil {
 		return
-	}
-	if ack, encodeErr := cvEncodeCertifiedCandidateACKV2(digest); encodeErr == nil {
-		_ = s.send(msg.From, cvTagCertifiedCandidateACKV2, ack)
 	}
 	if !accepted {
 		return

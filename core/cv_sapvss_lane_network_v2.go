@@ -191,10 +191,17 @@ func (s *cvAPDBNetworkServiceV2) BuildLeafMaterialV2(ctx context.Context) (*cvBu
 		}
 		s.mu.Unlock()
 	}()
+	sentOffers := 0
+	var lastSendErr error
 	for i, receiver := range s.cfg.NewRoster {
 		if err := s.send(receiver, cvTagLaneOfferV2, offerWires[i]); err != nil {
-			return nil, err
+			lastSendErr = err
+			continue
 		}
+		sentOffers++
+	}
+	if sentOffers < quorum {
+		return nil, fmt.Errorf("CV V2 lane offer delivery incomplete: sent=%d quorum=%d: %w", sentOffers, quorum, lastSendErr)
 	}
 	select {
 	case <-ctx.Done():

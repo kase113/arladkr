@@ -98,6 +98,13 @@ func TestCVCertifiedCandidateV2AcceptsRelaysAndSuppressesDuplicates(t *testing.T
 	if _, _, err := services[receiver].acceptCertifiedCandidateV2(mutated); err == nil {
 		t.Fatal("accepted mutated certified candidate")
 	}
+	ackCount := transport.sentCount(cvTagCertifiedCandidateACKV2)
+	services[receiver].handleCertifiedCandidateV2(Message{
+		From: relay, To: receiver, Tag: cvTagCertifiedCandidateV2, Body: mutated,
+	})
+	if transport.sentCount(cvTagCertifiedCandidateACKV2) != ackCount+1 {
+		t.Fatal("authenticated candidate delivery was not ACKed before validation")
+	}
 	select {
 	case duplicate := <-services[receiver].certifiedCandidateChV2:
 		t.Fatalf("duplicate candidate reached first-candidate queue: proposer=%d", duplicate.Header.ProposerID)
@@ -129,6 +136,31 @@ func TestCVCertifiedCandidateV2AcceptsRelaysAndSuppressesDuplicates(t *testing.T
 	}
 	if !bytes.Equal(got.Header.AggregateDigest, object.Header.AggregateDigest) {
 		t.Fatal("relayed candidate changed aggregate digest")
+	}
+}
+
+func TestCVCandidateFanoutACKSignalsArePerPeer(t *testing.T) {
+	state := &cvCandidateFanoutStateV2{
+		acked: make(map[int]struct{}), waiters: make(map[int]chan struct{}),
+	}
+	first := state.ackedSignal(1)
+	second := state.ackedSignal(2)
+	state.markACK(1)
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("first peer ACK did not wake its waiter")
+	}
+	select {
+	case <-second:
+		t.Fatal("first peer ACK woke a different peer waiter")
+	case <-time.After(20 * time.Millisecond):
+	}
+	state.markACK(2)
+	select {
+	case <-second:
+	case <-time.After(time.Second):
+		t.Fatal("second peer ACK did not wake its waiter")
 	}
 }
 

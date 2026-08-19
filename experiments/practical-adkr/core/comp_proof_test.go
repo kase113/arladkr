@@ -42,6 +42,43 @@ func TestStrictCompSetupLoadsOnlyLocalPrivateKey(t *testing.T) {
 	}
 }
 
+func TestCompKeyReadinessWaitsForQuorum(t *testing.T) {
+	committee := []int{10, 11, 12, 13}
+	cfg := Config{
+		SID: "comp-readiness", Epoch: 7, F: 1,
+		CompNodeAddrs: buildAddrCSV(committee, nextTestBase(100)),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	keys := map[int]*big.Int{committee[0]: big.NewInt(1)}
+	first, err := startCompKeyService(ctx, cfg, committee, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.close()
+
+	ready := make(chan error, 1)
+	go func() { ready <- waitCompKeyServiceReady(ctx, cfg, committee, first) }()
+	select {
+	case err := <-ready:
+		t.Fatalf("readiness returned before quorum: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	services := make([]*compKeyService, 0, 2)
+	for _, id := range committee[1:3] {
+		service, startErr := startCompKeyService(ctx, cfg, committee, map[int]*big.Int{id: big.NewInt(1)})
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		services = append(services, service)
+		defer service.close()
+	}
+	if err := <-ready; err != nil {
+		t.Fatalf("wait for CompProve quorum: %v", err)
+	}
+}
+
 func TestCompKeyMulticastWithReceiverLocalSecrets(t *testing.T) {
 	old := []int{0, 1, 2, 3}
 	newCommittee := []int{10, 11, 12, 13}
