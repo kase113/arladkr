@@ -854,3 +854,32 @@ AMI 不需因本修复重建。两区现有 AMI 为 `arladkr-bench-arm64-v2-2026
 (`ami-09c02ed1bf7b2b15b`)；`run_arladkr_cross_region.py` 每轮在实例上线后都会交叉编译当前
 ARM64 `rladkrbench`，以 SHA-256 校验并经 SSM 原子安装。因此后续 r17 复测会运行本次提交的
 二进制，不会误用 AMI 内旧版本；仅 OS、Go 版本或基础依赖变化时才重新 bake AMI。
+
+## 2026-08-19 修复后两区域 n=4 `r17` quorum smoke
+
+本轮使用提交 `8ee3736` 的 candidate ACK、per-peer wait 和有界并行 fan-out 修复，拓扑仍为
+`us-east-1:2`（`use1-az1`）和 `eu-west-1:2`（`euw1-az1`），四台均为 `c7g.xlarge` Spot，
+AMI 与 r16 相同。实验名为 `paper-arl-use1-euw1-n4-r17`，run ID 为
+`run-20260819-100628`。SSM/setup/cleanup barrier 均为 4/4，ARM64 binary digest 为
+`e9759c848dae25893a0f2d67dcd9143201d4505ed6ce7535cbe04b86ffcedf4f`。
+
+本轮只收集到 3/4 bench artifact：美国 slot 0、slot 1 和爱尔兰 slot 3 成功，爱尔兰
+slot 2（`3.248.249.130`）在收集时仍显示 `running`，没有 bench 文件，随后由 finally cleanup
+终止。三个成功节点 consensus hash 均为
+`9632dc1e1011c1861a1b1715f17facb2a90b7bd6be484642c6284ca41fb8c6d9`，因此这是 quorum smoke，
+不是完整四节点 latency 样本，标记为 `invalidated`，不纳入论文主表。
+
+三个 artifact 的 service-grace-adjusted latency 为 `10293.00`、`10918.94`、`10975.26 ms`，
+均值 `10729.07 ms`；raw 均值 `11729.81 ms`。与 r16 三个指标均值（`11533.14 ms`，完整
+4/4）相比，方向性下降约 `7.0%`，但由于 r17 缺失一个节点且每轮只有一个 epoch，不能宣称
+统计显著的性能提升。阶段均值（仅 3 个成功节点）为：leaf `804 ms`、component disperse
+`615 ms`、candidate formation `4891 ms`、aggregate agreement `1219 ms`、recover shard
+`3173 ms`（含约 `1001 ms` grace）、receipt/handoff `792 ms`。candidate formation 比 r16
+的 `4725 ms` 略高，说明 ACK/fan-out 修复的主要收益目前出现在 handoff/control wait，candidate
+formation 仍是下一步瓶颈。总发送/接收均值约 `1.30/1.29 MB`，没有观察到通信量异常下降。
+
+本轮 AWS 资源已确认清理：四台实例均 `terminated`，两区 active Spot request 为零，root
+EBS volume 不存在，Terraform VPC、subnet、security group、IGW、IAM role/profile 均已销毁。
+按实际启动到终止时间、当时约 `$0.0738/h`（美国）和 `$0.0746/h`（爱尔兰）Spot 价、四个
+公网 IPv4、30 GiB gp3 和少量 SSM/跨区流量，保守记本轮约 `$0.04`；累计量化成本由约
+`$2.50` 更新为约 `$2.54`，最终以 Cost Explorer 为准。
