@@ -1340,3 +1340,67 @@ profiling；在获得多 epoch 数据前仍不重建 AMI，也不把单轮 smoke
 gp3 和少量 SSM/S3/跨区流量后，本轮保守记 **约 `$0.17`**。累计量化成本由约 `$3.13` 更新为约
 **`$3.30`**，最终仍以 Cost Explorer 为准。实验结束后两区 Terraform 各销毁 21 个资源；AWS 只读
 复核显示 non-terminated instance 与 open/active Spot request 均为 0。
+
+## 2026-08-20 ARL 单区域同 AZ 私网对照（r23）
+
+为隔离跨 Region 公网路径对 r22 的影响，执行实验
+`paper-arl-private-use1-n10-r23-202608`。10 台 `c7g.xlarge` Spot 全部位于
+`us-east-1f`（`use1-az5`），协议 roster 使用 `10.42.1.10--19` 私网地址；security group 只允许
+同组节点私网互通，不开放公网协议 ingress。AMI 为 `ami-0cee8a82967ef97ac`，参数保持
+`n=10,f=3,runs=1,epochs=1`、`strict-network`、`comm-metrics`、
+`route-send-timeout=1s`。成功门槛仍为 `n-f=7`，holder service grace 仍按既定
+`service_grace_adjusted` 口径扣除，setup/keygen 仍不计入 online protocol。
+
+本轮为编排地址选择增加了显式 `use_private_ip` 支持，使 runtime roster 与 topology 配置一致；
+该调整只改变实验网络地址，不改变 ARL 协议、安全阈值或 latency 口径。部署归档 SHA-256 为
+`30a955ff13bc9223a5c3a54c961fe785f8bcd0452f7fe679dfa5ce18f295f7e4`，其中
+`rladkrbench` SHA-256 为
+`f41623d824ecbe0ed2c71177628de07a5f27c3639749b9ef6774c203177a4b33`。
+setup bundle digest 为
+`6078821bb505b642e723dcf63811c93482702f6f63cba7ad767a6e3acbb083ee`。
+
+运行完整性：SSM、pre-launch cleanup、runner readiness 均为 `10/10`；最终 success 和 artifact
+均为 `10/10`。十个节点 consensus hash 均为
+`eefd8c4095681b2b44cd8c2aa5743ab7300ab196875d9c91036d51ac23a4f77f`，setup digest 和 timing
+metadata 一致，没有 timeout 或错误 summary。以下仍只是单 epoch topology smoke，不进入论文最终
+median/p95 主表。
+
+| 指标 | 节点范围/门槛 | 10 节点均值 |
+| --- | ---: | ---: |
+| service-grace-adjusted latency | `4146.78--4863.10` ms | **`4407.50` ms** |
+| raw latency | `14147.14--14863.42` ms | `14407.91` ms |
+| quorum / all-nodes adjusted latency | `4435.64 / 4863.10` ms | - |
+| setup / online protocol | - | `119.36 / 4288.13` ms |
+| leaf build | `470--1031` ms | `855.80` ms |
+| component dispersal | `36--51` ms | `39.80` ms |
+| candidate formation | `2432--3132` ms | **`2704.40` ms** |
+| proposer slots | `2409.81--2749.53` ms | `2629.95` ms |
+| aggregate agreement | `195--204` ms | `200.30` ms |
+| aggregate recovery after decision | `43.73--66.34` ms | `56.83` ms |
+| APVSS ACK / fallback count | - | `9.1 / 0.9` |
+| candidate fan-out retries | all nodes `0` | `0` |
+| total sent / received | - | **`4.862 / 4.852 MB` per node** |
+
+### 与两区域公网 r22 的对照
+
+同 AZ 私网 adjusted latency 均值为 `4407.50 ms`，比 r22 的 `9093.36 ms` 低
+`4685.86 ms`，约 **51.5%**；quorum latency 从 `9121.64 ms` 降至 `4435.64 ms`。
+主要阶段也同步缩短：leaf build 从 `2227.90 ms` 降至 `855.80 ms`，candidate formation 从
+`4017.80 ms` 降至 `2704.40 ms`，component dispersal 从 `789.70 ms` 降至 `39.80 ms`，aggregate
+agreement 从 `756.60 ms` 降至 `200.30 ms`。candidate retry 在两轮均为零，因此差距不是 retry
+退避造成；它表明公网跨区运行的主要额外代价位于多轮通信和远端数据获取路径，而不是最终
+aggregate recovery。私网通信量均值略高于 r22（`4.862/4.852 MB` 对 `4.106/4.020 MB`），来自节点
+角色分布和单轮消息到达顺序的差异；仅凭这两个单 epoch 样本不能断定通信量随 topology 的稳定变化。
+两轮均报告相同的协议模式、阈值和主要 wire size，因此没有证据表明私网轮次通过跳过协议步骤降低 latency。
+
+本结果也说明当前代码在同 AZ 私网下仍有约 `2.63 s` 的 proposer slots 和约 `0.86 s` 的 leaf
+构建计算成本；因此 `4.41 s` 是当前实现的可信单轮基线，而不是网络近零时协议应瞬时完成。后续若要形成
+论文数据，应在相同 AMI 和 topology 下运行多 epoch、多次独立 fleet，报告 median/p95，并用同样口径
+运行 PracticalADKR 对照。
+
+资源与成本：实例实际约在 `08:46:10--14Z` 启动、`08:58:56--58Z` 终止，累计约 7657
+instance-seconds。按当时 `us-east-1f c7g.xlarge` Spot 价 `$0.0523/小时`，计算费约 `$0.111`；加十个
+临时公网 IPv4（仅用于 SSM/部署）、`10 x 30 GiB` gp3 和少量 SSM/S3 流量后，本轮保守记
+**约 `$0.13`**。累计量化成本由约 `$3.30` 更新为约 **`$3.43`**，最终仍以 Cost Explorer 为准。
+实验后 cleanup-ready 为 `10/10`，Terraform 销毁 20 个资源；AWS 只读复核显示该 ExperimentGroup
+的 non-terminated instance 和 open/active Spot request 均为 0。
