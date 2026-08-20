@@ -63,6 +63,14 @@ type runStat struct {
 	cvLeafBuildMs                         float64
 	cvComponentDisperseMs                 float64
 	cvComponentCollectionMs               float64
+	cvEligibilityCoinMs                   float64
+	cvProposerSlotsMs                     float64
+	cvCoinFanoutMs                        float64
+	cvCandidateFanoutACKWaitMs            float64
+	cvCandidateFanoutRetryWaitMs          float64
+	cvCandidateFanoutMaxPeerMs            float64
+	cvCandidateFanoutAttempts             float64
+	cvCandidateFanoutRetries              float64
 	cvAggregateDisperseMs                 float64
 	cvAggregateAgreementMs                float64
 	cvAPVSSACKCount                       float64
@@ -508,6 +516,14 @@ func main() {
 				cvLeafBuildMs:                         float64(res.CVLeafBuildLatency.Microseconds()) / 1000.0,
 				cvComponentDisperseMs:                 float64(res.CVComponentDisperseLatency.Microseconds()) / 1000.0,
 				cvComponentCollectionMs:               float64(res.CVComponentCollectionLatency.Microseconds()) / 1000.0,
+				cvEligibilityCoinMs:                   float64(res.CVEligibilityCoinLatency.Microseconds()) / 1000.0,
+				cvProposerSlotsMs:                     float64(res.CVProposerSlotsLatency.Microseconds()) / 1000.0,
+				cvCoinFanoutMs:                        float64(res.CVCoinFanoutLatency.Microseconds()) / 1000.0,
+				cvCandidateFanoutACKWaitMs:            float64(res.CVCandidateFanoutACKWaitLatency.Microseconds()) / 1000.0,
+				cvCandidateFanoutRetryWaitMs:          float64(res.CVCandidateFanoutRetryWaitLatency.Microseconds()) / 1000.0,
+				cvCandidateFanoutMaxPeerMs:            float64(res.CVCandidateFanoutMaxPeerLatency.Microseconds()) / 1000.0,
+				cvCandidateFanoutAttempts:             float64(res.CVCandidateFanoutAttempts),
+				cvCandidateFanoutRetries:              float64(res.CVCandidateFanoutRetries),
 				cvAggregateDisperseMs:                 float64(res.CVAggregateDisperseLatency.Microseconds()) / 1000.0,
 				cvAggregateAgreementMs:                float64(res.CVAggregateAgreementLatency.Microseconds()) / 1000.0,
 				cvAPVSSACKCount:                       float64(res.CVAPVSSACKCount),
@@ -1037,7 +1053,7 @@ func formatBenchResult(in benchResultInput) string {
 		in.cvSamplingUnionBound,
 	)
 	cvLine := line + fmt.Sprintf(
-		" mean_cv_component_count=%.0f mean_cv_arc_holder_count=%.0f mean_cv_recovered_shard_count=%.0f mean_cv_verified_receipt_count=%.0f leaf_build_ms=%.0f component_disperse_ms=%.0f candidate_formation_ms=%.0f aggregate_disperse_ms=%.0f aggregate_agreement_ms=%.0f mean_apvss_ack_count=%.2f mean_apvss_fallback_count=%.2f mean_apvss_proof_bytes=%.0f mean_apvss_leaf_wire_bytes=%.0f mean_completed_candidate_count=%.0f mean_pool_wire_bytes=%.0f mean_validation_request_wire_bytes=%.0f mean_agreement_object_wire_bytes=%.0f mean_aggregate_payload_bytes=%.0f mean_aggregate_apdb_encoded_bytes=%.0f mean_pool_certificate_bytes=%.0f mean_validation_certificate_bytes=%.0f mean_arc_certificate_bytes=%.0f mean_decision_certificate_bytes=%.0f mean_handoff_wire_bytes=%.0f mean_proposer_component_recovery_sent_bytes=%.0f mean_proposer_component_recovery_recv_bytes=%.0f mean_proposer_component_recovery_ms=%.2f mean_proposer_catalog_scan_count=%.0f mean_proposer_rejected_component_count=%.0f mean_validator_component_recovery_sent_bytes=%.0f mean_validator_component_recovery_recv_bytes=%.0f mean_validator_component_recovery_ms=%.2f mean_validator_aggregate_recovery_sent_bytes=%.0f mean_validator_aggregate_recovery_recv_bytes=%.0f mean_validator_aggregate_recovery_ms=%.2f mean_arc_formation_ms=%.3f mean_vcert_formation_ms=%.3f mean_deccert_formation_ms=%.3f mean_scalar_bounded_dlog_ms=%.3f mean_blinding_group_decryption_ms=%.3f aggregate_gate_wait_ms=%.2f aggregate_leaf_load_ms=%.2f aggregate_build_ms=%.2f aggregate_rs_ms=%.2f aggregate_header_token_ms=%.2f aggregate_offer_send_ms=%.2f aggregate_arc_wait_ms=%.2f aggregate_certificate_ms=%.2f recover_shard_ms=%.0f receipt_ms=%.0f mean_component_disperse_sent_bytes=%.0f mean_component_disperse_recv_bytes=%.0f mean_candidate_formation_sent_bytes=%.0f mean_candidate_formation_recv_bytes=%.0f mean_aggregate_agreement_sent_bytes=%.0f mean_aggregate_agreement_recv_bytes=%.0f mean_recover_shard_sent_bytes=%.0f mean_recover_shard_recv_bytes=%.0f mean_receipt_sent_bytes=%.0f mean_receipt_recv_bytes=%.0f mean_mvba_pd_data_sent_bytes=%.0f mean_mvba_pd_data_recv_bytes=%.0f mean_mvba_rc_data_sent_bytes=%.0f mean_mvba_rc_data_recv_bytes=%.0f mean_mvba_certificate_sent_bytes=%.0f mean_mvba_certificate_recv_bytes=%.0f",
+		" mean_cv_component_count=%.0f mean_cv_arc_holder_count=%.0f mean_cv_recovered_shard_count=%.0f mean_cv_verified_receipt_count=%.0f leaf_build_ms=%.0f component_disperse_ms=%.0f candidate_formation_ms=%.0f eligibility_coin_ms=%.2f proposer_slots_ms=%.2f mean_coin_fanout_ms=%.2f mean_candidate_ack_wait_ms=%.2f mean_candidate_retry_wait_ms=%.2f mean_candidate_fanout_max_peer_ms=%.2f mean_candidate_fanout_attempts=%.0f mean_candidate_fanout_retries=%.0f aggregate_disperse_ms=%.0f aggregate_agreement_ms=%.0f mean_apvss_ack_count=%.2f mean_apvss_fallback_count=%.2f mean_apvss_proof_bytes=%.0f mean_apvss_leaf_wire_bytes=%.0f mean_completed_candidate_count=%.0f mean_pool_wire_bytes=%.0f mean_validation_request_wire_bytes=%.0f mean_agreement_object_wire_bytes=%.0f mean_aggregate_payload_bytes=%.0f mean_aggregate_apdb_encoded_bytes=%.0f mean_pool_certificate_bytes=%.0f mean_validation_certificate_bytes=%.0f mean_arc_certificate_bytes=%.0f mean_decision_certificate_bytes=%.0f mean_handoff_wire_bytes=%.0f mean_proposer_component_recovery_sent_bytes=%.0f mean_proposer_component_recovery_recv_bytes=%.0f mean_proposer_component_recovery_ms=%.2f mean_proposer_catalog_scan_count=%.0f mean_proposer_rejected_component_count=%.0f mean_validator_component_recovery_sent_bytes=%.0f mean_validator_component_recovery_recv_bytes=%.0f mean_validator_component_recovery_ms=%.2f mean_validator_aggregate_recovery_sent_bytes=%.0f mean_validator_aggregate_recovery_recv_bytes=%.0f mean_validator_aggregate_recovery_ms=%.2f mean_arc_formation_ms=%.3f mean_vcert_formation_ms=%.3f mean_deccert_formation_ms=%.3f mean_scalar_bounded_dlog_ms=%.3f mean_blinding_group_decryption_ms=%.3f aggregate_gate_wait_ms=%.2f aggregate_leaf_load_ms=%.2f aggregate_build_ms=%.2f aggregate_rs_ms=%.2f aggregate_header_token_ms=%.2f aggregate_offer_send_ms=%.2f aggregate_arc_wait_ms=%.2f aggregate_certificate_ms=%.2f recover_shard_ms=%.0f receipt_ms=%.0f mean_component_disperse_sent_bytes=%.0f mean_component_disperse_recv_bytes=%.0f mean_candidate_formation_sent_bytes=%.0f mean_candidate_formation_recv_bytes=%.0f mean_aggregate_agreement_sent_bytes=%.0f mean_aggregate_agreement_recv_bytes=%.0f mean_recover_shard_sent_bytes=%.0f mean_recover_shard_recv_bytes=%.0f mean_receipt_sent_bytes=%.0f mean_receipt_recv_bytes=%.0f mean_mvba_pd_data_sent_bytes=%.0f mean_mvba_pd_data_recv_bytes=%.0f mean_mvba_rc_data_sent_bytes=%.0f mean_mvba_rc_data_recv_bytes=%.0f mean_mvba_certificate_sent_bytes=%.0f mean_mvba_certificate_recv_bytes=%.0f",
 		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvARCHolderCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvRecoveredShardCount }),
@@ -1045,6 +1061,14 @@ func formatBenchResult(in benchResultInput) string {
 		meanOf(in.stats, func(s runStat) float64 { return s.cvLeafBuildMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentDisperseMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentCollectionMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvEligibilityCoinMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvProposerSlotsMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvCoinFanoutMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvCandidateFanoutACKWaitMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvCandidateFanoutRetryWaitMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvCandidateFanoutMaxPeerMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvCandidateFanoutAttempts }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvCandidateFanoutRetries }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvAggregateDisperseMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvAggregateAgreementMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvAPVSSACKCount }),

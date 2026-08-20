@@ -883,3 +883,395 @@ EBS volume 不存在，Terraform VPC、subnet、security group、IGW、IAM role/
 按实际启动到终止时间、当时约 `$0.0738/h`（美国）和 `$0.0746/h`（爱尔兰）Spot 价、四个
 公网 IPv4、30 GiB gp3 和少量 SSM/跨区流量，保守记本轮约 `$0.04`；累计量化成本由约
 `$2.50` 更新为约 `$2.54`，最终以 Cost Explorer 为准。
+
+## 2026-08-19 两区域 n=4 live 对照与运行中诊断
+
+为验证“公网 RTT 是否足以解释 ARLADKR 的秒级额外延迟”，使用同一公网 topology
+`us-east-1:2`（`use1-az1`）加 `eu-west-1:2`（`euw1-az1`）、四台 `c7g.xlarge Spot`、
+同一 AMI、同一连续 NodeSlot 和同一跨区 `/32` ingress allowlist，运行 ARLADKR 后经
+`cleanup-ready` barrier 运行 PracticalADKR。两套二进制均由本地当前源码交叉编译、经 SHA-256
+校验后由 SSM 原子安装。测试期间不只等待 summary：通过逐 Region SSM 读取每节点的进程、监听端口、
+artifact/status 文件和 transient systemd unit。
+
+第一轮 `paper-compare-use1-euw1-n4-live` 运行时间为 `10:37:50Z--10:48:01Z`。ARLADKR 达到
+`3/3` quorum，但美国 slot 0 未产生 bench artifact，故其结果不作正式样本。PracticalADKR 的四台
+进程均在协议前退出；journal 明确显示 `flag provided but not defined: -base-port`。根因是人工调用时
+给 `bench_latency` 传入了仅 ARL benchmark 支持的 `-base-port`，与公网、协议实现或 RTT 无关。
+本轮标记为 **invalidated**，Terraform finally destroy 与 final cleanup 已完成。
+
+修正参数后，第二轮 `paper-compare-use1-euw1-n4-live2` 于 `10:55:03Z--11:06:53Z` 成功：
+`final_cleanup=cleanup-ready`、`cleanup=destroyed`。运行中观测显示 ARL 的三个节点约在一轮完成后
+释放协议 listener；爱尔兰 slot 3 仍保有 `:30003`、`:30007` listener 和 benchmark 进程，直至
+finally cleanup，因此 ARL 只有 3/4 artifact，不能作为完整四节点主表数据。Practical 四节点均完成，
+无残留 protocol process 或 listener。
+
+| 项目 | 完成 | 成功节点 latency | 均值 | 结论 |
+| --- | --- | --- | ---: | --- |
+| ARLADKR | 3/4 quorum | 9184.10、9705.32、10142.19 ms | 9677.20 ms | quorum smoke，排除论文主表 |
+| PracticalADKR | 4/4 | 2936.43、3633.49、3712.80、3559.17 ms | 3460.47 ms | 完整但单 epoch smoke |
+
+Practical 的跨区阶段数据为：DXT network wait `137--412 ms`、APDB `142--638 ms`、MVBA
+`567--792 ms`、recovery `774--839 ms`。这再次说明跨大西洋 RTT 不是从约 3--4 秒直接变为约
+10 秒的充分解释；ARL 的额外时间仍主要在 candidate formation（本轮约 `4.5--4.9 s`）以及后续
+aggregate/recovery 等阈值等待。该对照也不能独立得出论文结论：每项仅一 epoch，ARL 缺一个节点，且
+Practical 本轮未启用通信量统计。下一轮应保持相同 topology，启用两边的通信量统计，要求 4/4 artifact，
+并连续至少 5 个 fresh epoch 后报告 median/p95 和分阶段分布。
+
+两轮均为四台 Spot、约 10--12 分钟生命周期；按美国/爱尔兰历史 Spot 价、公网 IPv4、30 GiB gp3
+和少量 SSM/跨区流量各保守记约 `$0.05`，新增约 `$0.10`，量化累计由约 `$2.54` 更新为约 **`$2.64`**。
+第二轮的 Terraform state 记录已确认 destroy；最终 AWS API 复核时本地 SSO token 正好过期，待重新
+`aws sso login --profile arladkr-sso` 后再执行只读的实例、Spot request、EBS、VPC 和 EIP 零资源复核。
+
+## 2026-08-19 Candidate Path WAN 调度优化（待公网复测）
+
+对第二轮 ARLADKR 的 phase 分解表明，`candidate_formation_ms` 的 `4.5--4.9 s` 并不等同于
+单次 candidate relay；它覆盖 eligibility threshold coin、proposer component catalog recovery、PoolCert、
+contributor coin、aggregate APDB Lock、validation certificate，以及首个 verified candidate 的传输与验证。
+因此不能把该值直接归因于公网 RTT，也不应在论文的端到端 latency 中扣除这些协议阶段。
+
+本地源码已作一项不改变协议语义的 WAN 调度优化：coin share 与 recipient-specific APDB Store offer
+均改用已有的最多 16 路 bounded fan-out。原先的逐 peer 同步发送会把 TCP transport ACK 的等待串联为
+多次 WAN 往返；现在仍发送相同的认证消息，仍要求原有的阈值，且 Store offer 仍按接收者独立构造。
+candidate 的 ACK/retry 策略（最多四次，`250/500/1000/2000 ms`）没有改变，只新增观测。
+
+`E2E_BENCH_RESULT` 现额外报告 `eligibility_coin_ms`、`proposer_slots_ms`、
+`mean_coin_fanout_ms`、`aggregate_offer_send_ms`、`mean_candidate_ack_wait_ms`、
+`mean_candidate_retry_wait_ms`、`mean_candidate_fanout_max_peer_ms`、
+`mean_candidate_fanout_attempts` 和 `mean_candidate_fanout_retries`。其中前两项拆分 candidate 大阶段，
+其余项用于定位发送与 ACK 重试的 WAN 放大；它们是解释性指标，不改变既有 E2E 口径（仍仅扣除 setup
+和已定义的 recovery-service grace）。
+
+此处尚无 AWS 复测，不能据此声称跨区 latency 已改善。下一次应使用同一
+`us-east-1:2 + eu-west-1:2`、`n=4,f=1` fresh fleet，要求 4/4 artifacts，并重点比较上述字段与本节
+之前记录的优化前基线；运行中继续用 SSM 观察各节点的进程、端口和 artifact 状态。
+
+## 2026-08-19 Candidate Path 优化后两区域 n=4 复测
+
+运行 `paper-arl-use1-euw1-n4-r18-20260819`，继续使用 `us-east-1:2 + eu-west-1:2`、
+四台 `c7g.xlarge Spot`、公网 `/32` allowlist 和 `n=4,f=1`。ARLADKR 与 PracticalADKR 使用同一
+fresh fleet；本地当前源码交叉编译后以 SHA-256 校验并原子安装。ARL 完成后，所有四台节点通过
+`cleanup-ready` barrier，才启动 Practical。实验记录为 `success`，最终 `cleanup-ready` 和 Terraform
+destroy 均完成。
+
+必须区分 runner quorum 与完整样本：ARL 在 `3/3` 成功后，`aws_wait` 即返回并触发收集及下一协议的
+cleanup；当时第四个节点仍为 `running`，其 `bench.txt` 为空。因此 Fabric 的 `collect 4/4` 只表示四台
+主机的收集命令执行成功，并不表示存在四份成功 bench artifact。本轮 ARL 仍是 **3/4 quorum smoke**，
+不能进入论文主表。Practical 为 4/4 成功。
+
+| 项目 | 成功节点 service-grace-adjusted latency | 均值 | 样本状态 |
+| --- | --- | ---: | --- |
+| ARLADKR | 10131.64、10393.07、10555.22 ms | 10359.98 ms | 3/4 quorum smoke |
+| PracticalADKR | 3105.12、3177.85、3549.13、3592.13 ms | 3356.06 ms | 4/4 单 epoch smoke |
+
+ARL 三个成功节点的 candidate formation 为 `4090/4166/4273 ms`，均值 `4176.33 ms`；其中
+eligibility coin 均值 `129.78 ms`，proposer slots 均值 `4046.76 ms`。相对前一次同 topology 的
+candidate formation `4492/4616/4866 ms`（均值约 `4658 ms`），本轮方向性下降约 `10.3%`，但样本均
+只有一个 epoch 且都缺一个节点，不能据此宣称统计显著改善。ARL 总延迟没有同步下降，恢复与 handoff
+波动仍然很大：recover shard 均值 `3059 ms`，receipt 均值 `1222 ms`。
+
+新增观测显示 aggregate Store offer 在实际发送节点为 `137--203 ms`；`mean_coin_fanout_ms` 为
+`442--917 ms`，它累计该节点本 epoch 的多次 coin fan-out，不等同于 eligibility coin 单阶段延迟。
+candidate ACK wait/retry wait 只有 `0.02--0.04 ms`，说明固定 `250/500/1000/2000 ms` backoff 没有成为
+本轮秒级瓶颈。与此同时 attempts/retries 均为 `12/12`，这是因为当前计数把 proposer slot 被取消后立即
+返回的未 ACK attempt 也算作 retry；该字段不能直接解释为 12 次真实超时重传。复测后已在本地修正：
+取消的 wait 仍计入 attempt/ACK wait，但不再计入 retry，且发送循环在 context 或 service 取消后立即返回。
+该修正尚未重新部署到 AWS，因此本轮 artifact 中的 retry 字段仍按旧观测定义解释。
+当前证据把 candidate 的剩余主要成本进一步定位到 proposer slots 内部，尤其成功 proposer 的 component
+recovery（本轮约 `1713--2015 ms`）及后续阈值证书路径，而不是 candidate relay ACK backoff。
+
+Practical 的在线协议均值为 `3351.55 ms`，DXT network wait 均值 `393.71 ms`、APDB `442.44 ms`、
+MVBA `599.52 ms`、recovery `769.29 ms`。本轮命令未启用 Practical 的 `-comm-metrics`，其字节字段为零，
+不能用于通信量公平对照；延迟结果仍可作为同 fleet 的单 epoch smoke。
+
+本轮资源生命周期为 `12:25:28Z--12:41:35Z`，约 16.1 分钟。按复核时 `c7g.xlarge` Spot 价格范围
+（美国约 `$0.0526--0.0738/h`、爱尔兰约 `$0.0726--0.0775/h`）、四个公网 IPv4、120 GiB gp3 和少量
+跨区流量，保守记约 `$0.06`；累计量化成本由约 `$2.64` 更新为约 **`$2.70`**，最终仍以 Cost Explorer
+为准。AWS API 已复核两区 active 实例、open/active Spot request、实验 EBS volume 和实验 VPC 均为零。
+
+## 2026-08-19 WAN 重发与 transport 队头阻塞修复（本地验证）
+
+针对 r18 暴露的 `validation_request_wire_bytes=2631 B` 但实际发送约 `82--106 KB`、以及跨区
+`candidate_formation_ms` 约 `4.2 s` 的实现层放大，完成了不改变协议语义的 P0/P1 修复：
+
+- `CertifyPool`、`CertifyAggregate` 和 `runCoin` 首次使用 bounded fan-out，后续最多四轮
+  `250/500/1000/2000 ms` 指数退避，并只向尚未贡献 share/signature 的 peer 重试；删除 PoolCert
+  完成后的 5 秒全 fleet 后台重发。
+- APDB stored/recovery response、coin reply、pool/validation signature、decision/aggregate share
+  和 candidate ACK 改由每个 service 的有界 outbound worker queue 发送。dispatch 仍串行执行验证、
+  去重和 one-shot signing，但不再等待 TCP transport ACK。
+- TCP pooled connection 按 `(from,to,address,lane)` 建立 deterministic control/bulk 两 lane。
+  APDB/recovery/组件/candidate 大消息走 bulk lane，coin、certificate、MVBA 等控制消息走 control
+  lane；同 lane 顺序保持不变，跨 lane 不再互相阻塞。
+
+协议阈值、采样、签名、验证、候选规则和 latency 报告口径均未修改；没有扣除 candidate 或 recovery
+阶段，也没有降低 `n-f`/证书阈值。新增回归覆盖异步 candidate ACK、PoolCert 完成后无后台重发、非 validator
+不重复收到 validation request、双 lane key 分类和 TCP pooled reconnect。
+
+验证结果：
+
+- `go test ./core -run` 针对 Pool/VCert/recovery/candidate：通过。
+- `go test ./core -count=1`：通过，`433.711 s`。
+- `go test ./... -run '^$'`：通过。
+- `go test ./cmd/rladkrbench -run '^TestBenchMultiProcessFourNodePrivateStyleSubsets$' -count=1`：通过，`4.040 s`。
+- 本地四节点严格 TCP benchmark 的四个节点均 `success_runs=1`，共识 hash 一致；service-grace-adjusted
+  latency 为 `1947.55--2003.11 ms`，平均约 `1976 ms`。candidate formation 为 `615--1156 ms`，
+  `mean_candidate_fanout_retries=0`，validation request 单节点发送量约 `0.8--12.9 KB`，不再出现
+  r18 的 `82--106 KB` 级别重复广播。
+
+这只是本地验证，不能替代 AWS 跨区复测；当前累计 AWS 成本仍为约 `$2.70`，本节没有新增 AWS 资源或费用。
+下一轮应在同一 `us-east-1:2 + eu-west-1:2` fresh fleet 上要求 4/4 artifact，启用两边 comm metrics，
+连续至少 5 个 epoch，再比较 r18 的 `10359.98 ms` ARL 基线与新的分阶段分布。
+
+## 2026-08-19 下一步执行状态：AWS MCP 阻塞与本地回归
+
+本轮按 r18 后续计划检查了跨区 n=4 配置
+`practicaladkr_project_code/deployment/config.aws-cross-region-n4-use1-euw1.yaml`。配置仍为
+`us-east-1:2 + eu-west-1:2`、`c7g.xlarge` Spot、公网 IPv4、SSM 管理、`allow_partial_fleet=false`，
+并要求 4/4 节点完成后才作为正式样本。
+
+当前 Codex 会话没有注册 `aws-api` 的 `call_aws`/`suggest_aws_commands` 工具，且 MCP resource/template
+列表为空。依据 `cloud-operation` 技能的执行规则，本轮没有绕过授权直接运行 AWS CLI，也没有启动、修改或
+销毁任何 AWS 资源。因此本轮新增 AWS 成本为 `$0.00`，累计量化成本保持约 **`$2.70`**；此前资源均已清理，
+最终账单仍以 Cost Explorer 为准。
+
+在等待可审计 AWS 通道期间完成了本地验证：
+
+- `go test ./core -run 'Test(CVAPDB|CVCandidate|CVCertified|CVPool|CVValidation|CVSAPVSSRouter|TCPPool|TCPPooled|CVLaneNetwork|CVRunAgreement|CVComponentMaterialization|CVCoinOutput)' -count=1`：通过，`37.113s`。
+- `git diff --check`：通过。
+- `graft build --deep`：完成结构图刷新，`8970` 节点、`19695` 条边、`726` 个文件卡片；无 API key 时使用结构化构建。
+
+上述 MCP 状态仅记录当时环境。随后在用户明确授权下，已按既有 Fabric/Terraform 流程完成本配置的 r19
+复测，结果、清理和成本见下一节。
+
+## 2026-08-19 WAN 调度修复后两区域 n=4 `r19` 完整 smoke
+
+本轮不依赖 MCP，沿用 Fabric/Terraform 的既有可审计流程，实验名
+`paper-arl-use1-euw1-n4-r19-20260819`，run ID `run-20260819-140900`。拓扑保持
+`us-east-1:2`（`use1-az1`）加 `eu-west-1:2`（`euw1-az1`），四台均为 `c7g.xlarge` Spot、
+公网 IPv4 和跨区 `/32` TCP allowlist。使用当前 ARM64 二进制（`rladkrbench` SHA-256
+`e1c1b137ca134187b70be284fa0d0fcf24d0a977dbeb60c0fd4f0a314f0257d6`），并开启
+`-strict-network -comm-metrics`；四节点 setup bundle digest 一致。
+
+执行期实际观测到：`aws-up=4/4`、pre-launch `cleanup-ready=4/4`、同步启动前 runner readiness
+为 `3/4`（协议阈值），协议完成后四台均已经退出并产出成功 artifact。收集结果为 **4/4**、
+`success_runs=1`、一致 consensus hash
+`09a1ffbd0dde65a44d26eaef69a4ed91bc912aaaad87a1fa7946d7338577f125`，不存在遗留 runner stderr。
+finally cleanup 再次得到 `cleanup-ready=4/4`，两区 Terraform 都报告 destroy 完成；实例、EBS、VPC、
+security group、IGW、IAM profile/role 与 Spot request 均由该 destroy 路径回收。
+
+| 指标 | r19 四节点均值 | r18 quorum smoke | 说明 |
+| --- | ---: | ---: | --- |
+| service-grace-adjusted latency | `4660.29 ms` | `10359.98 ms` | r19 是完整 4/4 单 epoch smoke |
+| raw latency | `5660.98 ms` | 未作为本比较口径 | 保留约 `1000 ms` recovery service grace 的原始值 |
+| candidate formation | `1936.25 ms` | `4176.33 ms` | 约下降 `53.6%` |
+| proposer slots | `1821.09 ms` | 约 `4046.76 ms` | candidate 的主要剩余时间 |
+| leaf / component disperse | `808.25 / 468.00 ms` | `804 / 615 ms` | 同量级 |
+| aggregate agreement / recover shard / receipt | `536.75 / 1403.25 / 301.00 ms` | `~1222 / 3059 / 1222 ms` | r18 的 3/4 样本不可作显著性结论 |
+| total sent / recv per node | `1.188 / 1.179 MB` | 约 `1.30 / 1.29 MB` | 以 comm metrics 实测 |
+| validation request sent | `12.53 KB` | 约 `82--106 KB` | 定向重发和去除后台广播已消除主要放大 |
+| candidate fan-out retries | `0` | 旧观测口径不可靠 | r19 使用已修正的取消计数定义 |
+
+各节点 adjusted latency 为 `4692.95`、`4670.36`、`4603.62`、`4674.22 ms`，因此这轮验证了 WAN
+调度修复在同一公网 topology 下确实消除了 r18 的异常秒级放大。它仍仅有一个 epoch，不能作为论文
+median/p95 或统计显著性结论；正式对照仍需在相同 fresh-fleet 拓扑下让 ARLADKR 和 PracticalADKR
+各完成至少五个完整 epoch，并保留两边通信量指标。
+
+实验记录的 provision-to-collection 区间为 `14:02:40Z--14:13:31Z`；随后两区实例终止和网络销毁
+额外约数分钟。按四台实例约 `13--16` 分钟实际生命周期、追踪文档既用的 `c7g.xlarge` Spot 保守价、
+四个公网 IPv4、`4 x 30 GiB` gp3 与约数 MB 的跨区实验流量估算，本轮记 **约 `$0.05`**。累计量化成本
+由约 `$2.70` 更新为约 **`$2.75`**，最终以 AWS Cost Explorer 实际账单为准。
+
+销毁完成后，以 `arladkr-sso` profile 对 `us-east-1` 和 `eu-west-1` 做了只读 API 复核：两区按
+`ExperimentGroup=paper-arl-use1-euw1-n4-r19-20260819` 过滤的 non-terminated instance 均为零，
+open/active Spot request 也均为零。
+
+## 2026-08-19 百节点部署路径优化（本地验证）
+
+为避免部署控制面成为 `n=100--256` 论文实验的主要等待来源，Fabric 的 SSM 批处理上限和默认并行度
+均改为 `50`。SSM API 的一个 `send-command` 最多接受 50 个 instance ID；实现继续按 Region 并发，
+每个 Region 内将超过 50 个节点切为连续批次，且每批可同时启动 50 个下载/安装命令。所有当前可编辑的
+AWS 基础配置（含两区域 n=4 配置）也显式设为 `ssm_parallelism: 50`，历史 experiment state 不回写。
+binary 与 shared setup 的 presigned artifact URL 默认有效期同步提升到 `3600s`（最低 `900s`），避免 256
+节点在后续 SSM 批次开始前 URL 已过期。
+
+`shared-public` setup 不再将 `public/` 与全部 `node-XXXXXX/` 目录打进一个 archive 后让每台节点下载。
+现在流程为：上传一份仅含 `public/` 的 archive、每个 NodeSlot 一份独立 shard、以及一份短时 presigned
+URL index；每个 SSM target 先并发下载公共 archive，再从 index 选择自己的 shard，逐项 SHA-256 校验后
+原子安装。这样每节点接收量从 `P(n) + n*S` 降为 `P(n) + S`，集群总量从
+`n*P(n) + n^2*S` 降为 `n*P(n) + n*S`，消除了全部私有 shard 的二次重复项。公共 registry `P(n)`
+本身通常随 n 线性增长且每台协议节点都必须持有，因此严格的总下载复杂度仍可能为 `O(n^2)`；本修改不虚称
+降为 `O(n)`，重点是减少无协议必要性的重复材料与部署尾部。节点磁盘上只安装本 NodeSlot 的材料；短时 index 仍可见所有 shard URL，
+因此该模式仍是 academic shared-public
+部署而不是生产级私钥隔离。它不改变 trusted-offline setup、协议消息、阈值或 latency 统计口径。
+
+本地验证：`python3 -m unittest test_fabfile.py` 通过（`41` 项，约 `0.3s`），覆盖 51 个目标拆成 `50+1`
+且第一批并发为 50、公共 archive 不含 node shard、每节点 shard/index 安装命令存在；`py_compile` 与
+空白检查通过。此项仅修改编排代码与配置，未启动 AWS 资源，新增成本 `$0.00`，累计量化成本仍约 **`$2.75`**。
+
+后续可继续简化但尚未实现的流程包括：将当前临时 S3 artifact 改为按源码 digest 缓存的固定实验 bucket；
+为多 Region 在各 Region 复制同一不可变 binary/setup object；以及将多 epoch 同一 fleet 的 setup 与 binary
+安装复用为一次。这三项均不应让 GitHub clone 或远端编译进入测量路径，以保持节点二进制、构建环境和实验
+启动时间可复现。
+
+## 2026-08-19 现有 AMI n=10 两区域 deployment smoke
+
+为验证 AMI 不变时的新 SSM/shard 部署路径，新增并使用仅含两个 Region 的配置
+`practicaladkr_project_code/deployment/config.aws-cross-region-n10-use1-euw1.yaml`：
+`us-east-1:5`（`use1-az1`）加 `eu-west-1:5`（`euw1-az1`），总 `n=10,f=3`，全部为现有
+`c7g.xlarge` Spot 和原 AMI（美国 `ami-0cee8a82967ef97ac`、爱尔兰 `ami-09c02ed1bf7b2b15b`）。
+实验名经安全截断为 `paper-arl-use1-euw1-n10-deploy-r20-20`，run ID 为
+`run-20260819-145457`。
+
+部署链路验证结果：
+
+- `aws-up=10/10`，两 Region 的 SSM target 全部可达。
+- setup cache 生成 n=10/f=3 bundle，digest 为
+  `e7ca89e3cf7dcb1734cc14061e1c2f814d5efa2990e4b9c6eb06425bc43211f3`。
+- shared-public 新路径完成公共 archive、NodeSlot shard 和 index 分发，pre-launch
+  `cleanup-ready=10/10`；没有重建 AMI，也没有远端编译。
+- runner 启动 `10/10`，协议 readiness `7/10`，协议最终 `success=10/10`，收集 `10/10`。
+- 十个 artifact 的 consensus hash 全部为
+  `28470e01498da4ed8dd55d8b7970cc90f1617af8862b2c30f8798a0f3d5287db`，setup digest 一致，
+  candidate fan-out retries 总数为 `0`。
+
+本轮单 epoch ARL smoke 指标（只用于部署/规模 sanity check，不进入论文统计主表）：平均
+service-grace-adjusted latency `10071.77 ms`，raw latency `11072.44 ms`，setup `119.23 ms`，
+candidate formation `4995.80 ms`，每节点平均发送/接收 `3.451/3.372 MB`。n=10 的 candidate 和
+recovery 成本明显高于 n=4，符合协议规模增长预期；这轮目标是证明现有 AMI 能承载新部署流程，不能
+单独归因于 AMI 或宣布性能结论。
+
+实验记录时间为 `14:50:25Z--15:00:26Z`，随后完成 `cleanup-ready=10/10` 和两区 Terraform destroy。
+按十台 Spot 实例约 10--15 分钟生命周期、十个公网 IPv4、`10 x 30 GiB` gp3、SSM 与少量跨区流量，
+本轮保守记 **约 `$0.14`**；AWS 只读复核显示两区 non-terminated instance 与 open/active Spot
+request 均为零。累计量化成本由约 `$2.75` 更新为约 **`$2.89`**，最终以 Cost Explorer 为准。
+
+结论：现有 AMI 足以支持优化后的百节点方向部署路径，当前没有重建 AMI 的必要。下一步若进入
+`n>=100`，应先复用同一 AMI 做纯 setup/deployment soak，再决定是否把稳定 binary 预置进新 AMI；
+AMI bake 不应与论文协议 latency 样本混在同一轮。
+
+## 2026-08-19 PracticalADKR 同 topology 跨 Region smoke（r21）
+
+为回答 ARL r20 的同 topology 对照问题，本轮新增并执行 Practical-only runner
+`practicaladkr_project_code/deployment/run_practical_cross_region.py`。它复用了同一套 Terraform、
+公网 `/32` allowlist、SSM shared-public setup、10 节点 cleanup-ready barrier 和 artifact collector，
+没有先在同一 fleet 上运行 ARL，也没有重建 AMI。实验名为
+`practical-use1-euw1-n10-r21-20260819`，拓扑与 ARL r20 完全一致：`us-east-1:5`（`use1-az1`）+
+`eu-west-1:5`（`euw1-az1`），`n=10,f=3`，`c7g.xlarge` Spot，现有 AMI；参数为
+`runs=1`、`paillier-bits=3072`、`kappa-profile=matched-lifetime`、`mvba-network=tcp`、
+`strict-network=true`、`comm-metrics=true`。
+
+部署和结果完整性：
+
+- 两区 SSM `aws-up=10/10`，setup bundle digest 为
+  `653b68ea4946e30e21a35f335ea5abf5e40232a8e91d92ed2ff31d87b067870f`，10/10 节点完成 cleanup-ready；
+- Practical readiness `10/10`（quorum=7），最终 `success=10/10`，artifact 收集 `10/10`；
+- 十个节点的 consensus hash 均为
+  `3f3855face8f9948e583a805d7efb08c84d6d6c3a72c1a637983bf030c57da82`，fallback/timeout 均为 0；
+- 运行从 `15:19:12Z` 到 `15:42:46Z`，随后两区 Terraform 资源全部销毁，最终 cleanup-ready barrier
+  通过，non-terminated instance 和 Spot request 均为 0。
+
+十个节点 artifact 的逐节点范围和均值如下。这里的均值是同一轮各节点报告的 local e2e latency
+的算术平均；因为只有一个 epoch，它是 smoke 描述统计，不是论文主表的 median/p95 结论。
+
+| 指标 | 节点范围 | 10 节点均值 |
+| --- | ---: | ---: |
+| `mean_latency_ms` | `6171.45--7480.80` ms | **`6541.07` ms** |
+| `mean_online_protocol_ms` | `6163.63--7472.95` ms | **`6533.18` ms** |
+| `mean_setup_ms` | `7.72--7.99` ms | **`7.86` ms** |
+| `mean_dxt_dealing_ms` | `738.53--1352.42` ms | `938.50` ms |
+| `mean_apdb_dispersal_ms` | `275.88--508.49` ms | `425.95` ms |
+| `mean_mvba_agree_ms` | `1266.10--1267.67` ms | `1266.44` ms |
+| `mean_recover_ms` | `1577.08--1752.84` ms | `1607.71` ms |
+| `mean_derive_ms` | `1198.32--1917.33` ms | `1357.86` ms |
+| `mean_aggregate_derive_ms` | `3615.58--4295.16` ms | `3764.31` ms |
+| `mean_total_sent_bytes` | `984,441--1,050,770` B | **`1,033,708` B** |
+| `mean_total_recv_bytes` | `1,002,636--1,046,333` B | **`1,028,170` B** |
+
+### 对结果的判断
+
+这轮 Practical 数据在协议和统计完整性上符合预期：所有节点成功、决定集合为 7、选择/验证数量为
+`4/4`、共识 hash 一致，setup 也被明确排除在 online latency 外。它比同 AZ n=10 的既有
+`4.10--4.44 s` smoke 高约 `2.1--2.4 s`，但仍低于同一跨区 topology 的 ARL r20
+`10.07177 s`（约低 35%）。通信量约 `1.034/1.028 MB` 每节点，也与 Practical 的单 lane
+协议结构相符，明显低于 ARL r20 的 `3.451/3.372 MB`；没有发现因 artifact 截断、fallback、
+本地 shortcut 或 quorum 不足造成的虚低数据。
+
+跨区增量不能简单解释成公网 RTT 本身。Practical 的 MVBA agree 在节点间几乎稳定在 `1.266 s`，
+而 DXT dealing/network wait、APDB dispersal、recovery 和 derive/aggregate derive 的 barrier
+会把跨区的几十毫秒级 RTT 放大为多轮等待；最高的 `7.481 s` 节点同时出现 `derive=1.917 s`、
+`aggregate_derive=4.295 s`，说明尾部主要来自协议阶段和节点本地计算/调度，而不是单个 TCP 握手。
+因此本轮结果“方向上合理”，但不能用单 epoch 证明固定的跨区开销，更不能把 6.541 s 直接作为论文
+最终性能结论。正式比较仍应在该 fresh-fleet topology 下各运行至少 5--10 个 epoch，报告 median、
+p95、阶段分布和通信量；ARL 与 Practical 必须继续使用相同 AMI、n/f、TCP、setup 排除口径和
+cleanup barrier。
+
+本轮十台 Spot 实例约 23.6 分钟生命周期，按两区 c7g.xlarge Spot、10 个 30 GiB gp3、临时公网
+IPv4、SSM 和少量跨区流量保守计 **约 `$0.24`**，累计量化成本由约 `$2.89` 更新为约 **`$3.13`**；
+最终账单以 Cost Explorer 为准。该轮仍属于实验 smoke，未修改协议设计。
+
+## 2026-08-20 ARL 公网延迟异常审计（不启动 AWS）
+
+本轮只做本地 A/B 和代码审计，没有创建实例，也没有新增 AWS 成本。审计对象是
+`paper-arl-use1-euw1-n10-deploy-r20-20` 的 `n=10,f=3`、`us-east-1:5 + eu-west-1:5` 公网结果。
+
+结论：数据不是统计脚本把 service grace 重复计入造成的。r20 的平均值为
+`mean_latency=10071.77 ms`、`mean_raw_latency=11072.44 ms`、`service_grace=1000.18 ms`，
+十个节点成功且 consensus hash 一致。candidate ACK 等待均值约 `63.91 ms`，重试为 `0`，
+所以 candidate ACK backoff 不是主要瓶颈。
+
+最可疑的代码路径是 `core/transport_tcp_loopback.go` 的 pooled TCP：每个 frame 写入后必须
+等待远端 1-byte transport ACK；同一 `(from,to,tag)` 的 pooled connection 由 `pc.mu` 串行保护。
+而 `cvRunSampledProposerSlotsV2` 同时运行多个 proposer，多个 component/APDB recovery 请求会
+共享同一 peer/tag 连接。公网每条消息都引入一次 WAN RTT，本地 loopback 不会暴露该排队效应。
+component INIT 还在 `disperseComponentWire` 中逐 holder 同步发送，进一步放大跨区 RTT。
+
+对照结果：
+
+- `ff91394` 的本地严格 TCP n=10 smoke 约 `6.13 s`，说明协议阶段本身并非固定 10 秒；
+- 当前 `d63add8`/未提交 WAN 优化工作区的本地结果在 `8.0--10.5 s` 间波动，不能直接作为论文基线；
+- 在 loopback 临时注入约 `35 ms` 单向延迟（约 `70 ms RTT`）时，基线一次运行达到约 `39.68 s`，
+  仅 `7/10` 达到 quorum，且 proposer component recovery 累积约 `23.5 s`。实验结束后 qdisc
+  已确认恢复为 `noqueue`。
+
+因此，公网 r20 的约 10 秒是当前 transport ACK/连接串行化对 WAN RTT 的放大结果，数据并非虚低或
+单纯报告错误。一个未改变协议语义的本地原型已按 recovery payload digest 将 bulk 消息稳定分到
+3 条 pooled lane；在 `ff91394` 本地 n=10 上从约 `6.13 s` 降至约 `4.64 s`，并达到 `10/10`
+完成。35 ms 单向 RTT 注入下，原型约 `36.68 s`，较单 lane 的约 `39.68 s` 有限改善，说明
+连接并发确实命中瓶颈但不能单独消除 WAN 多轮等待。该原型仍需补充按 tag 的 ACK RTT、pool lock
+wait、dial 次数和 recovery request 消息计数，再决定是否纳入正式实现；在此之前不应把 r20
+与 Practical 的延迟直接作为论文最终结论，也不应重建 AMI。
+
+## 2026-08-20 本地 n=10 recovery/scalar-exchange liveness 收口
+
+本轮继续使用本地严格 TCP `n=10,f=3` 审计上述候选版，没有启动 AWS、没有创建云资源，新增 AWS
+成本为 `$0`，累计量化成本仍约 **`$3.13`**。
+
+首先修正了本地共享主机 harness 的启动条件：component listener 默认等待全部 `n` 个进程，独立
+MVBA listener 默认等待全部 peer，并按 `host_cpus/n` 设置每节点 `GOMAXPROCS`。这些只是本地 artifact
+收集与共享 CPU 调度规则；协议、AWS runner 和最终成功条件仍为 `n-f`。
+
+随后通过 60 秒 settle 和 Go `SIGQUIT` 堆栈确认存在两条真实 liveness 问题：
+
+- APDB aggregate recovery 首轮 transport send 只有 `3/4` 成功时立即返回。现在保留初始全 holder
+  并行 fan-out，只对发送失败的 holder 做 4 次指数退避重试；recipient 集合和 `dataShards=4` 不变，
+  collector 继续按认证 holder/index 幂等去重。
+- `RecoverAndExchangeScalarShare` 和 `FinalizeDecision` 原来每 250 ms 向整个 roster 无限重发。早完成
+  节点退出后，尾部节点可能永远达不到 `n-f=7` 并持续增加通信量。两条路径现在只向尚未贡献有效
+  share 的 peer 做 4 次有界重试，阈值仍为 `n-f`；不足时返回明确错误，不再静默卡死。
+
+本地共享主机上，500 ms route timeout 只保留约 1 秒 recovery-service grace，CPU 调度尾部会让 honest
+receiver 在 holder 退出后才开始 aggregate recovery。将现有 route timeout 设为 1 秒会选择既有的
+10 秒 holder-service grace，且报告口径已从 latency 中扣除此 grace。因此 `run_cv_cluster.sh` 现在仅对
+本地 harness 默认使用 `1s`；AWS runner 未改，后续公网复测应显式记录该参数。
+
+最终代码的本地严格 TCP 诊断轮为：
+
+- `10/10` 节点成功，quorum=`7`，all-success=`true`，consensus hash 只有 1 个；
+- quorum latency `8660.64 ms`，all-nodes latency `8724.17 ms`，节点均值 `8633.06 ms`；
+- mean setup `145.72 ms`，平均发送/接收约 `4.891/4.809 MB` 每节点；
+- 没有 `APDB recovery reached ... holders`、scalar-share threshold、decision threshold 或 timeout 错误。
+
+该轮只证明 liveness 收口。共享主机多进程的 leaf/candidate 调度波动仍很大，同一候选版曾出现 quorum
+约 `4.36 s` 的运行，因此 `8.66 s` 不能作为论文性能基线。下一步应先提交并推送当前候选版，再在
+相同 `us-east-1:5 + eu-west-1:5` Spot topology 上复测 ARL `n=10`，同时记录 route timeout、service
+grace、成功节点数、candidate/recovery 分解和通信量；在新公网数据稳定前不重建 AMI。

@@ -61,6 +61,18 @@ func (t *cvRouterTestTransport) sentCount(tag string) int {
 	return count
 }
 
+func (t *cvRouterTestTransport) sentCountFromTo(tag string, from, to int) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	count := 0
+	for _, msg := range t.sent {
+		if msg.Tag == tag && msg.From == from && msg.To == to {
+			count++
+		}
+	}
+	return count
+}
+
 func (t *cvRouterTestTransport) sentFromByTag(tag string) []int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

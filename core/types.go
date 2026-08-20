@@ -101,6 +101,14 @@ type EpochResult struct {
 	CVLeafBuildLatency                      time.Duration
 	CVComponentDisperseLatency              time.Duration
 	CVComponentCollectionLatency            time.Duration
+	CVEligibilityCoinLatency                time.Duration
+	CVProposerSlotsLatency                  time.Duration
+	CVCoinFanoutLatency                     time.Duration
+	CVCandidateFanoutACKWaitLatency         time.Duration
+	CVCandidateFanoutRetryWaitLatency       time.Duration
+	CVCandidateFanoutMaxPeerLatency         time.Duration
+	CVCandidateFanoutAttempts               int
+	CVCandidateFanoutRetries                int
 	CVAggregateDisperseLatency              time.Duration
 	CVAggregateAgreementLatency             time.Duration
 	CVRecoverShardLatency                   time.Duration

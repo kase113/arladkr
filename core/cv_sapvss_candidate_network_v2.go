@@ -166,22 +166,46 @@ func (s *cvAPDBNetworkServiceV2) waitCertifiedCandidateACKV2(
 func (s *cvAPDBNetworkServiceV2) sendCertifiedCandidatePeerV2(
 	ctx context.Context, state *cvCandidateFanoutStateV2, peer int, digest string, wire []byte,
 ) error {
+	started := time.Now()
+	defer func() { s.recordCandidateFanoutPeerLatencyV2(time.Since(started)) }()
 	for attempt := 0; attempt < cvCandidateFanoutMaxAttemptsV2; attempt++ {
 		if state.isACKed(peer) {
 			return nil
 		}
 		delay := cvCandidateFanoutRetryBaseV2 << attempt
 		if err := s.send(peer, cvTagCertifiedCandidateV2, wire); err == nil {
-			if s.waitCertifiedCandidateACKV2(ctx, state, peer, delay) {
+			waitStarted := time.Now()
+			acknowledged := s.waitCertifiedCandidateACKV2(ctx, state, peer, delay)
+			canceled := ctx.Err() != nil || s.ctx.Err() != nil
+			s.recordCandidateFanoutAttemptV2(time.Since(waitStarted), !acknowledged && !canceled)
+			if acknowledged {
 				return nil
+			}
+			if canceled {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return s.ctx.Err()
 			}
 		} else if ctx.Err() != nil || s.ctx.Err() != nil {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			return s.ctx.Err()
-		} else if s.waitCertifiedCandidateACKV2(ctx, state, peer, delay) {
-			return nil
+		} else {
+			waitStarted := time.Now()
+			acknowledged := s.waitCertifiedCandidateACKV2(ctx, state, peer, delay)
+			canceled := ctx.Err() != nil || s.ctx.Err() != nil
+			s.recordCandidateFanoutAttemptV2(time.Since(waitStarted), !acknowledged && !canceled)
+			if acknowledged {
+				return nil
+			}
+			if canceled {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return s.ctx.Err()
+			}
 		}
 	}
 	if state.isACKed(peer) {
@@ -410,7 +434,7 @@ func (s *cvAPDBNetworkServiceV2) handleCertifiedCandidateV2(msg Message) {
 	// validity. Sending it before expensive verification avoids WAN retries
 	// while preserving the verification gate below.
 	if ack, err := cvEncodeCertifiedCandidateACKV2(digest); err == nil {
-		_ = s.send(msg.From, cvTagCertifiedCandidateACKV2, ack)
+		_ = s.sendAsync(msg.From, cvTagCertifiedCandidateACKV2, ack, nil)
 	}
 	if cached := s.cachedCertifiedCandidateWireV2(digest); bytes.Equal(cached, msg.Body) {
 		return

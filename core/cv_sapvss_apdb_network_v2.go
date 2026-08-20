@@ -58,13 +58,22 @@ const (
 )
 
 const (
-	cvControlRetryIntervalV2 = 250 * time.Millisecond
-	cvFanoutMaxParallelV2    = 16
+	cvControlRetryIntervalV2    = 250 * time.Millisecond
+	cvControlRetryMaxAttemptsV2 = 4
+	cvFanoutMaxParallelV2       = 16
 )
 
 type cvFanoutSendResultV2 struct {
+	recipient int
 	wireBytes int
 	err       error
+}
+
+type cvOutboundMessageV2 struct {
+	to       int
+	tag      string
+	payload  []byte
+	onResult func(error)
 }
 
 type cvServiceExperimentMetricsV2 struct {
@@ -91,6 +100,13 @@ type cvServiceExperimentMetricsV2 struct {
 	componentDispersalRecvBytes         uint64
 	aggregateDispersalSentBytes         uint64
 	aggregateDispersalRecvBytes         uint64
+	coinFanoutLatency                   time.Duration
+	aggregateOfferSendLatency           time.Duration
+	candidateFanoutACKWaitLatency       time.Duration
+	candidateFanoutRetryWaitLatency     time.Duration
+	candidateFanoutMaxPeerLatency       time.Duration
+	candidateFanoutAttempts             int
+	candidateFanoutRetries              int
 	tagSentBytes                        map[string]uint64
 	tagRecvBytes                        map[string]uint64
 }
@@ -179,6 +195,7 @@ type cvAPDBNetworkServiceV2 struct {
 	pendingCoins           map[string]*cvPendingCoinV2
 	localCoinShares        map[string][]byte
 	coinShareReplies       map[string]map[int]struct{}
+	coinShareReplyInFlight map[string]map[int]struct{}
 	poolSlots              map[int]*cvNetworkPoolSlotV2
 	eligibleProposers      map[int]struct{}
 	eligibilityValue       []byte
@@ -209,6 +226,8 @@ type cvAPDBNetworkServiceV2 struct {
 	certifiedCandidatesV2  map[string][]byte
 	candidateFanoutV2      map[string]*cvCandidateFanoutStateV2
 	certifiedCandidateChV2 chan *cvAgreementObjectV2
+	outbound               chan cvOutboundMessageV2
+	outboundWG             sync.WaitGroup
 	experimentMetrics      cvServiceExperimentMetricsV2
 	done                   chan struct{}
 }
@@ -279,6 +298,7 @@ func newCVAPDBNetworkServiceV2(
 		pendingCoins:           make(map[string]*cvPendingCoinV2),
 		localCoinShares:        make(map[string][]byte, 2),
 		coinShareReplies:       make(map[string]map[int]struct{}, 2),
+		coinShareReplyInFlight: make(map[string]map[int]struct{}, 2),
 		poolSlots:              make(map[int]*cvNetworkPoolSlotV2, cfg.Params.proposerSampleSize),
 		eligibleProposers:      make(map[int]struct{}, cfg.Params.proposerSampleSize),
 		pendingValidation:      make(map[string]*cvPendingValidationV2),
@@ -302,6 +322,7 @@ func newCVAPDBNetworkServiceV2(
 		certifiedCandidatesV2:  make(map[string][]byte, cfg.Params.proposerSampleSize),
 		candidateFanoutV2:      make(map[string]*cvCandidateFanoutStateV2),
 		certifiedCandidateChV2: make(chan *cvAgreementObjectV2, cfg.Params.proposerSampleSize),
+		outbound:               make(chan cvOutboundMessageV2, cvOutboundQueueCapacityV2(len(cfg.OldRoster)+len(cfg.NewRoster))),
 		experimentMetrics: cvServiceExperimentMetricsV2{
 			tagSentBytes: make(map[string]uint64), tagRecvBytes: make(map[string]uint64),
 		},
@@ -316,8 +337,71 @@ func newCVAPDBNetworkServiceV2(
 			return nil, err
 		}
 	}
+	workers := len(cfg.OldRoster) + len(cfg.NewRoster)
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	service.outboundWG.Add(workers)
+	for range workers {
+		go service.runOutbound()
+	}
 	go service.run()
 	return service, nil
+}
+
+func cvOutboundQueueCapacityV2(committeeSize int) int {
+	capacity := committeeSize * 32
+	if capacity < 128 {
+		return 128
+	}
+	if capacity > 4096 {
+		return 4096
+	}
+	return capacity
+}
+
+func (s *cvAPDBNetworkServiceV2) runOutbound() {
+	defer s.outboundWG.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case message := <-s.outbound:
+			err := s.send(message.to, message.tag, message.payload)
+			if message.onResult != nil {
+				message.onResult(err)
+			}
+		}
+	}
+}
+
+// sendAsync keeps the protocol dispatch loop free of transport ACK waits.
+// The bounded queue supplies backpressure without dropping protocol replies.
+func (s *cvAPDBNetworkServiceV2) sendAsync(to int, tag string, payload []byte, onResult func(error)) error {
+	if s == nil || s.ctx == nil || tag == "" || len(payload) == 0 {
+		return fmt.Errorf("invalid asynchronous CV V2 send")
+	}
+	message := cvOutboundMessageV2{to: to, tag: tag, payload: append([]byte(nil), payload...), onResult: onResult}
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	case s.outbound <- message:
+		return nil
+	}
+}
+
+func cvControlRetryDelayV2(attempt int) time.Duration {
+	delay := cvControlRetryIntervalV2
+	for i := 0; i < attempt && delay < 2*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 2*time.Second {
+		return 2 * time.Second
+	}
+	return delay
 }
 
 func (s *cvAPDBNetworkServiceV2) EligibilityCoin(ctx context.Context) (*cvCoinOutputV2, error) {
@@ -438,14 +522,11 @@ func (s *cvAPDBNetworkServiceV2) CertifyPool(ctx context.Context, pool *cvPoolV2
 		s.mu.Unlock()
 	}()
 
-	retry := time.NewTicker(100 * time.Millisecond)
-	defer retry.Stop()
-	for {
-		for _, member := range s.cfg.OldRoster {
-			if member != s.cfg.LocalNode {
-				_ = s.send(member, cvTagPoolOfferV2, poolWire)
-			}
-		}
+	// The transport already acknowledges delivery into the peer inbox. Send
+	// once, then retry only peers that have not contributed a share. This keeps
+	// a WAN RTT from turning a whole-fleet ticker into a resend storm.
+	_ = s.sendFanoutMeasuredV2(s.cfg.OldRoster, s.cfg.LocalNode, cvTagPoolOfferV2, poolWire)
+	for attempt := 0; attempt < cvControlRetryMaxAttemptsV2; attempt++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -453,8 +534,30 @@ func (s *cvAPDBNetworkServiceV2) CertifyPool(ctx context.Context, pool *cvPoolV2
 			return nil, s.ctx.Err()
 		case <-slot.sharesReady:
 			goto recoverCertificate
-		case <-retry.C:
+		case <-time.After(cvControlRetryDelayV2(attempt)):
 		}
+		s.mu.Lock()
+		missing := make([]int, 0, len(s.cfg.OldRoster))
+		for _, member := range s.cfg.OldRoster {
+			if member != s.cfg.LocalNode {
+				if _, ok := slot.shares[member]; !ok {
+					missing = append(missing, member)
+				}
+			}
+		}
+		s.mu.Unlock()
+		if len(missing) == 0 {
+			continue
+		}
+		_ = s.sendFanoutMeasuredV2(missing, -1, cvTagPoolOfferV2, poolWire)
+	}
+	select {
+	case <-slot.sharesReady:
+		goto recoverCertificate
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	}
 
 recoverCertificate:
@@ -484,35 +587,7 @@ recoverCertificate:
 	slot.certWire = append([]byte(nil), certWire...)
 	cvNotifyAPDBV2(slot.certReady)
 	s.mu.Unlock()
-	for _, member := range s.cfg.OldRoster {
-		if member != s.cfg.LocalNode {
-			_ = s.send(member, cvTagPoolCertV2, certWire)
-		}
-	}
-	// Late pool waiters may not have been listening when the first broadcast
-	// was sent. A bounded resend keeps the academic network path live without
-	// retaining arbitrary certificates.
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		deadline := time.NewTimer(5 * time.Second)
-		defer deadline.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				for _, member := range s.cfg.OldRoster {
-					if member != s.cfg.LocalNode {
-						_ = s.send(member, cvTagPoolOfferV2, poolWire)
-						_ = s.send(member, cvTagPoolCertV2, certWire)
-					}
-				}
-			case <-deadline.C:
-				return
-			case <-s.ctx.Done():
-				return
-			}
-		}
-	}()
+	_ = s.sendFanoutMeasuredV2(s.cfg.OldRoster, s.cfg.LocalNode, cvTagPoolCertV2, certWire)
 	return certificate, nil
 }
 
@@ -609,12 +684,8 @@ func (s *cvAPDBNetworkServiceV2) CertifyAggregate(
 		s.mu.Unlock()
 	}()
 
-	retry := time.NewTicker(100 * time.Millisecond)
-	defer retry.Stop()
-	for {
-		for _, member := range s.cfg.OldRoster {
-			_ = s.send(member, cvTagValidationRequestV2, requestWire)
-		}
+	_ = s.sendFanoutMeasuredV2(s.cfg.OldRoster, -1, cvTagValidationRequestV2, requestWire)
+	for attempt := 0; attempt < cvControlRetryMaxAttemptsV2; attempt++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -622,8 +693,27 @@ func (s *cvAPDBNetworkServiceV2) CertifyAggregate(
 			return nil, s.ctx.Err()
 		case <-pending.ready:
 			goto buildCertificate
-		case <-retry.C:
+		case <-time.After(cvControlRetryDelayV2(attempt)):
 		}
+		s.mu.Lock()
+		missing := make([]int, 0, len(validatorSample))
+		for _, member := range validatorSample {
+			if _, ok := pending.signatures[member]; !ok {
+				missing = append(missing, member)
+			}
+		}
+		s.mu.Unlock()
+		if len(missing) > 0 {
+			_ = s.sendFanoutMeasuredV2(missing, -1, cvTagValidationRequestV2, requestWire)
+		}
+	}
+	select {
+	case <-pending.ready:
+		goto buildCertificate
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	}
 
 buildCertificate:
@@ -794,22 +884,63 @@ func (s *cvAPDBNetworkServiceV2) FinalizeDecision(
 		}
 		s.mu.Unlock()
 	}()
-	retry := time.NewTicker(cvControlRetryIntervalV2)
-	defer retry.Stop()
-	for {
-		s.sendFanoutMeasuredV2(s.cfg.OldRoster, s.cfg.LocalNode, cvTagDecisionShareV2, shareWire)
+	for attempt := 0; ; attempt++ {
+		s.mu.Lock()
+		missing := make([]int, 0, len(s.cfg.OldRoster))
+		for _, member := range s.cfg.OldRoster {
+			if member == s.cfg.LocalNode {
+				continue
+			}
+			if _, received := pending.shares[member]; !received {
+				missing = append(missing, member)
+			}
+		}
+		shareCount := len(pending.shares)
+		hasCertificate := len(pending.certificate) != 0
+		s.mu.Unlock()
+		if hasCertificate || shareCount >= s.controlSigner.Threshold() {
+			break
+		}
+		if len(missing) != 0 {
+			s.sendFanoutMeasuredV2(missing, -1, cvTagDecisionShareV2, shareWire)
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-s.ctx.Done():
 			return nil, s.ctx.Err()
 		case <-pending.ready:
-			goto recoverDecision
-		case <-retry.C:
+			break
+		default:
+		}
+		s.mu.Lock()
+		shareCount = len(pending.shares)
+		hasCertificate = len(pending.certificate) != 0
+		s.mu.Unlock()
+		if hasCertificate || shareCount >= s.controlSigner.Threshold() {
+			break
+		}
+		if attempt >= cvControlRetryMaxAttemptsV2 {
+			return nil, fmt.Errorf(
+				"CV V2 decision finalization reached %d shares, need %d",
+				shareCount, s.controlSigner.Threshold(),
+			)
+		}
+		timer := time.NewTimer(cvControlRetryDelayV2(attempt))
+		select {
+		case <-ctx.Done():
+			_ = timer.Stop()
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			_ = timer.Stop()
+			return nil, s.ctx.Err()
+		case <-pending.ready:
+			_ = timer.Stop()
+			break
+		case <-timer.C:
 		}
 	}
 
-recoverDecision:
 	s.mu.Lock()
 	decCert := append([]byte(nil), pending.certificate...)
 	shares := make(map[int][]byte, len(pending.shares))
@@ -945,22 +1076,61 @@ func (s *cvAPDBNetworkServiceV2) RecoverAndExchangeScalarShare(
 		}
 		s.mu.Unlock()
 	}()
-	retry := time.NewTicker(cvControlRetryIntervalV2)
-	defer retry.Stop()
-	for {
-		s.sendFanoutMeasuredV2(s.cfg.NewRoster, s.cfg.LocalNode, cvTagAggregateShareV2, outputWire)
+	for attempt := 0; ; attempt++ {
+		s.mu.Lock()
+		missing := make([]int, 0, len(s.cfg.NewRoster))
+		for _, member := range s.cfg.NewRoster {
+			if member == s.cfg.LocalNode {
+				continue
+			}
+			if _, received := pending.outputs[member]; !received {
+				missing = append(missing, member)
+			}
+		}
+		outputCount := len(pending.outputs)
+		s.mu.Unlock()
+		if outputCount >= s.cfg.Params.newShareThreshold {
+			break
+		}
+		if len(missing) != 0 {
+			s.sendFanoutMeasuredV2(missing, -1, cvTagAggregateShareV2, outputWire)
+		}
 		select {
 		case <-ctx.Done():
 			return nil, fr.Element{}, nil, bls12381.G1Affine{}, ctx.Err()
 		case <-s.ctx.Done():
 			return nil, fr.Element{}, nil, bls12381.G1Affine{}, s.ctx.Err()
 		case <-pending.ready:
-			goto recoverPublicKey
-		case <-retry.C:
+			break
+		default:
+		}
+		s.mu.Lock()
+		outputCount = len(pending.outputs)
+		s.mu.Unlock()
+		if outputCount >= s.cfg.Params.newShareThreshold {
+			break
+		}
+		if attempt >= cvControlRetryMaxAttemptsV2 {
+			return nil, fr.Element{}, nil, bls12381.G1Affine{}, fmt.Errorf(
+				"CV V2 scalar-share exchange reached %d outputs, need %d",
+				outputCount, s.cfg.Params.newShareThreshold,
+			)
+		}
+		timer := time.NewTimer(cvControlRetryDelayV2(attempt))
+		select {
+		case <-ctx.Done():
+			_ = timer.Stop()
+			return nil, fr.Element{}, nil, bls12381.G1Affine{}, ctx.Err()
+		case <-s.ctx.Done():
+			_ = timer.Stop()
+			return nil, fr.Element{}, nil, bls12381.G1Affine{}, s.ctx.Err()
+		case <-pending.ready:
+			_ = timer.Stop()
+			break
+		case <-timer.C:
 		}
 	}
 
-recoverPublicKey:
 	s.mu.Lock()
 	outputs := make([]*cvScalarShareOutputV2, 0, len(pending.outputs))
 	for _, share := range pending.outputs {
@@ -1058,6 +1228,9 @@ func (s *cvAPDBNetworkServiceV2) runCoin(ctx context.Context, invocation []byte)
 	if s.coinShareReplies[key] == nil {
 		s.coinShareReplies[key] = make(map[int]struct{}, len(s.cfg.OldRoster)-1)
 	}
+	if s.coinShareReplyInFlight[key] == nil {
+		s.coinShareReplyInFlight[key] = make(map[int]struct{}, len(s.cfg.OldRoster)-1)
+	}
 	if len(pending.shares) >= s.coinSigner.Threshold() {
 		cvNotifyAPDBV2(pending.ready)
 	}
@@ -1070,35 +1243,41 @@ func (s *cvAPDBNetworkServiceV2) runCoin(ctx context.Context, invocation []byte)
 		s.mu.Unlock()
 	}()
 
-	sendShare := func() {
+	sendShare := func(recipients []int) {
+		started := time.Now()
+		_ = s.sendFanoutMeasuredV2(recipients, s.cfg.LocalNode, cvTagCoinShareV2, message)
+		s.recordCoinFanoutLatencyV2(time.Since(started))
+	}
+	sendShare(s.cfg.OldRoster)
+	for attempt := 0; attempt < cvControlRetryMaxAttemptsV2; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		case <-pending.ready:
+			goto recovered
+		case <-time.After(cvControlRetryDelayV2(attempt)):
+		}
+		s.mu.Lock()
+		missing := make([]int, 0, len(s.cfg.OldRoster))
 		for _, member := range s.cfg.OldRoster {
-			if member != s.cfg.LocalNode {
-				_ = s.send(member, cvTagCoinShareV2, message)
+			if _, ok := pending.shares[member]; !ok {
+				missing = append(missing, member)
 			}
 		}
+		s.mu.Unlock()
+		if len(missing) > 0 {
+			sendShare(missing)
+		}
 	}
-	sendShare()
-	retry := time.NewTicker(100 * time.Millisecond)
-	defer retry.Stop()
 	select {
+	case <-pending.ready:
+		goto recovered
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
-	case <-pending.ready:
-	case <-retry.C:
-		for {
-			sendShare()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-s.ctx.Done():
-				return nil, s.ctx.Err()
-			case <-pending.ready:
-				goto recovered
-			case <-retry.C:
-			}
-		}
 	}
 
 recovered:
@@ -1121,6 +1300,7 @@ func (s *cvAPDBNetworkServiceV2) Close() error {
 	}
 	s.cancel()
 	<-s.done
+	s.outboundWG.Wait()
 	return nil
 }
 
@@ -1152,16 +1332,29 @@ func (s *cvAPDBNetworkServiceV2) lockForPurposeV2(
 	}
 	defer s.unregisterLock(key, pending)
 
-	sent := 0
-	for _, holder := range collector.StoreRecipients() {
+	holders := collector.StoreRecipients()
+	offers := make(map[int][]byte, len(holders))
+	for _, holder := range holders {
 		offer, offerErr := collector.StoreOffer(holder)
-		if offerErr != nil {
-			continue
+		if offerErr == nil {
+			offers[holder] = offer
 		}
-		wireBytes, sendErr := s.sendMeasured(holder, cvTagAPDBStoreV2, offer)
-		if sendErr == nil {
+	}
+	started := time.Now()
+	// Store offers are recipient-specific. Send them with the same bounded
+	// fan-out used by other control paths instead of serializing WAN RTTs.
+	if len(offers) != len(holders) {
+		return nil, fmt.Errorf("CV V2 LockPD could not construct every store offer")
+	}
+	results := s.sendRecipientPayloadFanoutMeasuredV2(holders, cvTagAPDBStoreV2, offers)
+	if aggregate {
+		s.recordAggregateOfferSendLatencyV2(time.Since(started))
+	}
+	sent := 0
+	for _, result := range results {
+		if result.err == nil {
 			sent++
-			s.recordDispersalBytesV2(aggregate, true, wireBytes)
+			s.recordDispersalBytesV2(aggregate, true, result.wireBytes)
 		}
 	}
 	if sent < s.apdbSigner.Threshold() {
@@ -1236,15 +1429,21 @@ func (s *cvAPDBNetworkServiceV2) runRecovery(
 		return nil, err
 	}
 	defer s.unregisterRecovery(key, pending, aggregate)
-	sent := 0
-	for _, result := range s.sendFanoutMeasuredV2(collector.RequestRecipients(), -1, requestTag, request) {
-		if result.err == nil {
-			sent++
+	ready, err := cvSendRecoveryRequestsWithRetryV2(
+		ctx, s.ctx, pending.ready, collector.RequestRecipients(), collector.dataShards,
+		cvControlRetryMaxAttemptsV2, cvControlRetryDelayV2,
+		func(recipients []int) []cvFanoutSendResultV2 {
+			return s.sendFanoutMeasuredV2(recipients, -1, requestTag, request)
+		},
+		func(result cvFanoutSendResultV2) {
 			s.recordRecoveryBytesV2(purpose, true, result.wireBytes)
-		}
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
-	if sent < collector.dataShards {
-		return nil, fmt.Errorf("CV V2 APDB recovery reached %d holders, need %d", sent, collector.dataShards)
+	if ready {
+		return collector.Recover()
 	}
 	select {
 	case <-ctx.Done():
@@ -1253,6 +1452,70 @@ func (s *cvAPDBNetworkServiceV2) runRecovery(
 		return nil, s.ctx.Err()
 	case <-pending.ready:
 		return collector.Recover()
+	}
+}
+
+func cvSendRecoveryRequestsWithRetryV2(
+	ctx, serviceCtx context.Context, ready <-chan struct{}, recipients []int, dataShards, maxRetries int,
+	retryDelay func(int) time.Duration, send func([]int) []cvFanoutSendResultV2,
+	onSuccess func(cvFanoutSendResultV2),
+) (bool, error) {
+	succeeded := make(map[int]struct{}, len(recipients))
+	missing := append([]int(nil), recipients...)
+	for attempt := 0; ; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-serviceCtx.Done():
+			return false, serviceCtx.Err()
+		case <-ready:
+			return true, nil
+		default:
+		}
+		results := send(missing)
+		byRecipient := make(map[int]cvFanoutSendResultV2, len(results))
+		for _, result := range results {
+			byRecipient[result.recipient] = result
+		}
+		nextMissing := make([]int, 0, len(missing))
+		for _, recipient := range missing {
+			result, attempted := byRecipient[recipient]
+			if !attempted || result.err != nil {
+				nextMissing = append(nextMissing, recipient)
+				continue
+			}
+			if _, duplicate := succeeded[recipient]; !duplicate {
+				succeeded[recipient] = struct{}{}
+				if onSuccess != nil {
+					onSuccess(result)
+				}
+			}
+		}
+		if len(succeeded) >= dataShards {
+			return false, nil
+		}
+		select {
+		case <-ready:
+			return true, nil
+		default:
+		}
+		if attempt >= maxRetries {
+			return false, fmt.Errorf("CV V2 APDB recovery reached %d holders, need %d", len(succeeded), dataShards)
+		}
+		missing = nextMissing
+		timer := time.NewTimer(retryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			_ = timer.Stop()
+			return false, ctx.Err()
+		case <-serviceCtx.Done():
+			_ = timer.Stop()
+			return false, serviceCtx.Err()
+		case <-ready:
+			_ = timer.Stop()
+			return true, nil
+		case <-timer.C:
+		}
 	}
 }
 
@@ -1282,7 +1545,7 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 		response, err := cvHandleAPDBStoreOfferV2(s.cfg.SID, s.cfg.Epoch, msg.From, s.cfg.LocalNode,
 			s.cfg.OldRoster, msg.Body, s.cfg.TotalShards, s.cfg.ShardBytes, s.holderStore, s.apdbSigner)
 		if err == nil {
-			_ = s.send(msg.From, cvTagAPDBStoredShareV2, response)
+			_ = s.sendAsync(msg.From, cvTagAPDBStoredShareV2, response, nil)
 		}
 	case cvTagAPDBStoredShareV2:
 		response, err := cvDecodeAPDBStoredShareV2(msg.Body)
@@ -1303,7 +1566,7 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 		response, err := cvHandleAPDBRecoveryRequestV2(s.cfg.SID, s.cfg.Epoch, msg.From, s.cfg.LocalNode,
 			s.cfg.OldRoster, msg.Body, s.cfg.TotalShards, s.cfg.ShardBytes, s.holderStore, s.apdbSigner)
 		if err == nil {
-			_ = s.send(msg.From, cvTagAPDBRecoverStoreV2, response)
+			_ = s.sendAsync(msg.From, cvTagAPDBRecoverStoreV2, response, nil)
 		}
 	case cvTagAggregateRecoverGetV2:
 		if s.holderStore == nil {
@@ -1313,7 +1576,7 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 			s.cfg.OldRoster, s.cfg.NewRoster, msg.Body, s.cfg.ExpectedContext, s.cfg.TotalShards,
 			s.cfg.ShardBytes, s.holderStore, s.apdbSigner, s.controlSigner)
 		if err == nil {
-			_ = s.send(msg.From, cvTagAggregateRecoverStoreV2, response)
+			_ = s.sendAsync(msg.From, cvTagAggregateRecoverStoreV2, response, nil)
 		}
 	case cvTagAPDBRecoverStoreV2, cvTagAggregateRecoverStoreV2:
 		store, err := cvDecodeAPDBStoreV2(msg.Body, s.cfg.TotalShards, s.cfg.ShardBytes)
@@ -1348,16 +1611,32 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 				cvNotifyAPDBV2(pending.ready)
 			}
 		}
+		peer := msg.From
 		if local := s.localCoinShares[key]; len(local) != 0 {
 			replied := s.coinShareReplies[key]
-			if _, duplicate := replied[msg.From]; !duplicate {
-				replied[msg.From] = struct{}{}
-				reply = append([]byte(nil), local...)
+			inFlight := s.coinShareReplyInFlight[key]
+			if _, duplicate := replied[peer]; !duplicate {
+				if _, queued := inFlight[peer]; !queued {
+					inFlight[peer] = struct{}{}
+					reply = append([]byte(nil), local...)
+				}
 			}
 		}
 		s.mu.Unlock()
 		if len(reply) != 0 {
-			_ = s.send(msg.From, cvTagCoinShareV2, reply)
+			err := s.sendAsync(peer, cvTagCoinShareV2, reply, func(sendErr error) {
+				s.mu.Lock()
+				delete(s.coinShareReplyInFlight[key], peer)
+				if sendErr == nil {
+					s.coinShareReplies[key][peer] = struct{}{}
+				}
+				s.mu.Unlock()
+			})
+			if err != nil {
+				s.mu.Lock()
+				delete(s.coinShareReplyInFlight[key], peer)
+				s.mu.Unlock()
+			}
 		}
 	case cvTagPoolOfferV2:
 		s.handlePoolOffer(msg)
@@ -1513,7 +1792,7 @@ func (s *cvAPDBNetworkServiceV2) handlePoolOffer(msg Message) {
 	})
 	s.mu.Unlock()
 	if err == nil {
-		_ = s.send(pool.ProposerID, cvTagPoolCertShareV2, shareWire)
+		_ = s.sendAsync(pool.ProposerID, cvTagPoolCertShareV2, shareWire, nil)
 	}
 }
 
@@ -1643,7 +1922,7 @@ func (s *cvAPDBNetworkServiceV2) handleValidationRequest(msg Message) {
 			&cvValidationSignatureV2{Statement: statement, Signature: localShare},
 		)
 		if encodeErr == nil {
-			_ = s.send(request.Header.ProposerID, cvTagValidationSignatureV2, shareWire)
+			_ = s.sendAsync(request.Header.ProposerID, cvTagValidationSignatureV2, shareWire, nil)
 		}
 		return
 	}
@@ -1696,7 +1975,7 @@ func (s *cvAPDBNetworkServiceV2) validateAndSignAggregate(
 		&cvValidationSignatureV2{Statement: statement, Signature: signature},
 	)
 	if err == nil {
-		_ = s.send(request.Header.ProposerID, cvTagValidationSignatureV2, shareWire)
+		_ = s.sendAsync(request.Header.ProposerID, cvTagValidationSignatureV2, shareWire, nil)
 	}
 }
 
@@ -1842,7 +2121,7 @@ func (s *cvAPDBNetworkServiceV2) handleDecisionShare(msg Message) {
 			&cvDecisionShareV2{Statement: share.Statement, Signature: localShare},
 		)
 		if encodeErr == nil {
-			_ = s.send(msg.From, cvTagDecisionShareV2, wire)
+			_ = s.sendAsync(msg.From, cvTagDecisionShareV2, wire, nil)
 		}
 	}
 }
@@ -1919,7 +2198,7 @@ func (s *cvAPDBNetworkServiceV2) handleAggregateShare(msg Message) {
 	}
 	s.mu.Unlock()
 	if len(localWire) != 0 {
-		_ = s.send(msg.From, cvTagAggregateShareV2, localWire)
+		_ = s.sendAsync(msg.From, cvTagAggregateShareV2, localWire, nil)
 	}
 }
 
@@ -1974,7 +2253,7 @@ func (s *cvAPDBNetworkServiceV2) sendFanoutMeasuredV2(
 			defer workers.Done()
 			for target := range jobs {
 				wireBytes, err := s.sendMeasured(target, tag, payload)
-				results <- cvFanoutSendResultV2{wireBytes: wireBytes, err: err}
+				results <- cvFanoutSendResultV2{recipient: target, wireBytes: wireBytes, err: err}
 			}
 		}()
 	}
@@ -1985,6 +2264,45 @@ func (s *cvAPDBNetworkServiceV2) sendFanoutMeasuredV2(
 	workers.Wait()
 	close(results)
 	out := make([]cvFanoutSendResultV2, 0, len(targets))
+	for result := range results {
+		out = append(out, result)
+	}
+	return out
+}
+
+// sendRecipientPayloadFanoutMeasuredV2 is the bounded-fanout equivalent for
+// authenticated messages whose payload is intentionally recipient-specific.
+func (s *cvAPDBNetworkServiceV2) sendRecipientPayloadFanoutMeasuredV2(
+	recipients []int, tag string, payloads map[int][]byte,
+) []cvFanoutSendResultV2 {
+	if len(recipients) == 0 || len(payloads) == 0 {
+		return nil
+	}
+	parallel := cvFanoutMaxParallelV2
+	if parallel > len(recipients) {
+		parallel = len(recipients)
+	}
+	jobs := make(chan int)
+	results := make(chan cvFanoutSendResultV2, len(recipients))
+	var workers sync.WaitGroup
+	for range parallel {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for recipient := range jobs {
+				payload := payloads[recipient]
+				wireBytes, err := s.sendMeasured(recipient, tag, payload)
+				results <- cvFanoutSendResultV2{recipient: recipient, wireBytes: wireBytes, err: err}
+			}
+		}()
+	}
+	for _, recipient := range recipients {
+		jobs <- recipient
+	}
+	close(jobs)
+	workers.Wait()
+	close(results)
+	out := make([]cvFanoutSendResultV2, 0, len(recipients))
 	for result := range results {
 		out = append(out, result)
 	}
@@ -2076,6 +2394,49 @@ func (s *cvAPDBNetworkServiceV2) recordRecoveryLatencyV2(purpose cvRecoveryPurpo
 		s.experimentMetrics.validatorAggregateRecoveryLatency += elapsed
 	} else if purpose == cvRecoveryNewAggregateV2 {
 		s.experimentMetrics.newAggregateRecoveryLatency += elapsed
+	}
+	s.experimentMu.Unlock()
+}
+
+func (s *cvAPDBNetworkServiceV2) recordCoinFanoutLatencyV2(elapsed time.Duration) {
+	if s == nil || elapsed <= 0 {
+		return
+	}
+	s.experimentMu.Lock()
+	s.experimentMetrics.coinFanoutLatency += elapsed
+	s.experimentMu.Unlock()
+}
+
+func (s *cvAPDBNetworkServiceV2) recordAggregateOfferSendLatencyV2(elapsed time.Duration) {
+	if s == nil || elapsed <= 0 {
+		return
+	}
+	s.experimentMu.Lock()
+	s.experimentMetrics.aggregateOfferSendLatency += elapsed
+	s.experimentMu.Unlock()
+}
+
+func (s *cvAPDBNetworkServiceV2) recordCandidateFanoutAttemptV2(wait time.Duration, retry bool) {
+	if s == nil || wait < 0 {
+		return
+	}
+	s.experimentMu.Lock()
+	s.experimentMetrics.candidateFanoutACKWaitLatency += wait
+	s.experimentMetrics.candidateFanoutAttempts++
+	if retry {
+		s.experimentMetrics.candidateFanoutRetryWaitLatency += wait
+		s.experimentMetrics.candidateFanoutRetries++
+	}
+	s.experimentMu.Unlock()
+}
+
+func (s *cvAPDBNetworkServiceV2) recordCandidateFanoutPeerLatencyV2(elapsed time.Duration) {
+	if s == nil || elapsed <= 0 {
+		return
+	}
+	s.experimentMu.Lock()
+	if elapsed > s.experimentMetrics.candidateFanoutMaxPeerLatency {
+		s.experimentMetrics.candidateFanoutMaxPeerLatency = elapsed
 	}
 	s.experimentMu.Unlock()
 }

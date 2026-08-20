@@ -184,6 +184,9 @@ func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
 		stats: []runStat{{
 			cvComponentCount: 2, cvARCHolderCount: 3, cvRecoveredShardCount: 2,
 			cvVerifiedReceiptCount: 2, cvLeafBuildMs: 7, cvComponentDisperseMs: 1, cvComponentCollectionMs: 2,
+			cvEligibilityCoinMs: 2.5, cvProposerSlotsMs: 3.5, cvCoinFanoutMs: 4.5,
+			cvCandidateFanoutACKWaitMs: 5.5, cvCandidateFanoutRetryWaitMs: 6.5,
+			cvCandidateFanoutMaxPeerMs: 7.5, cvCandidateFanoutAttempts: 8, cvCandidateFanoutRetries: 9,
 			cvAggregateDisperseMs: 3, cvAggregateAgreementMs: 4, cvRecoverShardMs: 5,
 			cvReceiptMs: 6, cvAPVSSACKCount: 5, cvAPVSSFallbackCount: 2,
 			cvAPVSSProofBytes: 101, cvAPVSSLeafWireBytes: 202,
@@ -221,7 +224,10 @@ func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
 	for _, token := range []string{
 		"mean_cv_component_count=2", "mean_cv_arc_holder_count=3",
 		"mean_cv_recovered_shard_count=2", "mean_cv_verified_receipt_count=2",
-		"leaf_build_ms=7", "component_disperse_ms=1", "candidate_formation_ms=2", "aggregate_disperse_ms=3",
+		"leaf_build_ms=7", "component_disperse_ms=1", "candidate_formation_ms=2",
+		"eligibility_coin_ms=2.50", "proposer_slots_ms=3.50", "mean_coin_fanout_ms=4.50", "aggregate_disperse_ms=3",
+		"mean_candidate_ack_wait_ms=5.50", "mean_candidate_retry_wait_ms=6.50",
+		"mean_candidate_fanout_max_peer_ms=7.50", "mean_candidate_fanout_attempts=8", "mean_candidate_fanout_retries=9",
 		"aggregate_agreement_ms=4", "recover_shard_ms=5", "receipt_ms=6",
 		"mean_apvss_ack_count=5.00", "mean_apvss_fallback_count=2.00",
 		"mean_apvss_proof_bytes=101", "mean_apvss_leaf_wire_bytes=202",

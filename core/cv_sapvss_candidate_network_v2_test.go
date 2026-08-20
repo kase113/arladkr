@@ -102,8 +102,12 @@ func TestCVCertifiedCandidateV2AcceptsRelaysAndSuppressesDuplicates(t *testing.T
 	services[receiver].handleCertifiedCandidateV2(Message{
 		From: relay, To: receiver, Tag: cvTagCertifiedCandidateV2, Body: mutated,
 	})
+	ackDeadline := time.Now().Add(250 * time.Millisecond)
+	for transport.sentCount(cvTagCertifiedCandidateACKV2) != ackCount+1 && time.Now().Before(ackDeadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if transport.sentCount(cvTagCertifiedCandidateACKV2) != ackCount+1 {
-		t.Fatal("authenticated candidate delivery was not ACKed before validation")
+		t.Fatal("authenticated candidate delivery did not enqueue an ACK before validation")
 	}
 	select {
 	case duplicate := <-services[receiver].certifiedCandidateChV2:
@@ -161,6 +165,21 @@ func TestCVCandidateFanoutACKSignalsArePerPeer(t *testing.T) {
 	case <-second:
 	case <-time.After(time.Second):
 		t.Fatal("second peer ACK did not wake its waiter")
+	}
+}
+
+func TestCVCandidateFanoutMetricsDoNotCountCanceledWaitAsRetry(t *testing.T) {
+	service := &cvAPDBNetworkServiceV2{}
+	service.recordCandidateFanoutAttemptV2(3*time.Millisecond, false)
+	service.recordCandidateFanoutAttemptV2(5*time.Millisecond, true)
+	metrics := service.experimentMetricsV2()
+	if metrics.candidateFanoutAttempts != 2 || metrics.candidateFanoutRetries != 1 {
+		t.Fatalf("candidate attempts=%d retries=%d", metrics.candidateFanoutAttempts, metrics.candidateFanoutRetries)
+	}
+	if metrics.candidateFanoutACKWaitLatency != 8*time.Millisecond ||
+		metrics.candidateFanoutRetryWaitLatency != 5*time.Millisecond {
+		t.Fatalf("candidate ACK wait=%v retry wait=%v",
+			metrics.candidateFanoutACKWaitLatency, metrics.candidateFanoutRetryWaitLatency)
 	}
 }
 

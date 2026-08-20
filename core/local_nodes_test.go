@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,6 +28,40 @@ func TestTCPMessageFrameRoundTrip(t *testing.T) {
 	bad[0]++
 	if _, _, err := readTCPMessageFrame(bytes.NewReader(bad)); err == nil {
 		t.Fatal("accepted unknown TCP frame version")
+	}
+}
+
+func TestTCPPoolLaneClassificationSeparatesBulkAndControl(t *testing.T) {
+	if got, want := tcpLoopbackLaneForTag(cvTagAPDBStoreV2), 1; got != want {
+		t.Fatalf("APDB store lane=%d want bulk lane %d", got, want)
+	}
+	if got, want := tcpLoopbackLaneForTag(cvTagPoolCertShareV2), 0; got != want {
+		t.Fatalf("pool certificate share lane=%d want control lane %d", got, want)
+	}
+	control := tcpLoopbackPoolKeyForTag(1, 2, "127.0.0.1:1", cvTagPoolCertShareV2)
+	bulk := tcpLoopbackPoolKeyForTag(1, 2, "127.0.0.1:1", cvTagAPDBRecoverStoreV2)
+	if control == bulk {
+		t.Fatal("control and bulk messages share one TCP pool key")
+	}
+	if tcpLoopbackPoolKeyForTag(1, 2, "127.0.0.1:1", cvTagPoolCertV2) != control {
+		t.Fatal("related control messages do not share deterministic lane")
+	}
+}
+
+func TestTCPBulkPoolPayloadLaneIsStableAndBounded(t *testing.T) {
+	left := tcpLoopbackPoolKeyForPayload(1, 2, "127.0.0.1:1", cvTagAPDBRecoverGetV2, []byte("request-a"), 3)
+	if got := tcpLoopbackPoolKeyForPayload(1, 2, "127.0.0.1:1", cvTagAPDBRecoverGetV2, []byte("request-a"), 3); got != left {
+		t.Fatalf("same recovery payload selected different pool lanes: %q != %q", left, got)
+	}
+	for _, payload := range [][]byte{[]byte("request-a"), []byte("request-b"), []byte("request-c"), []byte("request-d")} {
+		key := tcpLoopbackPoolKeyForPayload(1, 2, "127.0.0.1:1", cvTagAPDBRecoverGetV2, payload, 3)
+		if !strings.Contains(key, "#lane=") {
+			t.Fatalf("bulk recovery key missing lane: %q", key)
+		}
+	}
+	control := tcpLoopbackPoolKeyForPayload(1, 2, "127.0.0.1:1", cvTagPoolCertShareV2, []byte("request-a"), 3)
+	if control != tcpLoopbackPoolKeyForTag(1, 2, "127.0.0.1:1", cvTagPoolCertShareV2) {
+		t.Fatalf("control payload unexpectedly changed its lane: %q", control)
 	}
 }
 
@@ -60,7 +95,7 @@ func TestTCPPooledSendReconnectsAfterBrokenConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := tcpLoopbackPoolKey(msg.From, msg.To, listener.Addr().String())
+	key := tcpLoopbackPoolKeyForTag(msg.From, msg.To, listener.Addr().String(), msg.Tag)
 	brokenClient, brokenServer := net.Pipe()
 	_ = brokenClient.Close()
 	_ = brokenServer.Close()

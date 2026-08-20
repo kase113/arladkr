@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"os"
@@ -98,6 +99,7 @@ type tcpLoopbackTransport struct {
 	enqueueTO time.Duration
 	runtime   *runtimeCrypto
 	reuseConn bool
+	bulkLanes int
 }
 
 type tcpLoopbackPoolConn struct {
@@ -202,6 +204,7 @@ func NewTCPLoopbackTransportWithOptions(
 		runtime:   cfg.runtime,
 		reuseConn: !strings.EqualFold(strings.TrimSpace(os.Getenv("RLADKR_TCP_CONN_REUSE")), "0") &&
 			!strings.EqualFold(strings.TrimSpace(os.Getenv("RLADKR_TCP_CONN_REUSE")), "false"),
+		bulkLanes: tcpBulkPoolLaneCount(),
 	}
 	addrOverrides := parseAddrOverrideMap(os.Getenv("RLADKR_NODE_ADDRS"))
 	ordered := append([]int(nil), nodes...)
@@ -364,7 +367,7 @@ func (t *tcpLoopbackTransport) sendRemoteShortConn(addr string, msg Message, fra
 }
 
 func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, frame []byte, wireBytes int) error {
-	key := tcpLoopbackPoolKey(msg.From, msg.To, addr)
+	key := tcpLoopbackPoolKeyForPayload(msg.From, msg.To, addr, msg.Tag, msg.Body, t.bulkLanes)
 	t.poolMu.Lock()
 	if t.conns == nil {
 		t.conns = make(map[string]*tcpLoopbackPoolConn)
@@ -430,7 +433,53 @@ func (t *tcpLoopbackTransport) sendRemoteOnConn(conn net.Conn, msg Message, fram
 }
 
 func tcpLoopbackPoolKey(from int, to int, addr string) string {
-	return fmt.Sprintf("%d->%d@%s", from, to, addr)
+	return tcpLoopbackPoolKeyForTag(from, to, addr, "")
+}
+
+func tcpLoopbackPoolKeyForTag(from int, to int, addr, tag string) string {
+	return tcpLoopbackPoolKeyForLane(from, to, addr, tcpLoopbackLaneForTag(tag))
+}
+
+func tcpLoopbackPoolKeyForPayload(from, to int, addr, tag string, payload []byte, bulkLanes int) string {
+	lane := tcpLoopbackLaneForTag(tag)
+	if lane != 0 && bulkLanes > 1 {
+		h := fnv.New32a()
+		_, _ = h.Write(payload)
+		lane += int(h.Sum32() % uint32(bulkLanes))
+	}
+	return tcpLoopbackPoolKeyForLane(from, to, addr, lane)
+}
+
+func tcpLoopbackPoolKeyForLane(from, to int, addr string, lane int) string {
+	return fmt.Sprintf("%d->%d@%s#lane=%d", from, to, addr, lane)
+}
+
+func tcpBulkPoolLaneCount() int {
+	const defaultLanes = 3
+	raw := strings.TrimSpace(os.Getenv("RLADKR_TCP_BULK_LANES"))
+	if raw == "" {
+		return defaultLanes
+	}
+	lanes, err := strconv.Atoi(raw)
+	if err != nil || lanes < 1 {
+		return defaultLanes
+	}
+	if lanes > 8 {
+		return 8
+	}
+	return lanes
+}
+
+func tcpLoopbackLaneForTag(tag string) int {
+	switch tag {
+	case cvTagComponentInit, cvTagComponentLeaf, cvTagComponentGet, cvTagRecoverGet,
+		cvTagRecoverShard, cvTagAPDBStoreV2, cvTagAPDBRecoverGetV2,
+		cvTagAPDBRecoverStoreV2, cvTagAggregateRecoverGetV2, cvTagAggregateRecoverStoreV2,
+		cvTagAggregateShareV2, cvTagCertifiedCandidateV2:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (t *tcpLoopbackTransport) Broadcast(from int, to []int, tag string, body []byte) {

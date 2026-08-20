@@ -17,7 +17,10 @@ runner_timeout="${RLADKR_CV_RUNNER_TIMEOUT:-$epoch_timeout}"
 # window for the local multi-process harness.
 quorum_settle_timeout="${RLADKR_CV_QUORUM_SETTLE_TIMEOUT:-15s}"
 wait_spbc_timeout="${RLADKR_CV_WAIT_SPBC_TIMEOUT:-}"
-route_send_timeout="${RLADKR_CV_ROUTE_SEND_TIMEOUT:-}"
+# The shared-host harness can finish honest nodes several seconds apart under
+# CPU contention. A one-second route timeout selects the existing ten-second
+# holder-service grace; reported latency already excludes that grace.
+route_send_timeout="${RLADKR_CV_ROUTE_SEND_TIMEOUT:-1s}"
 apvss_mode="${RLADKR_APVSS_MODE:-ack-fallback}"
 apvss_full_proof_profile="${RLADKR_APVSS_FULL_PROOF_PROFILE:-exact}"
 apvss_fallback_profile="${RLADKR_APVSS_FALLBACK_PROFILE:-feldman-batch-v1}"
@@ -33,17 +36,32 @@ crypto_workers="${RLADKR_CRYPTO_WORKERS:-1}"
 # ACK decryption has its own bounded queue. Two workers per process use the
 # 32 logical CPUs of the n=16 local harness without widening proof workers.
 lane_workers="${RLADKR_LANE_WORKERS:-2}"
+# The local harness starts every logical node and collects every artifact.
+# Let the independent MVBA listeners rendezvous as a full local fleet before
+# starting agreement; this is a harness synchronization rule, not a protocol
+# quorum change. AWS runners keep their existing n-f readiness behavior.
+mvba_peer_wait_target="${RLADKR_MVBA_PEER_WAIT_TARGET:-all}"
+mvba_peer_wait_ms="${RLADKR_MVBA_PEER_WAIT_MS:-5000}"
 # Divide a shared host's logical CPUs across its n node processes. The n=16
 # harness benefits measurably from its second SMT worker for curve-heavy leaf
 # verification. On a real one-process-per-host deployment the runtime default
 # instead reserves one scheduler slot and caps leaf verification at four.
+host_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
 if [[ -n "${RLADKR_LEAF_VERIFY_WORKERS:-}" ]]; then
   leaf_verify_workers="$RLADKR_LEAF_VERIFY_WORKERS"
 else
-  host_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
   leaf_verify_workers=$((host_cpus / n))
   (( leaf_verify_workers < 1 )) && leaf_verify_workers=1
   (( leaf_verify_workers > 4 )) && leaf_verify_workers=4
+fi
+# Partition the shared host scheduler budget across logical node processes.
+# Without this, every process sees the full machine and local n=10 runs can
+# create hundreds of runnable Go threads, which obscures protocol latency.
+if [[ -n "${RLADKR_CV_GOMAXPROCS:-}" ]]; then
+  node_gomaxprocs="$RLADKR_CV_GOMAXPROCS"
+else
+  node_gomaxprocs=$((host_cpus / n))
+  (( node_gomaxprocs < 1 )) && node_gomaxprocs=1
 fi
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$repo_dir/bin/rladkrbench"
@@ -58,6 +76,16 @@ if (( n <= 0 || f < 0 || n < 3 * f + 1 || epochs <= 0 || runs <= 0 )); then
   exit 2
 fi
 required_nodes=$((n - f))
+# This harness launches every node on one host and expects to collect every
+# artifact. Wait for all listener processes by default so CPU startup skew
+# cannot make a late node miss one-shot protocol messages. Protocol success
+# and the final cluster summary still require only n-f completed nodes.
+listener_ready_count="${RLADKR_CV_LISTENER_READY_COUNT:-$n}"
+if (( listener_ready_count < required_nodes || listener_ready_count > n )); then
+  printf 'invalid listener-ready count: got=%s require=%s..%s\n' \
+    "$listener_ready_count" "$required_nodes" "$n" >&2
+  exit 2
+fi
 if ! command -v timeout >/dev/null 2>&1; then
   printf 'cluster runner requires the timeout command for child-process cleanup\n' >&2
   exit 2
@@ -105,12 +133,12 @@ for ((i=0; i<n; i++)); do
   node_secret_dir="$root/node-$i/private"
   mkdir -p "$node_secret_dir"
   chmod 700 "$node_secret_dir"
-	  mv "$generated_secret_dir/old-node-$i-validator.scalar" "$node_secret_dir/"
-	  mv "$generated_secret_dir/old-node-$i-v2-apdb.scalar" "$node_secret_dir/"
-	  mv "$generated_secret_dir/old-node-$i-v2-control.scalar" "$node_secret_dir/"
-	  mv "$generated_secret_dir/old-node-$i-v2-coin.scalar" "$node_secret_dir/"
-	  mv "$generated_secret_dir/receiver-$((n+i))-elgamal.scalar" "$node_secret_dir/"
-	  mv "$generated_secret_dir/receiver-$((n+i))-identity.ed25519" "$node_secret_dir/"
+  mv "$generated_secret_dir/old-node-$i-validator.scalar" "$node_secret_dir/"
+  mv "$generated_secret_dir/old-node-$i-v2-apdb.scalar" "$node_secret_dir/"
+  mv "$generated_secret_dir/old-node-$i-v2-control.scalar" "$node_secret_dir/"
+  mv "$generated_secret_dir/old-node-$i-v2-coin.scalar" "$node_secret_dir/"
+  mv "$generated_secret_dir/receiver-$((n+i))-elgamal.scalar" "$node_secret_dir/"
+  mv "$generated_secret_dir/receiver-$((n+i))-identity.ed25519" "$node_secret_dir/"
 done
 rmdir "$generated_secret_dir"
 
@@ -145,7 +173,12 @@ cleanup_children() {
     fi
   done
 }
-trap cleanup_children INT TERM EXIT
+handle_signal() {
+  cleanup_children
+  exit 130
+}
+trap handle_signal INT TERM
+trap cleanup_children EXIT
 for ((i=0; i<n; i++)); do
   mkdir -p "$root/node-$i/store"
   node_secret_dir="$root/node-$i/private"
@@ -157,13 +190,16 @@ for ((i=0; i<n; i++)); do
     export RLADKR_MVBA_NODE_ADDRS="$mvba_addrs"
     export RLADKR_ARTIFACT_CACHE_DIR="$root/node-$i/store"
     export RLADKR_LISTENER_READY_DIR="$root/ready"
-    export RLADKR_LISTENER_READY_NODE_COUNT="$required_nodes"
-		export RLADKR_EPOCH_BARRIER_DIR="$root/epoch-barrier"
+    export RLADKR_LISTENER_READY_NODE_COUNT="$listener_ready_count"
+    export RLADKR_EPOCH_BARRIER_DIR="$root/epoch-barrier"
     export RLADKR_CV_DEBUG="${RLADKR_CV_DEBUG:-1}"
     export RLADKR_CV_PERF_COUNTERS="${RLADKR_CV_PERF_COUNTERS:-1}"
     export RLADKR_CRYPTO_WORKERS="$crypto_workers"
     export RLADKR_LANE_WORKERS="$lane_workers"
     export RLADKR_LEAF_VERIFY_WORKERS="$leaf_verify_workers"
+    export GOMAXPROCS="$node_gomaxprocs"
+    export RLADKR_MVBA_PEER_WAIT_TARGET="$mvba_peer_wait_target"
+    export RLADKR_MVBA_PEER_WAIT_MS="$mvba_peer_wait_ms"
     if timeout --foreground --kill-after=5s "$runner_timeout" "$binary" -n "$n" -f "$f" -runs "$runs" -epochs "$epochs" \
       -transport tcp-distributed \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \

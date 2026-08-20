@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,91 @@ import (
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
+
+func TestCVSendRecoveryRequestsWithRetryV2RetriesOnlyMissingHolders(t *testing.T) {
+	recipients := []int{0, 1, 2, 3}
+	attempts := make(map[int]int, len(recipients))
+	successes := make(map[int]int, len(recipients))
+	ready, err := cvSendRecoveryRequestsWithRetryV2(
+		context.Background(), context.Background(), nil, recipients, 3, 2,
+		func(int) time.Duration { return 0 },
+		func(current []int) []cvFanoutSendResultV2 {
+			results := make([]cvFanoutSendResultV2, 0, len(current))
+			for _, recipient := range current {
+				attempts[recipient]++
+				result := cvFanoutSendResultV2{recipient: recipient, wireBytes: 100 + recipient}
+				if recipient >= 2 && attempts[recipient] == 1 {
+					result.err = errors.New("transient send failure")
+				}
+				if recipient == 3 {
+					result.err = errors.New("holder unavailable")
+				}
+				results = append(results, result)
+			}
+			return results
+		},
+		func(result cvFanoutSendResultV2) { successes[result.recipient]++ },
+	)
+	if err != nil || ready {
+		t.Fatalf("recovery request retry: ready=%v err=%v", ready, err)
+	}
+	if attempts[0] != 1 || attempts[1] != 1 || attempts[2] != 2 || attempts[3] != 2 {
+		t.Fatalf("unexpected per-holder attempts: %v", attempts)
+	}
+	if successes[0] != 1 || successes[1] != 1 || successes[2] != 1 || successes[3] != 0 {
+		t.Fatalf("unexpected successful-send accounting: %v", successes)
+	}
+}
+
+func TestCVSendRecoveryRequestsWithRetryV2ReportsExhaustedThreshold(t *testing.T) {
+	attempts := 0
+	_, err := cvSendRecoveryRequestsWithRetryV2(
+		context.Background(), context.Background(), nil, []int{0, 1, 2, 3}, 3, 2,
+		func(int) time.Duration { return 0 },
+		func(current []int) []cvFanoutSendResultV2 {
+			attempts++
+			results := make([]cvFanoutSendResultV2, 0, len(current))
+			for _, recipient := range current {
+				result := cvFanoutSendResultV2{recipient: recipient, wireBytes: 100}
+				if recipient >= 2 {
+					result.err = errors.New("holder unavailable")
+				}
+				results = append(results, result)
+			}
+			return results
+		}, nil,
+	)
+	if err == nil || err.Error() != "CV V2 APDB recovery reached 2 holders, need 3" {
+		t.Fatalf("unexpected exhausted-retry error: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("recovery request attempts=%d, want 3", attempts)
+	}
+}
+
+func TestCVSendRecoveryRequestsWithRetryV2StopsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	_, err := cvSendRecoveryRequestsWithRetryV2(
+		ctx, context.Background(), nil, []int{0, 1, 2}, 2, 4,
+		func(int) time.Duration { return time.Hour },
+		func(current []int) []cvFanoutSendResultV2 {
+			attempts++
+			cancel()
+			results := make([]cvFanoutSendResultV2, 0, len(current))
+			for _, recipient := range current {
+				results = append(results, cvFanoutSendResultV2{recipient: recipient, err: errors.New("send failed")})
+			}
+			return results
+		}, nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("recovery request cancellation error: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("recovery retried after cancellation: attempts=%d", attempts)
+	}
+}
 
 func TestCVAPDBNetworkServiceV2BuildsVCertAfterRecovery(t *testing.T) {
 	if testing.Short() {
@@ -145,6 +231,14 @@ func TestCVAPDBNetworkServiceV2BuildsVCertAfterRecovery(t *testing.T) {
 	for range len(cfg.OldCommittee) - 1 {
 		if err := <-resultCh; err != nil {
 			t.Fatal(err)
+		}
+	}
+	for _, member := range cfg.OldCommittee {
+		if cvContainsID(services[proposer].validatorSample, member) {
+			continue
+		}
+		if got := transport.sentCountFromTo(cvTagValidationRequestV2, proposer, member); got != 1 {
+			t.Fatalf("non-validator %d received %d validation requests, want one initial delivery", member, got)
 		}
 	}
 }
@@ -548,6 +642,15 @@ func TestCVAPDBNetworkServiceV2CertifiesEligiblePool(t *testing.T) {
 	}
 	if got := transport.sentCount(cvTagPoolCertV2); got != len(cfg.OldCommittee)-1 {
 		t.Fatalf("pool proposer sent %d certificates", got)
+	}
+	offersAfterCertification := transport.sentCount(cvTagPoolOfferV2)
+	certificatesAfterCertification := transport.sentCount(cvTagPoolCertV2)
+	time.Sleep(2 * cvControlRetryIntervalV2)
+	if got := transport.sentCount(cvTagPoolOfferV2); got != offersAfterCertification {
+		t.Fatalf("pool offers continued after certification: before=%d after=%d", offersAfterCertification, got)
+	}
+	if got := transport.sentCount(cvTagPoolCertV2); got != certificatesAfterCertification {
+		t.Fatalf("pool certificates continued after certification: before=%d after=%d", certificatesAfterCertification, got)
 	}
 
 	badCertificate := *certificate

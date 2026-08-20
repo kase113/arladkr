@@ -128,6 +128,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collect CV V2 eligibility coin: %w", err)
 	}
+	eligibilityCoinLatency := time.Since(coinStarted)
 	proposers, validatorSample, err := cvDeriveEligibilitySamplesV2(
 		c.OldCommittee, eligibilityCoin.Value, runtime.params.proposerSampleSize, runtime.params.validatorSampleSize,
 	)
@@ -138,6 +139,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		OldCommittee: c.OldCommittee, EligibilityCoin: eligibilityCoin, Params: runtime.params,
 		APDBSigner: runtime.apdbSigner, ControlSigner: runtime.controlSigner, CoinSigner: runtime.coinSigner,
 		ValidatorKeys: runtime.validators}
+	proposerSlotsStarted := time.Now()
 	candidate, err := cvRunSampledProposerSlotsV2(
 		ctx, proposers, oldService.certifiedCandidateChV2,
 		func(slotCtx context.Context, proposer int) error {
@@ -149,6 +151,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	proposerSlotsLatency := time.Since(proposerSlotsStarted)
 	candidateFormationLatency := time.Since(coinStarted)
 	c.runtime.setCommPhase("aggregate_agreement")
 	agreementStarted := time.Now()
@@ -237,8 +240,16 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVRecoveredShardCount: runtime.params.recoveryThreshold, CVVerifiedReceiptCount: runtime.params.newShareThreshold,
 		CVSampling:         sampling,
 		CVLeafBuildLatency: leafLatency, CVComponentDisperseLatency: componentLatency,
-		CVComponentCollectionLatency: candidateFormationLatency,
-		CVAggregateAgreementLatency:  agreementLatency, MVBAPeerWaitLatency: peerWait,
+		CVComponentCollectionLatency:      candidateFormationLatency,
+		CVEligibilityCoinLatency:          eligibilityCoinLatency,
+		CVProposerSlotsLatency:            proposerSlotsLatency,
+		CVCoinFanoutLatency:               experimentMetrics.coinFanoutLatency,
+		CVCandidateFanoutACKWaitLatency:   experimentMetrics.candidateFanoutACKWaitLatency,
+		CVCandidateFanoutRetryWaitLatency: experimentMetrics.candidateFanoutRetryWaitLatency,
+		CVCandidateFanoutMaxPeerLatency:   experimentMetrics.candidateFanoutMaxPeerLatency,
+		CVCandidateFanoutAttempts:         experimentMetrics.candidateFanoutAttempts,
+		CVCandidateFanoutRetries:          experimentMetrics.candidateFanoutRetries,
+		CVAggregateAgreementLatency:       agreementLatency, MVBAPeerWaitLatency: peerWait,
 		CVRecoverShardLatency: time.Since(recoveryStarted), CVReceiptLatency: handoffLatency,
 		CVAPVSSACKCount: ackCount, CVAPVSSFallbackCount: fallbackCount,
 		CVAPVSSProofBytes: proofBytes, CVAPVSSLeafWireBytes: leafWireBytes,
@@ -267,6 +278,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVNewAggregateRecoveryLatency:           receiverExperimentMetrics.newAggregateRecoveryLatency,
 		RecoverServiceGraceLatency:              serviceGraceLatency,
 		CVARCFormationLatency:                   experimentMetrics.arcFormationLatency,
+		CVAggregateOfferSendLatency:             experimentMetrics.aggregateOfferSendLatency,
 		CVValidationCertificateFormationLatency: experimentMetrics.validationCertificateLatency,
 		CVDecisionCertificateFormationLatency:   experimentMetrics.decisionCertificateLatency,
 		CVScalarBoundedDLogLatency:              receiverExperimentMetrics.scalarBoundedDLogLatency,
