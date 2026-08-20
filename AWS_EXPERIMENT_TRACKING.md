@@ -1275,3 +1275,68 @@ receiver 在 holder 退出后才开始 aggregate recovery。将现有 route time
 约 `4.36 s` 的运行，因此 `8.66 s` 不能作为论文性能基线。下一步应先提交并推送当前候选版，再在
 相同 `us-east-1:5 + eu-west-1:5` Spot topology 上复测 ARL `n=10`，同时记录 route timeout、service
 grace、成功节点数、candidate/recovery 分解和通信量；在新公网数据稳定前不重建 AMI。
+
+## 2026-08-20 ARL liveness 候选版两区域公网复测（r22）
+
+上述候选版已提交并推送到 `origin/main`，提交为
+`905679c Harden WAN recovery and share exchange liveness`。随后执行实验
+`paper-arl-use1-euw1-n10-r22-20260820`，继续使用与 r20/r21 相同的
+`us-east-1:5`（`use1-az1`）加 `eu-west-1:5`（`euw1-az1`）公网 Spot topology、现有 AMI、
+`c7g.xlarge`、`n=10,f=3`。参数为 `runs=1`、`epochs=1`、`strict-network`、
+`comm-metrics`、`route-send-timeout=1s`；因此 holder service grace 为约 10 秒，并按既定
+`service_grace_adjusted` 口径从报告 latency 中扣除。setup/keygen 仍在 online latency 之外。
+
+部署版本和完整性：
+
+- 本地按 runner 相同的 `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath` 重新构建，
+  `rladkrbench` SHA-256 为
+  `9841a42f08e865a57dc17421d61c054aac42241c4cc78ff0e23287a1390d19ee`，与实验记录完全一致；
+  Go build metadata 指向 `905679c`。
+- 两区 SSM `aws-up=10/10`，setup bundle digest 为
+  `ca0111697b1c165319dfbc94c5d77bdd3755b6f48583359ec7322cac620a3868`；pre-launch
+  `cleanup-ready=10/10`、runner readiness `10/10`，成功门槛保持 `n-f=7`。
+- 最终 `success=10/10`、artifact `10/10`，十个节点 consensus hash 均为
+  `0de65ee061ad37275feb849bda46d9b0ecf0d9956796f8ffa80e4c7367a26b4f`；setup digest 和 timing
+  metadata 一致，没有 timeout、threshold failure 或错误 summary。
+
+本轮单 epoch 节点统计如下。quorum latency 是按十个节点 local latency 排序后的第七个值；它与
+runner 的 `n-f` 成功条件一致。这里只作为候选版公网 smoke，不进入论文最终 median/p95 主表。
+
+| 指标 | 节点范围/门槛 | 10 节点均值 |
+| --- | ---: | ---: |
+| service-grace-adjusted latency | `8935.16--9436.79` ms | **`9093.36` ms** |
+| raw latency | `18935.53--19437.18` ms | `19093.95` ms |
+| quorum / all-nodes adjusted latency | `9121.64 / 9436.79` ms | - |
+| setup / online protocol | - | `119.23 / 8974.13` ms |
+| leaf build | `1240--2676` ms | `2227.90` ms |
+| component dispersal | `635--1026` ms | `789.70` ms |
+| candidate formation | `3603--4794` ms | **`4017.80` ms** |
+| aggregate agreement | `637--838` ms | `756.60` ms |
+| aggregate recovery after decision | - | `138.37` ms |
+| APVSS ACK / fallback count | - | `7.2 / 2.8` |
+| candidate fan-out retries | all nodes `0` | `0` |
+| total sent / received | - | **`4.106 / 4.020 MB` per node** |
+
+### 对结果的判断
+
+本轮证明 liveness 修复在公网路径成立：APDB holder 发送、scalar-share exchange 和 decision
+finalization 都没有出现阈值不足或无限重发，10/10 节点完成，且新增有界 retry 实际没有触发。
+两区节点的 adjusted latency 均值分别为 `9093.42 ms`（美国）和 `9093.31 ms`（爱尔兰），几乎相同，
+不存在单一 Region 尾节点拖慢结果的现象。
+
+相对 ARL r20，adjusted latency 从 `10071.77 ms` 降到 `9093.36 ms`，改善约 **9.7%**；candidate
+formation 从 `4995.80 ms` 降到 `4017.80 ms`，改善约 **19.6%**。但这还没有把 ARL 降到同 topology
+Practical r21 的 `6541.07 ms`：当前仍慢约 `2552 ms`（约 39%）。aggregate recovery 后的新
+recovery/share exchange 仅约 `138 ms`，candidate retry 为 0，说明本轮刚修复的尾部重试路径已经不是
+主要性能瓶颈。剩余差距主要集中在 leaf build（均值 `2.23 s`）和 candidate proposer slots（candidate
+总计约 `4.02 s`），同时 ARL 通信量约 `4.106/4.020 MB` 每节点，仍约为 Practical r21
+`1.034/1.028 MB` 的四倍。因此结论是“公网 liveness 问题已解决、WAN 性能部分改善”，不能写成
+“ARL 已达到 Practical 延迟”。下一步应围绕 leaf/candidate 的计算与多轮公网等待做不改变协议设计的
+profiling；在获得多 epoch 数据前仍不重建 AMI，也不把单轮 smoke 当作论文最终结果。
+
+资源与成本：美国五台实例实际生命周期为 `08:20:54Z--08:34:23Z`（每台 809 秒），爱尔兰五台为
+`08:21:58Z--08:32:43Z`（每台 645 秒）。按当时 `us-east-1a $0.0736/小时`、
+`eu-west-1c $0.0752/小时` 的 Spot 价，计算费约 `$0.150`；加十个临时公网 IPv4、`10 x 30 GiB`
+gp3 和少量 SSM/S3/跨区流量后，本轮保守记 **约 `$0.17`**。累计量化成本由约 `$3.13` 更新为约
+**`$3.30`**，最终仍以 Cost Explorer 为准。实验结束后两区 Terraform 各销毁 21 个资源；AWS 只读
+复核显示 non-terminated instance 与 open/active Spot request 均为 0。
