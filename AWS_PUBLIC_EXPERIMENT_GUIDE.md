@@ -123,7 +123,9 @@ allowlist；来源数超过 48 时使用一个临时的大规模实验 CIDR，�
 8 GiB 内存。相较 2 vCPU 配置，它能让 ARL 默认密码学 worker 并行度更接近协议实际计算需求。
 所有三种协议必须使用同一个 AMI 和实例类型。
 
-当前基线镜像 `ami-0cee8a82967ef97ac` 是 Amazon Linux ARM64，使用 Go `1.26.5`。AMI 至少包含：
+当前 `us-east-1` 基线镜像为 `ami-08952339a071d1772`
+（`arladkr-bench-arm64-v4-20260821`），是 Amazon Linux ARM64，使用 Go `1.26.5`，并包含提交
+`b50bcaf` 的 ARL scalar responder 和 Practical MVBA/APDB 阈值修复。AMI 至少包含：
 
 - Amazon Linux ARM64；
 - 固定版本的 Go（当前为 `1.26.5`）；

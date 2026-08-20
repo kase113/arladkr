@@ -134,6 +134,7 @@ snapshot。AMI 不属于当前 Terraform 栈的销毁范围。
 | 2026-08-21 ARL n=32 `paper-n32-arl-fix-r1-20260821`，SSM 最终一致性诊断轮 | 约 `$0.26` | **约 `$4.59`** |
 | 2026-08-21 ARL n=32 `paper-n32-arl-fix-r2-20260821`，29/32 quorum smoke | 约 `$0.55` | **约 `$5.14`** |
 | 2026-08-21 Practical n=32 `paper-n32-practical-fix-r1-20260821`，协议阈值诊断轮 | 约 `$0.36` | **约 `$5.50`** |
+| 2026-08-21 ARL/Practical 修复后 ARM64 v4 AMI bake，源实例约 0.161 instance-hours | 约 `$0.05` | **约 `$5.55`** |
 
 持续成本另计：4 个 AMI snapshot 的逻辑块约 21.34 GiB，按 `$0.05/GiB-month` 粗算上界约
 `$1.07/月`，增量共享后实际可能更低。当前运行实例、公网 IPv4、实验 gp3、临时 S3、实验 VPC
@@ -1761,3 +1762,48 @@ Cost Explorer 为准。32 节点诊断还暴露出 artifact 收集的扩展性�
 分块 SSM 输出拉回日志，协议快速失败后，收集反而成为主要控制面尾部。100+ 节点前应改为节点直接
 上传加密 S3 prefix，控制机只下载 manifest 和必要失败样本；否则收集时间和 SSM 输出量会近似随
 节点数及 artifact 大小线性放大。
+
+## 2026-08-21 ARL/Practical 修复后 ARM64 v4 AMI
+
+提交 `b50bcaf` 推送到 `origin/main` 后，使用实验组 `ami-bake-20260821` 在
+`us-east-1f/use1-az5` 创建一台 `c7g.xlarge` Spot 源实例
+`i-0b218795cdb65e445`，基线为 v3 AMI `ami-053e9be88b591d821`。源码同步覆盖 ARL、
+PracticalADKR 和 dumbomvba-go，bundle digest 为
+`2ad3dda1acd0fd92af06e8b2939a427dc30578ae7d69641fc4d7323ef2f3f0a8`。ARM64 空测试通过：
+
+```text
+ok  rladkr_go/cmd/cvv2ref
+ok  rladkr_go/cmd/rladkrbench
+ok  rladkr_go/core
+ok  practical_adkr/cmd/bench_latency
+ok  practical_adkr/core
+ok  dumbomvba_go/core
+```
+
+构建产物均为静态链接 ARM aarch64 ELF：
+
+```text
+rladkrbench   sha256=27dd907d682277b6bb71281e1afcdce10444361a38cd3da0b227d7164eb1da81
+bench_latency sha256=a1a6eee0cb1639716d416ed893bac64258b1029bd6383f6a784f07c916f87935
+```
+
+新镜像信息：
+
+```text
+ami-08952339a071d1772
+name: arladkr-bench-arm64-v4-20260821
+state: available
+architecture: arm64
+root: encrypted 30 GiB gp3
+snapshot: snap-05d6b514965a9ddc8
+```
+
+`deployment/config.aws-private-n10-use1.yaml`、`deployment/config.aws-private-n32-use1.yaml`
+和后续 bake 配置均已切换到 v4；历史 experiment record 保留其实际使用的旧 AMI ID，不做改写。
+源实例从 `2026-08-20T18:18:05Z` 运行至 `18:27:45Z`，约 0.161 instance-hours。
+AMI available 后 Terraform 销毁 11 个源栈资源；独立查询确认实验组无 non-terminated EC2、
+open/active Spot request、EBS volume、VPC、Security Group 或 IAM role。
+
+按当时约 `$0.0522/h` Spot、短时公网 IPv4/gp3 和新增 snapshot 的保守口径，本次 bake 记
+约 `$0.05`；累计量化成本由约 `$5.50` 更新为约 **`$5.55`**，最终以 Cost Explorer 为准。
+新 30 GiB snapshot 的持续存储费用单列，旧 AMI 在确认不再需要复现历史实验前不自动删除。
