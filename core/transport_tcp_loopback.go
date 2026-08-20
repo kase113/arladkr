@@ -94,7 +94,6 @@ type tcpLoopbackTransport struct {
 	wg        sync.WaitGroup
 	dialTO    time.Duration
 	writeTO   time.Duration
-	readTO    time.Duration
 	acceptTO  time.Duration
 	enqueueTO time.Duration
 	runtime   *runtimeCrypto
@@ -198,7 +197,6 @@ func NewTCPLoopbackTransportWithOptions(
 		closed:    make(chan struct{}),
 		dialTO:    durationEnvMs("RLADKR_TCP_DIAL_TIMEOUT_MS", defaultTransportDialTimeout(len(nodes))),
 		writeTO:   durationEnvMs("RLADKR_TCP_WRITE_TIMEOUT_MS", defaultTransportWriteTimeout(len(nodes))),
-		readTO:    durationEnvMs("RLADKR_TCP_READ_TIMEOUT_MS", defaultTransportReadTimeout(len(nodes))),
 		acceptTO:  durationEnvMs("RLADKR_TCP_ACCEPT_READ_TIMEOUT_MS", defaultTransportAcceptTimeout(len(nodes))),
 		enqueueTO: durationEnvMs("RLADKR_TCP_ENQUEUE_TIMEOUT_MS", defaultTransportEnqueueTimeout(len(nodes))),
 		runtime:   cfg.runtime,
@@ -405,30 +403,22 @@ func (t *tcpLoopbackTransport) sendRemotePooled(addr string, msg Message, frame 
 	pc.mu.Unlock()
 
 	t.poolMu.Lock()
-	if existing, exists := t.conns[key]; exists {
-		existing.mu.Lock()
-		_ = existing.conn.Close()
-		existing.mu.Unlock()
+	if _, exists := t.conns[key]; exists {
+		t.poolMu.Unlock()
+		_ = conn.Close()
+		return nil
 	}
 	t.conns[key] = pc
 	t.poolMu.Unlock()
 	return nil
 }
 
-func (t *tcpLoopbackTransport) sendRemoteOnConn(conn net.Conn, msg Message, frame []byte, wireBytes int) error {
+func (t *tcpLoopbackTransport) sendRemoteOnConn(conn net.Conn, _ Message, frame []byte, wireBytes int) error {
 	_ = conn.SetWriteDeadline(time.Now().Add(t.writeTO))
 	if err := writeTCPFrame(conn, frame); err != nil {
 		return err
 	}
 	t.recordSentBytes(wireBytes)
-	_ = conn.SetReadDeadline(time.Now().Add(t.readTO))
-	var ack [1]byte
-	if _, err := io.ReadFull(conn, ack[:]); err != nil {
-		return err
-	}
-	if ack[0] != 1 {
-		return fmt.Errorf("transport ack rejected for msg tag=%s", msg.Tag)
-	}
 	return nil
 }
 
@@ -632,27 +622,19 @@ func (t *tcpLoopbackTransport) handleAcceptedConn(id int, conn net.Conn) {
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(t.acceptTO))
 		msg, wireBytes, err := readTCPMessageFrame(conn)
-		if err == nil {
-			t.recordRecvBytes(wireBytes)
-			t.mu.RLock()
-			ch := t.inbox[id]
-			t.mu.RUnlock()
-			delivered := false
-			select {
-			case ch <- msg:
-				delivered = true
-			case <-time.After(t.enqueueTO):
-			case <-t.closed:
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
 			}
-			_ = conn.SetWriteDeadline(time.Now().Add(t.writeTO))
-			ack := byte(0)
-			if delivered {
-				ack = 1
-			}
-			if _, err := conn.Write([]byte{ack}); err != nil {
-				return
-			}
-		} else {
+			return
+		}
+		t.recordRecvBytes(wireBytes)
+		t.mu.RLock()
+		ch := t.inbox[id]
+		t.mu.RUnlock()
+		select {
+		case ch <- msg:
+		case <-t.closed:
 			return
 		}
 	}
@@ -715,17 +697,6 @@ func defaultTransportWriteTimeout(n int) time.Duration {
 		return 5 * time.Second
 	case n >= 128:
 		return 3 * time.Second
-	default:
-		return 1200 * time.Millisecond
-	}
-}
-
-func defaultTransportReadTimeout(n int) time.Duration {
-	switch {
-	case n >= 192:
-		return 10 * time.Second
-	case n >= 128:
-		return 5 * time.Second
 	default:
 		return 1200 * time.Millisecond
 	}

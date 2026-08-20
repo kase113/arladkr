@@ -76,6 +76,18 @@ type cvOutboundMessageV2 struct {
 	onResult func(error)
 }
 
+type cvCryptoJobKindV2 uint8
+
+const (
+	cvCryptoJobLaneOfferV2 cvCryptoJobKindV2 = iota + 1
+	cvCryptoJobCertifiedCandidateV2
+)
+
+type cvCryptoJobV2 struct {
+	kind cvCryptoJobKindV2
+	msg  Message
+}
+
 type cvServiceExperimentMetricsV2 struct {
 	proposerRecoverySentBytes           uint64
 	proposerRecoveryRecvBytes           uint64
@@ -228,6 +240,10 @@ type cvAPDBNetworkServiceV2 struct {
 	certifiedCandidateChV2 chan *cvAgreementObjectV2
 	outbound               chan cvOutboundMessageV2
 	outboundWG             sync.WaitGroup
+	cryptoQueue            chan cvCryptoJobV2
+	cryptoWG               sync.WaitGroup
+	processingLaneOffersV2 map[[2]int]struct{}
+	processingCandidatesV2 map[string]struct{}
 	experimentMetrics      cvServiceExperimentMetricsV2
 	done                   chan struct{}
 }
@@ -323,6 +339,9 @@ func newCVAPDBNetworkServiceV2(
 		candidateFanoutV2:      make(map[string]*cvCandidateFanoutStateV2),
 		certifiedCandidateChV2: make(chan *cvAgreementObjectV2, cfg.Params.proposerSampleSize),
 		outbound:               make(chan cvOutboundMessageV2, cvOutboundQueueCapacityV2(len(cfg.OldRoster)+len(cfg.NewRoster))),
+		cryptoQueue:            make(chan cvCryptoJobV2, cvCryptoQueueCapacityV2(len(cfg.OldRoster)+len(cfg.NewRoster))),
+		processingLaneOffersV2: make(map[[2]int]struct{}, len(cfg.OldRoster)),
+		processingCandidatesV2: make(map[string]struct{}, cfg.Params.proposerSampleSize),
 		experimentMetrics: cvServiceExperimentMetricsV2{
 			tagSentBytes: make(map[string]uint64), tagRecvBytes: make(map[string]uint64),
 		},
@@ -348,6 +367,11 @@ func newCVAPDBNetworkServiceV2(
 	for range workers {
 		go service.runOutbound()
 	}
+	cryptoWorkers := cvCryptoWorkers(cap(service.cryptoQueue))
+	service.cryptoWG.Add(cryptoWorkers)
+	for range cryptoWorkers {
+		go service.runCryptoWorkerV2()
+	}
 	go service.run()
 	return service, nil
 }
@@ -361,6 +385,68 @@ func cvOutboundQueueCapacityV2(committeeSize int) int {
 		return 4096
 	}
 	return capacity
+}
+
+func cvCryptoQueueCapacityV2(committeeSize int) int {
+	capacity := committeeSize * 2
+	if capacity < 64 {
+		return 64
+	}
+	if capacity > 2048 {
+		return 2048
+	}
+	return capacity
+}
+
+func (s *cvAPDBNetworkServiceV2) runCryptoWorkerV2() {
+	defer s.cryptoWG.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case job := <-s.cryptoQueue:
+			s.runCryptoJobV2(job)
+		}
+	}
+}
+
+func (s *cvAPDBNetworkServiceV2) runCryptoJobV2(job cvCryptoJobV2) {
+	switch job.kind {
+	case cvCryptoJobLaneOfferV2:
+		key := [2]int{job.msg.From, job.msg.To}
+		defer func() {
+			s.mu.Lock()
+			delete(s.processingLaneOffersV2, key)
+			s.mu.Unlock()
+		}()
+		s.handleLaneOfferV2(job.msg)
+	case cvCryptoJobCertifiedCandidateV2:
+		digest := cvCertifiedCandidateDigestV2(job.msg.Body)
+		defer func() {
+			s.mu.Lock()
+			delete(s.processingCandidatesV2, digest)
+			s.mu.Unlock()
+		}()
+		s.processCertifiedCandidateV2(job.msg)
+	}
+}
+
+func (s *cvAPDBNetworkServiceV2) enqueueLaneOfferV2(msg Message) {
+	key := [2]int{msg.From, msg.To}
+	s.mu.Lock()
+	if _, duplicate := s.processingLaneOffersV2[key]; duplicate {
+		s.mu.Unlock()
+		return
+	}
+	s.processingLaneOffersV2[key] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case s.cryptoQueue <- cvCryptoJobV2{kind: cvCryptoJobLaneOfferV2, msg: msg}:
+	case <-s.ctx.Done():
+		s.mu.Lock()
+		delete(s.processingLaneOffersV2, key)
+		s.mu.Unlock()
+	}
 }
 
 func (s *cvAPDBNetworkServiceV2) runOutbound() {
@@ -1301,6 +1387,7 @@ func (s *cvAPDBNetworkServiceV2) Close() error {
 	s.cancel()
 	<-s.done
 	s.outboundWG.Wait()
+	s.cryptoWG.Wait()
 	return nil
 }
 
@@ -1657,13 +1744,13 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 	case cvTagAggregateShareV2:
 		s.handleAggregateShare(msg)
 	case cvTagLaneOfferV2:
-		s.handleLaneOfferV2(msg)
+		s.enqueueLaneOfferV2(msg)
 	case cvTagLaneACKV2:
 		s.handleLaneACKV2(msg)
 	case cvTagComponentRefV2:
 		s.handleComponentRefV2(msg)
 	case cvTagCertifiedCandidateV2:
-		s.handleCertifiedCandidateV2(msg)
+		s.enqueueCertifiedCandidateV2(msg)
 	case cvTagCertifiedCandidateACKV2:
 		digest, err := cvDecodeCertifiedCandidateACKV2(msg.Body)
 		if err == nil {

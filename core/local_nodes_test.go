@@ -83,12 +83,11 @@ func TestTCPPooledSendReconnectsAfterBrokenConnection(t *testing.T) {
 			serverDone <- readErr
 			return
 		}
-		_, writeErr := conn.Write([]byte{1})
-		serverDone <- writeErr
+		serverDone <- nil
 	}()
 	transport := &tcpLoopbackTransport{
 		conns:  make(map[string]*tcpLoopbackPoolConn),
-		dialTO: time.Second, writeTO: time.Second, readTO: time.Second,
+		dialTO: time.Second, writeTO: time.Second,
 	}
 	msg := Message{From: 1, To: 2, Tag: "reconnect", Body: []byte("payload")}
 	frame, err := tcpMessageFrame(msg)
@@ -116,6 +115,114 @@ func TestTCPPooledSendReconnectsAfterBrokenConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport.closePooledConns()
+}
+
+func TestTCPRemoteSendDoesNotWaitForReceiverRoundTrip(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	transport := &tcpLoopbackTransport{writeTO: time.Second}
+	msg := Message{From: 1, To: 2, Tag: "write-only", Body: []byte("payload")}
+	frame, err := tcpMessageFrame(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan error, 1)
+	go func() {
+		_, _, readErr := readTCPMessageFrame(server)
+		received <- readErr
+	}()
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.sendRemoteOnConn(client, msg, frame, len(frame))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("remote send failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("remote send waited for a receiver round trip")
+	}
+	if err := <-received; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTCPAcceptedConnectionSurvivesIdleReadTimeout(t *testing.T) {
+	client, server := net.Pipe()
+	transport := &tcpLoopbackTransport{
+		inbox:     map[int]chan Message{2: make(chan Message, 2)},
+		closed:    make(chan struct{}),
+		acceptTO:  20 * time.Millisecond,
+		enqueueTO: time.Second,
+	}
+	transport.wg.Add(1)
+	go transport.handleAcceptedConn(2, server)
+	defer func() {
+		close(transport.closed)
+		_ = client.Close()
+		transport.wg.Wait()
+	}()
+	send := func(body string) {
+		t.Helper()
+		frame, err := tcpMessageFrame(Message{From: 1, To: 2, Tag: "idle", Body: []byte(body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeTCPFrame(client, frame); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-transport.inbox[2]:
+			if string(got.Body) != body {
+				t.Fatalf("received body=%q want=%q", got.Body, body)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out receiving %q", body)
+		}
+	}
+	send("first")
+	time.Sleep(3 * transport.acceptTO)
+	send("second")
+}
+
+func TestTCPAcceptedConnectionAppliesInboxBackpressure(t *testing.T) {
+	client, server := net.Pipe()
+	inbox := make(chan Message, 1)
+	transport := &tcpLoopbackTransport{
+		inbox:     map[int]chan Message{2: inbox},
+		closed:    make(chan struct{}),
+		acceptTO:  time.Second,
+		enqueueTO: 20 * time.Millisecond,
+	}
+	transport.wg.Add(1)
+	go transport.handleAcceptedConn(2, server)
+	defer func() {
+		close(transport.closed)
+		_ = client.Close()
+		transport.wg.Wait()
+	}()
+	for _, body := range []string{"first", "second"} {
+		frame, err := tcpMessageFrame(Message{From: 1, To: 2, Tag: "backpressure", Body: []byte(body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeTCPFrame(client, frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(3 * transport.enqueueTO)
+	for _, want := range []string{"first", "second"} {
+		select {
+		case got := <-inbox:
+			if string(got.Body) != want {
+				t.Fatalf("received body=%q want=%q", got.Body, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out receiving %q", want)
+		}
+	}
 }
 
 func TestNormalizeConfig_FiltersAndSortsLocalNodeIDs(t *testing.T) {

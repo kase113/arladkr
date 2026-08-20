@@ -56,12 +56,19 @@ func main() {
 		setupOutputDir = flag.String("setup-output-dir", os.Getenv("PRACTICAL_SETUP_OUTPUT_DIR"), "output directory for --setup-keygen-only")
 	)
 	flag.Parse()
+	visited := make(map[string]bool)
+	flag.Visit(func(current *flag.Flag) {
+		visited[current.Name] = true
+	})
 
 	if *n <= 0 {
 		fmt.Fprintln(os.Stderr, "invalid n")
 		os.Exit(1)
 	}
 	committeeSize := *n
+	if !visited["timeout"] {
+		*timeout = defaultPracticalBenchTimeout(committeeSize)
+	}
 	if *f < -1 {
 		fmt.Fprintln(os.Stderr, "invalid f (must be -1 or non-negative)")
 		os.Exit(1)
@@ -420,6 +427,23 @@ func main() {
 	}
 	if grace := durationFromEnvMs("PRACTICAL_RECOVER_SERVICE_GRACE_MS"); grace > 0 {
 		time.Sleep(grace)
+	}
+}
+
+func defaultPracticalBenchTimeout(n int) time.Duration {
+	switch {
+	case n >= 192:
+		return 30 * time.Minute
+	case n >= 128:
+		return 20 * time.Minute
+	case n >= 96:
+		return 15 * time.Minute
+	case n >= 64:
+		return 10 * time.Minute
+	case n >= 32:
+		return 5 * time.Minute
+	default:
+		return 90 * time.Second
 	}
 }
 

@@ -60,6 +60,46 @@ func TestNetworkDXTReceiverReadinessWaitsForQuorum(t *testing.T) {
 	}
 }
 
+func TestDXTNetworkTimeoutScalesWithCommittee(t *testing.T) {
+	t.Setenv("PRACTICAL_DXT_TIMEOUT_MS", "")
+	tests := []struct {
+		n    int
+		want time.Duration
+	}{
+		{n: 10, want: 8 * time.Second},
+		{n: 32, want: 30 * time.Second},
+		{n: 64, want: 90 * time.Second},
+		{n: 100, want: 3 * time.Minute},
+		{n: 128, want: 5 * time.Minute},
+		{n: 256, want: 10 * time.Minute},
+	}
+	for _, test := range tests {
+		if got := dxtNetworkTimeout(test.n); got != test.want {
+			t.Fatalf("n=%d timeout=%s want=%s", test.n, got, test.want)
+		}
+	}
+	t.Setenv("PRACTICAL_DXT_TIMEOUT_MS", "1250")
+	if got := dxtNetworkTimeout(256); got != 1250*time.Millisecond {
+		t.Fatalf("override timeout=%s", got)
+	}
+}
+
+func TestDXTTranscriptVerificationBudgetsAreBounded(t *testing.T) {
+	t.Setenv("PRACTICAL_DXT_VERIFY_WORKERS", "12")
+	if got := dxtTranscriptVerifyWorkers(100); got != 4 {
+		t.Fatalf("verify workers=%d want=4", got)
+	}
+	if got := dxtTranscriptVerifyQueueCapacity(10); got != 64 {
+		t.Fatalf("small queue=%d want=64", got)
+	}
+	if got := dxtTranscriptVerifyQueueCapacity(100); got != 200 {
+		t.Fatalf("n100 queue=%d want=200", got)
+	}
+	if got := dxtTranscriptVerifyQueueCapacity(1000); got != 512 {
+		t.Fatalf("large queue=%d want=512", got)
+	}
+}
+
 func TestNetworkDXTCompletesWithoutAllReceiversOrDealers(t *testing.T) {
 	old := []int{0, 1, 2, 3}
 	newCommittee := []int{10, 11, 12, 13}

@@ -59,6 +59,16 @@ ARLADKR 与 PracticalADKR 的安全参数不是同一个变量。`high-assurance
 每个远端进程使用 `runs=1`、一个新 epoch。重复测量通过多个独立 `run_id` 完成，不在同一进程
 中连续运行多个 epoch。
 
+Fabric 会在未显式给出 `-timeout` 时按协议和委员会规模写入 timeout，而不是依赖二进制的小规模默认值。
+当前 AWS 预算为：ARL 在 `n=64/96/128/192` 起分别使用 `120/180/300/600s`；Practical 在
+`n=32/64/96/128/192` 起分别使用 `300/600/900/1200/1800s`。这些数值只是失败判定预算，不从
+成功轮次 latency 中扣除，也不能用于掩盖协议停滞。
+
+ARL 的重密码学 dispatch 使用有界 worker queue；默认 worker 数复用 `RLADKR_CRYPTO_WORKERS`，
+candidate fan-out 可用 `RLADKR_CANDIDATE_FANOUT_PARALLEL` 覆盖。Practical 的 DXT transcript
+验证使用最多 4 个 worker，可用 `PRACTICAL_DXT_VERIFY_WORKERS` 覆盖；单连接 DXT deadline 随
+委员会规模增长，也可用 `PRACTICAL_DXT_TIMEOUT_MS` 显式覆盖。正式数据必须记录这些环境变量。
+
 ## 3. 推荐的规模推进顺序
 
 不要直接从 n=4 跳到 n=256。建议按以下门槛推进：
@@ -80,6 +90,12 @@ On-Demand vCPU 和 Standard Spot vCPU 配额。还应检查：
 - VPC、子网可用 IP 数量；
 - 公网 IPv4、Elastic IP 和 Security Group rule quota；
 - SSM managed instance 和 CloudWatch/S3 配额。
+
+公网协议 Security Group 现在有两种自动模式：来源数不超过 48 时继续使用每节点 `/32`
+allowlist；来源数超过 48 时使用一个临时的大规模实验 CIDR，避免默认每个 SG 约 60 条入站规则的
+额度在 Terraform apply 阶段被耗尽。默认大规模 CIDR 为 `0.0.0.0/0`，可通过
+`aws.security.ingress.large_fleet_protocol_cidr` 收紧；它只开放本轮协议端口，协议 wire 仍执行现有
+身份认证，并随 fresh fleet 一起销毁。这是论文公网实验的临时编排模式，不是生产部署建议。
 
 ## 4. 基础设施设计
 

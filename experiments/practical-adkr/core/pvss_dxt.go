@@ -320,11 +320,24 @@ func NewDXTBackend(
 	}, nil
 }
 
-func dxtNetworkTimeout() time.Duration {
+func dxtNetworkTimeout(committeeSize int) time.Duration {
 	if v := durationFromEnvMsOr("PRACTICAL_DXT_TIMEOUT_MS", 0); v > 0 {
 		return v
 	}
-	return 4 * time.Second
+	switch {
+	case committeeSize >= 192:
+		return 10 * time.Minute
+	case committeeSize >= 128:
+		return 5 * time.Minute
+	case committeeSize >= 96:
+		return 3 * time.Minute
+	case committeeSize >= 64:
+		return 90 * time.Second
+	case committeeSize >= 32:
+		return 30 * time.Second
+	default:
+		return 8 * time.Second
+	}
 }
 
 func (b *DXTBackend) StartRecipientService(timeout time.Duration) (func(), error) {
@@ -520,7 +533,7 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 	}
 
 	if netEnabled && !fastLocalAcks {
-		timeout := dxtNetworkTimeout()
+		timeout := dxtNetworkTimeout(len(b.oldCommittee))
 		var stopReceivers func()
 		if !b.externalReceivers {
 			var svcErr error

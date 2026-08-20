@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,9 +16,33 @@ const cvCertifiedCandidateDigestV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/certif
 const (
 	cvCertifiedCandidateACKV2Domain = "ARL-CV-sAPVSS/v2-scalar-group/certified-candidate-ack"
 	cvCandidateFanoutMaxAttemptsV2  = 4
-	cvCandidateFanoutMaxParallelV2  = 4
 	cvCandidateFanoutRetryBaseV2    = 250 * time.Millisecond
 )
+
+func cvCandidateFanoutParallelV2(peers int) int {
+	if peers <= 0 {
+		return 0
+	}
+	parallel := 8
+	switch {
+	case peers > 128:
+		parallel = 32
+	case peers > 64:
+		parallel = 24
+	case peers > 16:
+		parallel = 16
+	}
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_CANDIDATE_FANOUT_PARALLEL"))); err == nil && configured > 0 {
+		parallel = configured
+	}
+	if parallel > 64 {
+		parallel = 64
+	}
+	if parallel > peers {
+		parallel = peers
+	}
+	return parallel
+}
 
 type cvCandidateFanoutStateV2 struct {
 	mu      sync.Mutex
@@ -234,10 +261,7 @@ func (s *cvAPDBNetworkServiceV2) fanoutCandidateV2(
 	}
 	state := s.candidateFanoutStateV2(digest)
 	defer s.releaseCandidateFanoutStateV2(digest, state)
-	parallel := cvCandidateFanoutMaxParallelV2
-	if parallel > len(peers) {
-		parallel = len(peers)
-	}
+	parallel := cvCandidateFanoutParallelV2(len(peers))
 	sem := make(chan struct{}, parallel)
 	errs := make(chan error, len(peers))
 	var workers sync.WaitGroup
@@ -428,7 +452,7 @@ func (s *cvAPDBNetworkServiceV2) CertifiedCandidateCountV2() int {
 	return len(s.certifiedCandidatesV2)
 }
 
-func (s *cvAPDBNetworkServiceV2) handleCertifiedCandidateV2(msg Message) {
+func (s *cvAPDBNetworkServiceV2) acknowledgeCertifiedCandidateV2(msg Message) string {
 	digest := cvCertifiedCandidateDigestV2(msg.Body)
 	// This ACK confirms delivery of an authenticated envelope, not candidate
 	// validity. Sending it before expensive verification avoids WAN retries
@@ -436,6 +460,38 @@ func (s *cvAPDBNetworkServiceV2) handleCertifiedCandidateV2(msg Message) {
 	if ack, err := cvEncodeCertifiedCandidateACKV2(digest); err == nil {
 		_ = s.sendAsync(msg.From, cvTagCertifiedCandidateACKV2, ack, nil)
 	}
+	return digest
+}
+
+func (s *cvAPDBNetworkServiceV2) enqueueCertifiedCandidateV2(msg Message) {
+	digest := s.acknowledgeCertifiedCandidateV2(msg)
+	s.mu.Lock()
+	if cached := s.certifiedCandidatesV2[digest]; len(cached) != 0 && bytes.Equal(cached, msg.Body) {
+		s.mu.Unlock()
+		return
+	}
+	if _, inFlight := s.processingCandidatesV2[digest]; inFlight {
+		s.mu.Unlock()
+		return
+	}
+	s.processingCandidatesV2[digest] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case s.cryptoQueue <- cvCryptoJobV2{kind: cvCryptoJobCertifiedCandidateV2, msg: msg}:
+	case <-s.ctx.Done():
+		s.mu.Lock()
+		delete(s.processingCandidatesV2, digest)
+		s.mu.Unlock()
+	}
+}
+
+func (s *cvAPDBNetworkServiceV2) handleCertifiedCandidateV2(msg Message) {
+	s.acknowledgeCertifiedCandidateV2(msg)
+	s.processCertifiedCandidateV2(msg)
+}
+
+func (s *cvAPDBNetworkServiceV2) processCertifiedCandidateV2(msg Message) {
+	digest := cvCertifiedCandidateDigestV2(msg.Body)
 	if cached := s.cachedCertifiedCandidateWireV2(digest); bytes.Equal(cached, msg.Body) {
 		return
 	}

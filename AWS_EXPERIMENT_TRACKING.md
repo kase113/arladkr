@@ -1404,3 +1404,139 @@ instance-seconds。按当时 `us-east-1f c7g.xlarge` Spot 价 `$0.0523/小时`�
 **约 `$0.13`**。累计量化成本由约 `$3.30` 更新为约 **`$3.43`**，最终仍以 Cost Explorer 为准。
 实验后 cleanup-ready 为 `10/10`，Terraform 销毁 20 个资源；AWS 只读复核显示该 ExperimentGroup
 的 non-terminated instance 和 open/active Spot request 均为 0。
+
+## 2026-08-20 ARL TCP 传输层对照 PracticalADKR 的修复（本地验证）
+
+针对 r22 公网与 r23 同 AZ 私网的阶段差异，进一步对照了 PracticalADKR 的传输实现。Practical 的
+MVBA pooled TCP 在一条连接上只等待完整 frame 写入，不等待额外的 transport ACK；接收端持续读取
+length-prefixed frame，并把消息交给协议 inbox。Practical 的 application-level DXT/APDB 仍通过
+receipt、certificate ACK 和阈值消息完成可靠性，因此没有把每个通用 TCP frame 都变成 stop-and-wait
+RPC。
+
+ARL 原先的 `core/transport_tcp_loopback.go` 在每个 frame 写入后等待远端 1-byte ACK，并在同一
+`(from,to,tag,lane)` pooled connection 上持锁直到 ACK 返回。跨 Region 时，这会把多个 proposer、coin、
+certificate 和 recovery 消息串成 WAN RTT 队列；同 AZ 私网中则几乎不显现。该路径与协议层 candidate ACK、
+APDB receipt 不是同一种确认，属于传输层重复确认。
+
+本次实现调整保持协议 wire、认证封装、阈值和密码学检查不变：
+
+- ARL TCP `Send` 改为写入完整 frame 后返回，连接锁只覆盖写入；删除冗余的 transport ACK 读写。
+- pooled connection 的接收端在 idle read timeout 时继续等待，并在 inbox 满时施加 TCP 自然反压，不再
+  静默丢弃消息；这与 Practical 的 `readConn` 行为一致。
+- pooled connection 并发建连时保留先进入连接池的连接，关闭重复连接，避免 WAN 下连接替换抖动。
+- CV lane offer 从逐 receiver 顺序发送改为已有的最多 16 路 bounded fan-out；仍发送相同 offer、仍要求
+  原有 ACK quorum 和 fallback 规则。
+- 本地 `deployment/docker/run_proc_sim.py` 删除已经从 `rladkrbench` 移除的旧
+  `-fallback-policy force` 注入，并在启动计时前生成共享 CV setup、为每个进程设置独立 secret/state 目录。
+  这是实验编排修复，不改变协议设计或论文 latency 口径。
+
+验证结果：`go test ./core -run 'TestTCP|TestCVACKSettleGrace|TestCVAPDBNetwork|TestCV.*Lane|TestWaitForRemoteNodeReadiness|TestNewTCPLoopback' -count=1`
+通过；`go test ./... -run '^$'` 编译检查通过；新增测试覆盖 write-only remote send、idle pooled connection
+和 inbox backpressure。随后本地严格 TCP proc-sim 使用当前二进制运行：`n=10,f=3` 达到 `8/10` 成功、
+共识 hash 一致，`n=4,f=1` 达到 `3/4` 成功；失败节点分别出现在 APDB recovery 或 MVBA 尾部，而不是
+参数解析、setup、listener 或 frame 丢包。由于 proc-sim 中每个节点完成本地 epoch 后会独立退出，快节点
+退出可能使慢节点在最终 recovery/MVBA 阶段失去服务者；因此这些本地轮次只作为传输回归 smoke，不作为
+性能或全节点成功数据。
+
+该修复尚未在 AWS 公网重测，未产生 AWS 费用，也不应把 r22/r23 结果回写为修复后的公网性能。下一轮应在
+fresh fleet、相同 `us-east-1:5 + eu-west-1:5` topology 下使用新二进制运行 ARL，并同时运行 Practical
+对照；必须确认 `10/10` artifact、单一 consensus hash、协议 listener 在最终 cleanup barrier 前保持可用，
+再比较 adjusted latency、candidate formation、component dispersal、recovery 和通信量。
+
+## 2026-08-20 ARL TCP 修复版两区域公网 fresh-fleet 复测（r24）
+
+使用实验 `paper-arl-use1-euw1-n10-r24-20260820` 在与 r22 完全相同的公网 topology 上复测当前本地
+TCP/fan-out 修复：`us-east-1:5`（`us-east-1a`）加 `eu-west-1:5`（`eu-west-1c`），10 台
+`c7g.xlarge` Spot，`n=10,f=3,runs=1,epochs=1`，启用 `strict-network`、`comm-metrics` 和
+`route-send-timeout=1s`。协议 roster 使用公网地址；成功门槛仍为 `n-f=7`，holder service grace
+仍按既定 `service_grace_adjusted` 口径扣除，setup/keygen 仍不计入 online protocol。未重建 AMI，runner
+从当前工作树重新构建并分发 ARM64 二进制；`rladkrbench` SHA-256 为
+`4cf49546c2a2d8838ff6623a3195547f96771760062d3af73351ff09595a0420`。
+
+运行完整性：两区 SSM、pre-launch cleanup 和 runner readiness 均为 `10/10`；setup bundle digest 为
+`0a3ab4245f85efa853709954a5c4fbe8545795148657904548ea1c82a95407a3`，十个节点一致。最终 success 和
+artifact 均为 `10/10`，十个节点 consensus hash 均为
+`285c83457579b38395caff5566c4381f80e0a15f0b70f63b93f9ba78d8e8d84d`，没有 timeout、错误 summary
+或 candidate retry。以下仍是单 epoch fresh-fleet smoke，不进入论文最终 median/p95 主表。
+
+| 指标 | 节点范围/门槛 | 10 节点均值 |
+| --- | ---: | ---: |
+| service-grace-adjusted latency | `5892.95--6854.25` ms | **`6530.37` ms** |
+| raw latency | `15893.13--16855.21` ms | `16530.63` ms |
+| quorum / all-nodes adjusted latency | `6680.00 / 6854.25` ms | - |
+| setup / online protocol | - | `119.29 / 6411.09` ms |
+| leaf build | `838--1295` ms | **`1071.90` ms** |
+| component dispersal | `225--639` ms | **`404.10` ms** |
+| candidate formation | `3257--3482` ms | **`3371.20` ms** |
+| eligibility coin / proposer slots | - | `42.57 / 3328.62` ms |
+| candidate ACK wait / max-peer fan-out | - | `1.64 / 15.79` ms |
+| aggregate agreement | `653--719` ms | `684.80` ms |
+| aggregate recovery after decision | `69.68--70.07` ms | `69.85` ms |
+| APVSS ACK / fallback count | `8--9 / 1--2` | `8.7 / 1.3` |
+| candidate fan-out retries | all nodes `0` | `0` |
+| total sent / received | - | **`4.959 / 4.951 MB` per node** |
+
+### 与 r22 和 r23 的判断
+
+在相同公网 topology 下，r24 adjusted mean 从 r22 的 `9093.36 ms` 降至 `6530.37 ms`，下降
+`2562.99 ms`，约 **28.2%**；quorum 从 `9121.64 ms` 降至 `6680.00 ms`，all-nodes 从
+`9436.79 ms` 降至 `6854.25 ms`。分阶段看，leaf build 下降约 **51.9%**，component dispersal
+下降约 **48.8%**，candidate formation 下降约 **16.1%**，aggregate agreement 下降约 **9.5%**，
+decision 后 aggregate recovery 下降约 **49.5%**。candidate ACK wait 均值只有 `1.64 ms`，retry 为
+零，说明删除通用逐 frame transport ACK、缩短连接锁范围和 lane bounded fan-out 确实命中了 r22 的
+WAN 串行等待，而没有通过放宽协议 ACK、阈值或密码验证获得数字。
+
+r24 adjusted mean 与相同 topology 的 Practical r21 单轮均值 `6541.07 ms` 接近，但不能据一个 epoch
+宣称两者性能等价：ARL 本轮每节点通信量约 `4.959/4.951 MB`，仍约为 Practical r21
+`1.034/1.028 MB` 的 4.8 倍，而且两套协议的密码工作和安全口径不同。相对同 AZ 私网 r23，公网 r24
+仍高 `2122.87 ms`；主要差异位于 candidate、component、agreement 和远端恢复通信，已经不再呈现 r22
+那种额外 transport ACK 造成的近一倍放大。正式论文数据仍应在 clean commit 上对 ARL 与 Practical
+分别执行多次独立 fresh fleet，并报告 attempt 成功率、median 和 p95。
+
+资源与成本：美国五台实例约从 `10:04:48--49Z` 运行到 `10:14:25--26Z`，每台约 577 秒；爱尔兰
+五台从 `10:05:36Z` 运行到 `10:13:09Z`，每台约 453 秒。按当时
+`us-east-1a c7g.xlarge $0.0731/小时` 和 `eu-west-1c $0.0752/小时` 的 Spot 价，计算费约
+`$0.106`；加临时公网 IPv4、短时 `10 x 30 GiB` gp3、SSM/S3 和少量跨区流量，本轮保守记
+**约 `$0.12`**。累计量化成本由约 `$3.43` 更新为约 **`$3.55`**，最终仍以 Cost Explorer 为准。
+实验完成后两区 Terraform 各销毁 21 个资源；AWS API 复核两区 non-terminated instance 和
+open/active Spot request 均为 0。
+
+## 2026-08-20 百节点公网前置扩展性修复（仅本地代码验证）
+
+在 r24 证明逐 frame transport ACK 已移除后，继续针对 `n>=100` 的实现瓶颈完成了不改变协议
+消息、密码学关系和阈值的扩展性修复。本轮没有启动 AWS 资源，因此新增费用为 `$0`，累计量化成本
+仍为约 `$3.55`。
+
+ARL 修改如下：
+
+- 保留并纳入当前提交的 write-only pooled TCP、idle connection 和 inbox backpressure 修复；
+- `cvAPDBNetworkServiceV2` 将 receiver lane offer 与 certified candidate 的重密码学验证移入同一个
+  有界 worker queue，主 dispatch 继续顺序处理 coin、receipt、certificate 和 recovery 控制消息；
+- lane offer 按 `(dealer,receiver)` 去重，candidate 按 canonical digest 去重；candidate delivery ACK
+  仍在进入验证队列前发送，不改变 ACK 的“认证 envelope 已到达”语义；
+- candidate fan-out 不再固定 4 路，而按 peer 数使用 `8/16/24/32` 路并发，最大 64，支持
+  `RLADKR_CANDIDATE_FANOUT_PARALLEL` 覆盖；
+- crypto queue 最小 64、最大 2048，worker 数继续受 `RLADKR_CRYPTO_WORKERS` 和现有 CPU 上限约束。
+
+PracticalADKR 修改如下，并已同步到 ARL 仓库的 `experiments/practical-adkr` 镜像：
+
+- DXT transcript 接收不再为每个连接同时执行无界 full verification，而是进入有界队列，默认使用
+  `GOMAXPROCS-1`、最多 4 个 worker；可用 `PRACTICAL_DXT_VERIFY_WORKERS` 覆盖；
+- DXT deadline 从固定 4 秒改为随委员会规模增长：`n<32` 为 8 秒，随后在
+  `32/64/96/128/192` 起使用 `30/90/180/300/600s`；仍可由 `PRACTICAL_DXT_TIMEOUT_MS` 覆盖；
+- `bench_latency` 未显式传入 timeout 时使用 `90/300/600/900/1200/1800s` 的规模化预算。
+
+AWS 编排修改如下：
+
+- Fabric 会为 ARL 和 Practical 显式补齐 scale-aware `-timeout`，cross-region wait timeout 至少比
+  binary timeout 多 300 秒；
+- 公网来源不超过 48 时保留每节点 `/32` allowlist；超过 48 时 Terraform 自动切换为一个临时
+  large-fleet CIDR rule，默认 `0.0.0.0/0`，避免 SG 默认入站规则额度阻止 n=100 apply；该 CIDR
+  可配置，实验记录会写入实际 ingress mode；
+- large-fleet rule 只覆盖协议端口，并随本轮 Terraform state 销毁。该模式依赖协议认证，仅用于
+  临时论文实验，不作为生产安全组方案。
+
+本地验证：ARL transport/candidate/APDB 定向测试通过，约 25 秒；Practical DXT 与 benchmark timeout
+测试通过，约 8 秒；Fabric `44/44` 测试通过；Terraform `fmt -check` 和 `validate` 通过。尚未运行
+百节点 AWS 数据，因此这些修改只能说明已移除已知实现和编排硬限制，不能预先宣称 n=100 latency
+已经符合预期。下一轮仍应按 `n=32 -> 64 -> 96 -> 128` 逐档记录 phase、CPU、RSS、连接数、重传和通信量。

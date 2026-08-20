@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,6 +49,12 @@ type dxtTranscriptAck struct {
 	Accepted         bool   `json:"accepted"`
 }
 
+type dxtTranscriptVerifyJob struct {
+	holder int
+	raw    []byte
+	result chan<- dxtTranscriptAck
+}
+
 // dxtNetworkService replaces the historical shared-directory readiness and
 // transcript exchange. Plaintext ACK auxiliary data remains receiver-local;
 // only fully verified public transcripts are exposed to the next phase.
@@ -64,6 +71,9 @@ type dxtNetworkService struct {
 	closeOnce sync.Once
 	acceptWG  sync.WaitGroup
 	workerWG  sync.WaitGroup
+	verifyWG  sync.WaitGroup
+	verifyCh  chan dxtTranscriptVerifyJob
+	verify    func(int, *DXTTranscript) bool
 
 	mu          sync.RWMutex
 	transcripts map[int]*DXTTranscript
@@ -74,14 +84,20 @@ type dxtNetworkService struct {
 func startDXTNetworkService(ctx context.Context, cfg Config, old []int, dxt *DXTBackend) (*dxtNetworkService, error) {
 	addresses := parseNodeAddrMap(dxtNodeAddrs(cfg))
 	localIDs := parseNodeIDSet(cfg.ProtocolLocalNodeIDs)
-	if len(addresses) == 0 || len(localIDs) == 0 {
+	if dxt == nil || len(addresses) == 0 || len(localIDs) == 0 {
 		return nil, errors.New("DXT network service requires protocol addresses and local identities")
 	}
 	serviceCtx, cancel := context.WithCancel(ctx)
 	service := &dxtNetworkService{
 		cfg: cfg, dxt: dxt, old: append([]int(nil), old...), addresses: addresses, localIDs: localIDs,
 		ctx: serviceCtx, cancel: cancel, listeners: make(map[int]net.Listener),
+		verifyCh: make(chan dxtTranscriptVerifyJob, dxtTranscriptVerifyQueueCapacity(len(old))), verify: dxt.VerifyTranscript,
 		transcripts: make(map[int]*DXTTranscript), shares: make(map[int]map[int]SharePair), changed: make(chan struct{}, 1),
+	}
+	verifyWorkers := dxtTranscriptVerifyWorkers(len(old))
+	service.verifyWG.Add(verifyWorkers)
+	for range verifyWorkers {
+		go service.runTranscriptVerifyWorker()
 	}
 	for id := range localIDs {
 		addr := strings.TrimSpace(addresses[id])
@@ -117,7 +133,52 @@ func (service *dxtNetworkService) close() {
 		}
 		service.acceptWG.Wait()
 		service.workerWG.Wait()
+		service.verifyWG.Wait()
 	})
+}
+
+func dxtTranscriptVerifyWorkers(committeeSize int) int {
+	if committeeSize <= 0 {
+		return 1
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 1 {
+		workers--
+	}
+	workers = intFromEnvOr("PRACTICAL_DXT_VERIFY_WORKERS", workers)
+	if workers > 4 {
+		workers = 4
+	}
+	if workers > committeeSize {
+		workers = committeeSize
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
+
+func dxtTranscriptVerifyQueueCapacity(committeeSize int) int {
+	capacity := committeeSize * 2
+	if capacity < 64 {
+		return 64
+	}
+	if capacity > 512 {
+		return 512
+	}
+	return capacity
+}
+
+func (service *dxtNetworkService) runTranscriptVerifyWorker() {
+	defer service.verifyWG.Done()
+	for {
+		select {
+		case <-service.ctx.Done():
+			return
+		case job := <-service.verifyCh:
+			job.result <- service.verifyTranscriptWire(job.holder, job.raw)
+		}
+	}
 }
 
 func (service *dxtNetworkService) serve(localID int, listener net.Listener) {
@@ -136,7 +197,7 @@ func (service *dxtNetworkService) serve(localID int, listener net.Listener) {
 		go func() {
 			defer service.workerWG.Done()
 			defer conn.Close()
-			_ = conn.SetDeadline(time.Now().Add(dxtNetworkTimeout()))
+			_ = conn.SetDeadline(time.Now().Add(dxtNetworkTimeout(len(service.old))))
 			var raw json.RawMessage
 			if err := json.NewDecoder(conn).Decode(&raw); err != nil {
 				return
@@ -258,12 +319,12 @@ func (service *dxtNetworkService) handleLane(localID int, raw []byte) {
 		return
 	}
 	ack := dxtDealAck{Recipient: localID, Sig: signAck(sk, req.Dealer, localID, req.Commitment)}
-	conn, err := dialWithBandwidth("tcp", req.ReplyAddr, dxtNetworkTimeout())
+	conn, err := dialWithBandwidth("tcp", req.ReplyAddr, dxtNetworkTimeout(len(service.old)))
 	if err != nil {
 		return
 	}
 	defer conn.Close()
-	_ = conn.SetWriteDeadline(time.Now().Add(dxtNetworkTimeout()))
+	_ = conn.SetWriteDeadline(time.Now().Add(dxtNetworkTimeout(len(service.old))))
 	if body, marshalErr := json.Marshal(ack); marshalErr == nil {
 		recordSentBytes(len(body) + 1)
 	}
@@ -271,6 +332,24 @@ func (service *dxtNetworkService) handleLane(localID int, raw []byte) {
 }
 
 func (service *dxtNetworkService) handleTranscript(holder int, conn net.Conn, raw []byte) {
+	result := make(chan dxtTranscriptAck, 1)
+	job := dxtTranscriptVerifyJob{holder: holder, raw: append([]byte(nil), raw...), result: result}
+	select {
+	case service.verifyCh <- job:
+	case <-service.ctx.Done():
+		return
+	}
+	select {
+	case ack := <-result:
+		if body, err := json.Marshal(ack); err == nil {
+			recordSentBytes(len(body) + 1)
+		}
+		_ = json.NewEncoder(conn).Encode(ack)
+	case <-service.ctx.Done():
+	}
+}
+
+func (service *dxtNetworkService) verifyTranscriptWire(holder int, raw []byte) dxtTranscriptAck {
 	ack := dxtTranscriptAck{SID: service.cfg.SID, Epoch: service.cfg.Epoch, Holder: holder}
 	var wire dxtTranscriptWire
 	if err := json.Unmarshal(raw, &wire); err == nil {
@@ -279,15 +358,12 @@ func (service *dxtNetworkService) handleTranscript(holder int, conn net.Conn, ra
 		if wire.SID == service.cfg.SID && wire.Epoch == service.cfg.Epoch && containsNode(service.old, wire.Dealer) &&
 			wire.Transcript != nil && wire.Transcript.Dealer == wire.Dealer {
 			digest, digestErr := dxtTranscriptDigest(wire.Transcript)
-			if digestErr == nil && bytes.Equal(digest, wire.TranscriptDigest) && service.dxt.VerifyTranscript(holder, wire.Transcript) {
+			if digestErr == nil && bytes.Equal(digest, wire.TranscriptDigest) && service.verify(holder, wire.Transcript) {
 				ack.Accepted = service.addTranscript(wire.Dealer, wire.Transcript, digest)
 			}
 		}
 	}
-	if body, err := json.Marshal(ack); err == nil {
-		recordSentBytes(len(body) + 1)
-	}
-	_ = json.NewEncoder(conn).Encode(ack)
+	return ack
 }
 
 func (service *dxtNetworkService) addTranscript(dealer int, transcript *DXTTranscript, digest []byte) bool {
@@ -353,7 +429,8 @@ func sendDXTTranscript(ctx context.Context, cfg Config, dealer, holder int, addr
 	if strings.TrimSpace(addr) == "" {
 		return false
 	}
-	deadline := time.Now().Add(dxtNetworkTimeout())
+	timeout := dxtNetworkTimeout(len(cfg.OldCommittee))
+	deadline := time.Now().Add(timeout)
 	for {
 		if err := ctx.Err(); err != nil || time.Now().After(deadline) {
 			return false
@@ -363,7 +440,7 @@ func sendDXTTranscript(ctx context.Context, cfg Config, dealer, holder int, addr
 			time.Sleep(25 * time.Millisecond)
 			continue
 		}
-		_ = conn.SetDeadline(time.Now().Add(dxtNetworkTimeout()))
+		_ = conn.SetDeadline(time.Now().Add(timeout))
 		body, marshalErr := json.Marshal(wire)
 		if marshalErr == nil {
 			recordSentBytes(len(body) + 1)

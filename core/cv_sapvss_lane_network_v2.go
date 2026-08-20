@@ -193,9 +193,15 @@ func (s *cvAPDBNetworkServiceV2) BuildLeafMaterialV2(ctx context.Context) (*cvBu
 	}()
 	sentOffers := 0
 	var lastSendErr error
+	offersByReceiver := make(map[int][]byte, len(s.cfg.NewRoster))
 	for i, receiver := range s.cfg.NewRoster {
-		if err := s.send(receiver, cvTagLaneOfferV2, offerWires[i]); err != nil {
-			lastSendErr = err
+		offersByReceiver[receiver] = offerWires[i]
+	}
+	for _, result := range s.sendRecipientPayloadFanoutMeasuredV2(
+		s.cfg.NewRoster, cvTagLaneOfferV2, offersByReceiver,
+	) {
+		if result.err != nil {
+			lastSendErr = result.err
 			continue
 		}
 		sentOffers++

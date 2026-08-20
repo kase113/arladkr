@@ -168,6 +168,45 @@ func TestCVCandidateFanoutACKSignalsArePerPeer(t *testing.T) {
 	}
 }
 
+func TestCVCandidateFanoutParallelScalesAndCaps(t *testing.T) {
+	t.Setenv("RLADKR_CANDIDATE_FANOUT_PARALLEL", "")
+	tests := []struct {
+		peers int
+		want  int
+	}{
+		{peers: 0, want: 0},
+		{peers: 7, want: 7},
+		{peers: 32, want: 16},
+		{peers: 100, want: 24},
+		{peers: 200, want: 32},
+	}
+	for _, test := range tests {
+		if got := cvCandidateFanoutParallelV2(test.peers); got != test.want {
+			t.Fatalf("peers=%d parallel=%d want=%d", test.peers, got, test.want)
+		}
+	}
+	t.Setenv("RLADKR_CANDIDATE_FANOUT_PARALLEL", "80")
+	if got := cvCandidateFanoutParallelV2(100); got != 64 {
+		t.Fatalf("configured parallel=%d want=64", got)
+	}
+}
+
+func TestCVCryptoQueueCapacityIsBounded(t *testing.T) {
+	tests := []struct {
+		committee int
+		want      int
+	}{
+		{committee: 10, want: 64},
+		{committee: 100, want: 200},
+		{committee: 2000, want: 2048},
+	}
+	for _, test := range tests {
+		if got := cvCryptoQueueCapacityV2(test.committee); got != test.want {
+			t.Fatalf("committee=%d capacity=%d want=%d", test.committee, got, test.want)
+		}
+	}
+}
+
 func TestCVCandidateFanoutMetricsDoNotCountCanceledWaitAsRetry(t *testing.T) {
 	service := &cvAPDBNetworkServiceV2{}
 	service.recordCandidateFanoutAttemptV2(3*time.Millisecond, false)
