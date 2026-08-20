@@ -471,6 +471,42 @@ func TestMVBAExternalValidityRequiresCanonicalAPDBLocks(t *testing.T) {
 	}
 }
 
+func TestMVBAExternalValiditySeparatesDealerAndReceiptThresholds(t *testing.T) {
+	old := []int{0, 1, 2, 3, 4}
+	nodePub := make(map[int]ed25519.PublicKey, len(old))
+	nodePriv := make(map[int]ed25519.PrivateKey, len(old))
+	for _, nodeID := range old {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodePub[nodeID] = pub
+		nodePriv[nodeID] = priv
+	}
+
+	payload := mvbaSetPayload{Proposer: 0, Set: []int{0, 1, 2}}
+	for _, dealer := range payload.Set {
+		data := []byte(fmt.Sprintf("transcript-%d", dealer))
+		root := sha256.Sum256(data)
+		cert := APDBCertificate{Sender: dealer, Root: append([]byte(nil), root[:]...)}
+		for _, nodeID := range old[:4] {
+			chunkHash := hashChunk(root[:], dealer, nodeID, data)
+			cert.Receipts = append(cert.Receipts, APDBReceipt{
+				NodeID: nodeID, Sender: dealer, ChunkHash: chunkHash,
+				Signature: ed25519.Sign(nodePriv[nodeID], hashReceiptMsg(dealer, nodeID, root[:], chunkHash)),
+			})
+		}
+		payload.Certificates = append(payload.Certificates, cert)
+	}
+	raw, err := json.Marshal(&payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateMVBASetPayload(raw, 0, old, 3, nodePub); err != nil {
+		t.Fatalf("valid 2f+1 dealer set with n-f receipt certificates rejected: %v", err)
+	}
+}
+
 func TestPracticalRunIDUsesEnvOverride(t *testing.T) {
 	t.Setenv("PRACTICAL_RUN_ID", "manual-run")
 	cfg := Config{SID: "sid"}

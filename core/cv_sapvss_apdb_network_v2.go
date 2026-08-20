@@ -226,6 +226,7 @@ type cvAPDBNetworkServiceV2 struct {
 	acceptedHandoff        []byte
 	handoffReady           chan struct{}
 	localScalarOutputs     map[string][]byte
+	scalarAggregates       map[string]*cvAggregateV2
 	pendingScalarShares    map[string]*cvPendingScalarSharesV2
 	pendingLaneACKsV2      *cvPendingLaneACKsV2
 	componentRefsV2        map[int]cvComponentRefV2
@@ -329,6 +330,7 @@ func newCVAPDBNetworkServiceV2(
 		decisionCertificates:   make(map[string][]byte),
 		handoffReady:           make(chan struct{}, 1),
 		localScalarOutputs:     make(map[string][]byte),
+		scalarAggregates:       make(map[string]*cvAggregateV2),
 		pendingScalarShares:    make(map[string]*cvPendingScalarSharesV2),
 		componentRefsV2:        make(map[int]cvComponentRefV2, cfg.Params.poolSize),
 		verifiedComponentsV2:   make(map[int]cvVerifiedComponentV2, cfg.Params.poolSize),
@@ -1150,6 +1152,7 @@ func (s *cvAPDBNetworkServiceV2) RecoverAndExchangeScalarShare(
 		return nil, fr.Element{}, nil, bls12381.G1Affine{}, fmt.Errorf("CV V2 scalar exchange already active")
 	}
 	s.localScalarOutputs[key] = append([]byte(nil), outputWire...)
+	s.scalarAggregates[key] = aggregate
 	s.pendingScalarShares[key] = pending
 	if len(pending.outputs) >= s.cfg.Params.newShareThreshold {
 		cvNotifyAPDBV2(pending.ready)
@@ -2265,28 +2268,29 @@ func (s *cvAPDBNetworkServiceV2) handleAggregateShare(msg Message) {
 	key := string(digest)
 	s.mu.Lock()
 	pending := s.pendingScalarShares[key]
+	aggregate := s.scalarAggregates[key]
 	localWire := append([]byte(nil), s.localScalarOutputs[key]...)
 	s.mu.Unlock()
-	if pending == nil {
+	if aggregate == nil || len(localWire) == 0 {
 		return
 	}
 	output, err := cvDecodeScalarShareOutputV2(
-		msg.Body, pending.aggregate, s.cfg.LeafContext, s.cfg.Params, s.cfg.Receivers,
+		msg.Body, aggregate, s.cfg.LeafContext, s.cfg.Params, s.cfg.Receivers,
 	)
 	if err != nil || output.ReceiverID != msg.From {
 		return
 	}
-	s.mu.Lock()
-	if _, duplicate := pending.outputs[msg.From]; !duplicate {
-		pending.outputs[msg.From] = output
+	if pending != nil {
+		s.mu.Lock()
+		if _, duplicate := pending.outputs[msg.From]; !duplicate {
+			pending.outputs[msg.From] = output
+		}
+		if len(pending.outputs) >= s.cfg.Params.newShareThreshold {
+			cvNotifyAPDBV2(pending.ready)
+		}
+		s.mu.Unlock()
 	}
-	if len(pending.outputs) >= s.cfg.Params.newShareThreshold {
-		cvNotifyAPDBV2(pending.ready)
-	}
-	s.mu.Unlock()
-	if len(localWire) != 0 {
-		_ = s.sendAsync(msg.From, cvTagAggregateShareV2, localWire, nil)
-	}
+	_ = s.sendAsync(msg.From, cvTagAggregateShareV2, localWire, nil)
 }
 
 func (s *cvAPDBNetworkServiceV2) send(to int, tag string, payload []byte) error {

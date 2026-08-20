@@ -1208,6 +1208,11 @@ func validateMVBASetPayload(
 	if required <= 0 || len(payload.Set) != required || len(payload.Certificates) != required {
 		return nil, fmt.Errorf("MVBA proposal must carry exactly %d dealers and certificates", required)
 	}
+	if required%2 == 0 {
+		return nil, fmt.Errorf("MVBA proposal dealer threshold must be odd")
+	}
+	f := (required - 1) / 2
+	requiredReceipts := apdbCertificateThreshold(f, len(old))
 	oldSet := make(map[int]struct{}, len(old))
 	for _, id := range old {
 		oldSet[id] = struct{}{}
@@ -1220,7 +1225,7 @@ func validateMVBASetPayload(
 			return nil, fmt.Errorf("MVBA dealer set is not strictly canonical")
 		}
 		cert := payload.Certificates[i]
-		if cert.Sender != dealer || len(cert.Receipts) != required {
+		if cert.Sender != dealer || len(cert.Receipts) != requiredReceipts {
 			return nil, fmt.Errorf("MVBA APDB certificate does not match dealer %d", dealer)
 		}
 		for receiptIndex := range cert.Receipts {
@@ -1228,7 +1233,7 @@ func validateMVBASetPayload(
 				return nil, fmt.Errorf("MVBA APDB receipts are not strictly canonical")
 			}
 		}
-		if required%2 == 0 || !verifyAPDBCertificate(cert, nodePub, (required-1)/2) {
+		if !verifyAPDBCertificate(cert, nodePub, f) {
 			return nil, fmt.Errorf("MVBA APDB certificate for dealer %d is invalid", dealer)
 		}
 	}

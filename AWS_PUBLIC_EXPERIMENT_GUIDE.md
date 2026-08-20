@@ -470,6 +470,52 @@ fab aws-provision-setup \
 digest。Practical 默认与 high-assurance 只改变采样策略，可以在相同 n/f 和 Paillier modulus 下
 复用同一份 Practical setup；必须在结果中记录这一点。
 
+### 8.1 32 台及百节点 setup 控制面
+
+`shared-public` setup 在大 fleet 上使用两级屏障。`aws-up` 和直接调用的
+`aws-provision-setup` 都会先等待完整 roster 的 EC2 实例进入 running 且 SSM agent 报告
+Online；轻量 `SSM_READY` 命令全部成功后，才开始下载和安装 setup。setup 命令按有界批次
+执行，同一批中成功实例的结果会保留，后续只重试失败实例，不会重复覆盖已成功节点。
+
+32 台单 Region 配置建议保留：
+
+```yaml
+aws:
+  runner:
+    ssm_parallelism: 50
+    ssm_ready_timeout_seconds: 600
+    ssm_setup_timeout_seconds: 600
+    ssm_setup_batch_size: 16
+    ssm_setup_retries: 2
+    artifact_url_ttl_seconds: 3600
+```
+
+`ssm_ready_timeout_seconds` 是新实例注册的总等待时间，`ssm_setup_timeout_seconds` 是每次
+setup command 的执行上限，两者不能用较短的普通管理命令 timeout 代替。AWS SSM 每个
+`send-command` 最多接收 50 个 instance ID；100--256 台建议每 Region 使用 16--25 台 setup
+批次、最多 50 并发，并保证 presigned URL 的 TTL 覆盖所有批次与重试。跨 Region 调用按 Region
+并发，各 Region 内再分批，避免 command ID 和 SSM client 跨区混用。
+
+当前分发只让每台实例下载一份公共 archive 和自己的 NodeSlot shard，去掉了全部私有 shard 在
+每台机器上的重复下载。公共 registry 本身随 n 增长且每台节点都需要，因此集群总下载量仍可能是
+`O(n^2)`，不能把整个 setup 路径描述成 `O(n)`。进入 100+ 正式实验前，先做不运行协议的
+setup soak，并检查每批耗时、重试实例 ID、S3 URL 剩余 TTL 和所有节点的 setup digest。
+
+下一阶段优化按收益排序如下：使用固定加密 artifact bucket 和内容 digest 复用不可变对象，避免
+每轮创建/删除 bucket；将公共 setup object 复制到各实验 Region，减少跨区下载尾部；让 100+ 节点
+artifact 直接上传 S3 后生成集中 manifest，避免控制机逐节点分块拉取。以上尚未实现，不应写入
+正式实验的已完成能力清单。
+
+SSM command 的列表接口存在最终一致性窗口：AWS 后端可能已经显示全部 invocation 成功，但
+`ListCommandInvocations` 暂时少列少数实例。轮询 deadline 后必须对缺失 instance ID 使用
+`GetCommandInvocation` 逐实例对账，不能把“列表未出现”等同于命令失败。对账只用于确认同一个
+command ID 的最终状态，不得掩盖明确的 Failed、TimedOut 或 Cancelled。
+
+32 节点实测中，逐节点分块拉取 journal 和 benchmark artifact 已成为失败轮的主要控制面尾部。
+100+ 节点正式运行应改为每个节点上传到实验专属的加密 S3 prefix，控制机收集 manifest、digest、
+大小和错误摘要，再按需下载完整日志；在该路径实现前应为 artifact collection 单独预留时间，且
+不能把收集耗时计入协议 latency。
+
 ## 9. 三组实验参数
 
 ### 9.1 ARLADKR
@@ -487,6 +533,12 @@ ARL_ARGS="-n $N -f $F -runs 1 -epochs 1 \
 额外运行 high-assurance 曲线时只将最后一个参数改为 `high-assurance`。不要通过手工降低 sample、
 关闭验证或启用 ablation 来强行得到结果。
 
+ARL scalar-share responder 必须覆盖慢节点进入 exchange 的偏斜。节点达到 `n-f` 后可以释放本地
+collector，但在 epoch service grace 结束前仍须保留已验证 aggregate 和本地 share，以便验证并
+回复晚到 peer。只增大整轮 `-timeout` 或固定 retry 次数不能修复 responder 已停止回复的问题。
+报告 `recover_shard_ms` 时同时记录 `mean_recover_service_grace_ms`；主 adjusted latency 应扣除
+纯 responder grace，避免把固定服务窗口解释为密码计算或网络恢复耗时。
+
 ### 9.2 PracticalADKR 默认配置
 
 ```bash
@@ -495,6 +547,10 @@ PRACTICAL_ARGS="-n $N -f $F -runs 1 -timeout 900s \
   -fallback-policy off -kappa-profile matched-lifetime \
   -kappa-security-bits 128 -kappa-lifetime-epochs 525600"
 ```
+
+Practical 的 MVBA proposal 有两个不同阈值：dealer/certificate 项数为 `2f+1`，每份 APDB
+certificate 的 receipt 数为 `n-f`。测试必须至少包含一个 `n>3f+1` 的参数点；只测
+`n=3f+1` 会使两个数相等，无法发现阈值混用。
 
 ### 9.3 PracticalADKR high-assurance
 
@@ -642,7 +698,10 @@ fab aws-terminate --config-path="$CFG"
 任务只查询同时匹配当前 `ProtocolSuite`、`ExperimentGroup` 且状态为 running 的实例。dry-run
 会列出完整 instance ID，不调用 terminate API。正式终止后立即把保护值恢复为 `true`。
 
-使用 `aws-paper-run` 时，上述收集与 destroy 已包含在 finally 路径中；运行结束仍要按
+使用 `aws-paper-run` 时，上述收集与 destroy 已包含在 finally 路径中；在非 `keep-fleet` 的真实
+运行中，finally 会先尝试全节点 cleanup-ready，再执行 Terraform destroy。即使 cleanup-ready 因
+节点失联失败，destroy 仍会继续，并将 `final_cleanup` 与 `cleanup` 分别写入 experiment record。
+运行结束仍要按
 ExperimentGroup 复核 EC2、VPC、EBS、EIP、NAT Gateway 和临时 S3 均已清空。`--keep-fleet` 只用于
 短时诊断，不是论文批量实验的默认选项。
 

@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bytes"
+	"context"
 	"math/big"
 	"testing"
 
@@ -153,6 +155,62 @@ func TestCVScalarShareV2ProofCodecAndThresholdRecovery(t *testing.T) {
 		receivers.localEncryptionSecrets[wrongDegree.NewRoster[0]],
 	); err == nil {
 		t.Fatal("accepted CV V2 aggregate share with wrong protocol degree")
+	}
+}
+
+func TestCVCompletedScalarExchangeRepliesToLatePeer(t *testing.T) {
+	aggregate, leafContext, params, receivers := cvAggregateForShareV2Fixture(t)
+	outputs := make([]*cvScalarShareOutputV2, 2)
+	for i := range outputs {
+		var err error
+		receiverID := leafContext.NewRoster[i]
+		_, outputs[i], err = cvDecryptAggregateShareV2(
+			aggregate, leafContext, params, receiverID, i+1,
+			&receivers.encryptionPublicKeys[i], receivers.localEncryptionSecrets[receiverID],
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	localWire, err := cvScalarShareOutputV2CanonicalBytes(outputs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerWire, err := cvScalarShareOutputV2CanonicalBytes(outputs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key := string(aggregate.Digest)
+	service := &cvAPDBNetworkServiceV2{
+		ctx: ctx,
+		cfg: cvAPDBNetworkServiceConfigV2{
+			LeafContext: leafContext, Receivers: receivers, Params: params,
+		},
+		localScalarOutputs:  map[string][]byte{key: localWire},
+		scalarAggregates:    map[string]*cvAggregateV2{key: aggregate},
+		pendingScalarShares: make(map[string]*cvPendingScalarSharesV2),
+		outbound:            make(chan cvOutboundMessageV2, 1),
+	}
+	service.handleAggregateShare(Message{From: outputs[1].ReceiverID, Body: peerWire})
+	select {
+	case reply := <-service.outbound:
+		if reply.to != outputs[1].ReceiverID || reply.tag != cvTagAggregateShareV2 || !bytes.Equal(reply.payload, localWire) {
+			t.Fatal("completed scalar exchange returned the wrong late-peer reply")
+		}
+	default:
+		t.Fatal("completed scalar exchange did not reply to a valid late peer")
+	}
+
+	mutated := append([]byte(nil), peerWire...)
+	mutated[len(mutated)-1] ^= 1
+	service.handleAggregateShare(Message{From: outputs[1].ReceiverID, Body: mutated})
+	select {
+	case <-service.outbound:
+		t.Fatal("completed scalar exchange replied to an invalid late-peer share")
+	default:
 	}
 }
 

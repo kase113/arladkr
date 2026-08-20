@@ -129,6 +129,11 @@ snapshot。AMI 不属于当前 Terraform 栈的销毁范围。
 | 三洲 n=4 `r04` Terraform 重复 ingress 失败轮 | 约 `$0.03` | 约 `$1.72` |
 | 三洲 n=4 `r05` listener 启动偏斜定位轮，约 0.589 instance-hours | 约 `$0.04` | **约 `$1.76`** |
 | 三洲 n=4 `r06` listener 修复验证与 SSM 截断定位轮 | 约 `$0.06` | **约 `$1.82`** |
+| 2026-08-20 最新 AMI 单 Region 同 AZ 私网 ARL n=10 `paper-arl-private-use1-n10-20260820-v`，约 2.86 instance-hours | 约 `$0.17` | **约 `$3.78`** |
+| 2026-08-20 us-east-1 n=32 私网容量验证，协议未执行 | 约 `$0.55` | **约 `$4.33`** |
+| 2026-08-21 ARL n=32 `paper-n32-arl-fix-r1-20260821`，SSM 最终一致性诊断轮 | 约 `$0.26` | **约 `$4.59`** |
+| 2026-08-21 ARL n=32 `paper-n32-arl-fix-r2-20260821`，29/32 quorum smoke | 约 `$0.55` | **约 `$5.14`** |
+| 2026-08-21 Practical n=32 `paper-n32-practical-fix-r1-20260821`，协议阈值诊断轮 | 约 `$0.36` | **约 `$5.50`** |
 
 持续成本另计：4 个 AMI snapshot 的逻辑块约 21.34 GiB，按 `$0.05/GiB-month` 粗算上界约
 `$1.07/月`，增量共享后实际可能更低。当前运行实例、公网 IPv4、实验 gp3、临时 S3、实验 VPC
@@ -1559,3 +1564,200 @@ fan-out、AWS timeout、Security Group 或部署编排：
 
 此前 AWS 产物仍全部是 `(3,3)` smoke，不能追溯升级为正式安全参数数据，正式曲线必须重新运行。
 本轮未启动 AWS 资源，新增费用 `$0`，累计量化成本仍约 `$3.55`。
+
+## 2026-08-20 最新代码 ARM64 AMI 重建
+
+为避免 r23 私网 smoke 使用旧 AMI 内不识别 `original` sampling profile 的
+`rladkrbench`，本轮按最新源码重新 bake。旧 AMI `ami-0cee8a82967ef97ac` 仅作为临时源
+实例基线；源实例使用 `c7g.xlarge` Spot、`us-east-1f`（`use1-az5`）、私网地址
+`10.42.1.10`，实验组为 `arladkr-ami-bake-20260820`。
+
+构建过程使用临时 Terraform state
+`deployment/aws-state/ami-bake-20260820`，只创建 1 台源实例。`aws-bake-prewarm`
+同步当前工作树中的 ARL、PracticalADKR 和 dumbomvba-go，显式设置 `HOME`、`GOPATH`、
+`GOMODCACHE`、`GOCACHE`，完成以下 ARM64 空测试：
+
+```text
+ok  rladkr_go/cmd/cvv2ref
+ok  rladkr_go/cmd/rladkrbench
+ok  rladkr_go/core
+ok  practical_adkr/cmd/bench_latency
+ok  practical_adkr/core
+ok  dumbomvba_go/core
+```
+
+随后在源实例上编译 `/opt/rladkr/bin/rladkrbench` 和
+`/opt/rladkr/bin/bench_latency`。构建源码 bundle digest 为
+`12e0ae4eb6d907a2908af9d1db7d0a292668f3ae038ac30121dd3b77cd328e08`。
+创建并等待可用的 AMI 为：
+
+```text
+ami-053e9be88b591d821
+name: arladkr-bench-arm64-v3-20260820
+state: available
+architecture: arm64
+root volume: 30 GiB gp3
+```
+
+正式同 AZ 私网配置 `deployment/config.aws-private-n10-use1.yaml` 已切换到该 AMI；
+临时构建配置保留在 `deployment/config.aws-ami-bake-use1.yaml` 供后续重复 bake 使用。
+本轮修复了三个仅影响 bake 编排的兼容问题：缺失项目目录不再被默认配置强制同步，
+预热和二进制构建不再硬编码不存在的 `DXT+24-adkg` 路径，Amazon Linux SSM 命令显式
+设置 Go 缓存目录。协议 wire、采样参数、TCP transport 和公网通信路径均未修改。
+
+AMI 创建后，源 Spot 实例 `i-00c0d5fdf245f1c2c`、VPC、subnet、route table、IGW、
+security group、IAM role/profile 和 SSM policy 共 11 个 Terraform 资源全部销毁；
+实例状态为 `terminated`，Spot request、VPC 和 SG 查询均为空。AMI 本身按实验需要保留，
+后续 n=10 论文 smoke 应使用新 AMI 并在记录中注明其 ID。
+
+资源与成本：源实例和构建资源约运行 20 分钟。按 `us-east-1f c7g.xlarge` 当时
+Spot 约 `$0.0523/小时`，EC2 计算约 `$0.02`；30 GiB gp3 短时占用、临时公网 IPv4、
+SSM/S3 下载和 AMI 30 GiB EBS snapshot/storage 合计保守记约 `$0.04`。本轮 AMI bake
+新增成本按 **`$0.06`** 计入（最终以 Cost Explorer 为准），累计量化成本由约 `$3.55`
+更新为约 **`$3.61`**。本轮没有运行论文 benchmark，因此没有 latency 或通信量数据。
+
+## 2026-08-20 单 Region 同 AZ 私网 ARL n=10（最新 AMI）
+
+为验证最新 ARM64 AMI `ami-053e9be88b591d821` 与当前 `original` 采样实现，使用
+实验组 `paper-arl-private-use1-n10-20260820-v` 在 `us-east-1f/use1-az5` 启动 10 台
+`c7g.xlarge` Spot。节点通过私网 `10.42.1.10`--`10.42.1.19` 通信，参数为
+`n=10, f=3, runs=1, epochs=1`，proposer sample `4`、validator sample `7`、
+validator threshold `4`，setup digest 为
+`0f29761dbe70950a8ac5606f8225717bd064e0800ae57ea9132bc4973a5cc299`。
+
+部署和启动屏障均完整通过：SSM `10/10`、cleanup-ready `10/10`、runner-ready `10/10`，
+`n-f=7` quorum 要求满足。Fabric 结果为 `status=success` 并自动销毁全部 Terraform
+资源；AWS 复核显示该实验组没有运行实例、活动 Spot request、VPC、subnet、route table、
+IGW、security group、ENI 或 EBS volume。
+
+协议结果不是全节点成功：`8/10` 节点完成一轮并形成同一 consensus hash
+`789aac5097e6aebffc3d1fe1df8011392b45f69461b8cb19cf959bd7e80b11f9`，达到 quorum；
+`10.42.1.13` 在 CV V2 APDB aggregate recovery 中仅得到 `2` 个 holder（需要 `4`），
+`10.42.1.15` 的 scalar-share exchange 仅得到 `3` 个 output（需要 `7`）。这两项是
+协议恢复活性失败，不是 SSM、listener、端口或 timeout 初始化失败。因此本轮只能作为
+recovery-liveness 诊断和 quorum smoke，不能作为干净的全节点论文性能点。
+
+8 个成功节点的 `service_grace_adjusted` 延迟（已扣除约 `1000 ms` recovery service grace）
+为 `3713.97, 3774.92, 3785.24, 3897.90, 4101.42, 4189.48, 4525.39, 4664.89 ms`：
+均值 `4081.65 ms`、中位数 `3999.66 ms`、p95 `4664.89 ms`。对应 raw 延迟均值
+`5082.17 ms`、中位数 `5000.02 ms`、p95 `5665.25 ms`。阶段均值为 leaf build
+`716.88 ms`、candidate formation `2419.75 ms`、aggregate agreement `190.38 ms`；
+平均每节点发送 `5.22 MB`、接收 `5.02 MB`（十进制 MB）。失败节点的延迟和通信量
+不计入上述统计。
+
+资源与成本：10 台实例约从 `2026-08-20 13:22:20--25Z` 运行至
+`13:39:30--32Z`，合计约 `2.86 instance-hours`。按该 AZ `c7g.xlarge` Spot 约
+`$0.0523/h`，加 30 GiB gp3 短时占用、SSM/S3 和私网控制流量，保守记本轮增量
+**约 `$0.17`**（最终以 Cost Explorer 为准）。累计量化成本由约 `$3.61` 更新为
+**约 `$3.78`**；AMI snapshot 的持续存储费仍单列。
+
+## 2026-08-20 us-east-1 n=32 Spot 私网容量验证（协议未执行）
+
+先检查 `us-east-1` 的标准 Spot 配额和实例供给：
+`All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests` 为 `600 vCPU`，
+`c7g.xlarge` 在 `us-east-1a/b/c/d/f` 均有售；本轮 32 台只需要约 `128 vCPU`。
+使用最新 AMI `ami-053e9be88b591d821`、`us-east-1f/use1-az5`、私网地址
+`10.42.1.10`--`10.42.1.41` 和 `c7g.xlarge` Spot 启动
+`paper-private-use1-n32-arl-20260820`。Terraform 成功创建 42 个资源，32/32 个
+Spot 实例全部获得运行状态，证明该区域和配额可以承载 n=32。
+
+随后原始 Fabric 会话在 setup/SSM 阶段异常退出，实验记录停留在 `starting`，没有
+生成 ARL 或 PracticalADKR 的协议 artifact；补执行 setup 也没有返回有效结果。为避免
+持续计费，未继续启动协议，直接执行 Terraform destroy。最终 42 个资源全部销毁，
+32 个实例均为 `terminated`，Spot request、VPC、subnet、route table、IGW、Security
+Group 和 IAM 资源均已释放。因此本轮不能计入任何 latency、通信量或协议成功率样本，
+只作为容量和部署路径验证。
+
+资源生命周期约 `15` 分钟、累计约 `8.0 instance-hours`。按 `us-east-1f`
+`c7g.xlarge` Spot 约 `$0.0523/h`，加临时 30 GiB gp3、自动公网 IPv4、SSM/S3 和
+短时网络资源，保守将本轮增量记为 **约 `$0.55`**（最终以 Cost Explorer 为准）。
+累计量化成本由约 `$3.78` 更新为 **约 `$4.33`**。
+
+## 2026-08-21 大规模 AWS setup 编排修复
+
+针对上一轮 `us-east-1` n=32 仅有两个 SSM 节点超时、但随后 32/32 health check 成功的
+现象，修复了部署层，不改变协议实现：
+
+- 新增独立的 `ssm_setup_timeout_seconds`，默认 `600s`，不再复用短的普通管理命令 timeout；
+- 新增 `ssm_ready_timeout_seconds`，默认 `600s`；`aws-up` 和直接 setup 都等待完整 fleet 的
+  EC2 running + SSM Online，不再在 agent 注册尾部立即失败；
+- setup 分发默认按 `16` 台一批执行，单批仍受 AWS SSM `50` 台硬上限约束；
+- 每批失败会保留同批成功结果，只精确重试失败实例，默认最多 `2` 次，已成功节点不会重复执行；
+- setup 前先执行 `SSM_READY` 全节点轻量 barrier，避免 cloud-init/SSM agent 注册尾部与
+  大型 bundle 下载同时发生；
+- 保留公共 bundle + 单节点 shard 的分发结构，并将 readiness、批次、重试和 timeout 写入配置；
+- 单区域 `aws-paper-run` 与跨区域 suite 都在非保留 fleet 的 destroy 前尝试最终 cleanup-ready；
+  cleanup 失败不会阻断 Terraform destroy，两个结果分别进入 experiment record；
+- 单元测试覆盖默认参数、注册等待、批次切分、同批部分成功和精确失败节点重试。
+
+32 节点配置 `deployment/config.aws-private-n32-use1.yaml` 已显式设置：
+`ssm_parallelism=50`、`ssm_ready_timeout_seconds=600`、`ssm_setup_batch_size=16`、`ssm_setup_retries=2`、
+`ssm_setup_timeout_seconds=600`。对 100--256 节点，建议每 Region 仍最多 50 台一批，
+setup batch 采用 16--25 台并发；先完成 SSM_READY，再分批上传公共 bundle 和 shard，
+避免把全部节点压进一个 command invocation。
+
+100+ 节点仍可继续优化但本轮未实现：固定加密 artifact bucket + digest object 复用、公共对象按
+Region 复制，以及节点将 artifact 直接上传 S3 后由控制机只收 manifest。公共 registry 是每个协议
+节点必需且随 n 增长，集群总下载量仍可能为 `O(n^2)`；本轮只消除了“每台下载全部私有 shard”的
+无必要重复，不能将整体 setup 复杂度表述为 `O(n)`。
+
+当前尚未重新启动 AWS 32 节点协议实验；本轮只做本地编排修复和测试，新增 AWS 成本为
+`$0`，累计量化成本仍约 **`$4.33`**。
+
+## 2026-08-20 AWS 资源清理复核
+
+用户反馈账号仍显示实验资源后，按实验标签、`ProtocolSuite=rla` 和 Terraform 管理标记
+进行了跨 Region 清点。所有实验 Region 均无 `pending/running/stopping/stopped` EC2、
+无 `open/active` Spot request；`eu-west-1` 中按标签检出的 r22/r24 实例均已是历史
+`terminated` 记录。
+
+另外发现 `ap-southeast-1` 一个无标签、无实例、无 ENI、无 NAT 的孤立实验 VPC
+`vpc-0bddf5e28173f79eb`，以及其子网 `subnet-01b723b391df9cb16`、IGW
+`igw-0d4f0e9e0daaa91a2` 和路由表；已完成 detach/delete。AWS API 复核均返回
+`NotFound`，目标 Region 的实例和 Spot 查询为空。AMI 与 snapshot 未删除，作为后续
+实验的预构建镜像并继续单列存储成本；本次清理不增加实验成本，累计量化成本仍约 `$3.78`。
+
+## 2026-08-21 us-east-1 n=32 私网 ARL 与 Practical 实测
+
+三轮均使用 `us-east-1f/use1-az5`、32 台 `c7g.xlarge` Spot、私网
+`10.42.1.10`--`10.42.1.41` 和 AMI `ami-053e9be88b591d821`。每轮 setup、launch、
+protocol-ready 和最终 cleanup-ready 都达到 `32/32`；每个 Terraform 栈最终销毁 42 个资源。
+按实验标签复核 non-terminated EC2、EBS volume 和 VPC 均为空。
+
+`paper-n32-arl-fix-r1-20260821` 没有运行协议。AWS 后端最终记录 health command
+`32/32 Success`，但 `ListCommandInvocations` 在轮询期限内长期只列出 30 台，旧控制面因此误判
+两台失败。部署层现已在列表轮询 deadline 后并发调用逐实例 `GetCommandInvocation` 对账；setup
+继续按 16 台分批并只重试失败实例。本轮生命周期 6 分 20 秒，约 3.38 instance-hours，保守记
+约 `$0.26`。
+
+`paper-n32-arl-fix-r2-20260821`、run ID `run-20260820-171615` 成功达到 quorum：
+`29/32` 节点完成，要求为 `22`，且成功节点 consensus hash 唯一：
+`d2372c89ec9f3db10fe3799f369f428ea4dc69cc77b0cdf6cfdedd4ebb3eb2ae`。成功节点 adjusted
+latency 均值 `27957.78 ms`，raw latency 均值 `37958.07 ms`，online protocol 均值
+`27463.25 ms`。主要阶段均值为 leaf build `3259.90 ms`、candidate formation
+`22169.66 ms`、aggregate agreement `572.55 ms`、recover shard `11079.69 ms`。
+recover shard 包含固定 `10000.29 ms` responder service grace，扣除后实际恢复约 `1.08s`；
+该固定 grace 已从 adjusted latency 中扣除。候选 ACK 等待均值仅 `1.87 ms`、fan-out 最慢 peer
+均值 `2.36 ms` 且无 retry，说明约 22 秒 candidate formation 主要是密码计算、聚合构造和验证
+路径，不是同 AZ 私网 RTT 或 90 秒整轮 timeout。
+
+失败节点 `10.42.1.11`、`10.42.1.28`、`10.42.1.40` 分别只收集到 `5/22`、`3/22`、
+`3/22` scalar outputs。代码审计确认，节点达到阈值后会删除 active collector；外层虽继续保留
+服务 10 秒，scalar handler 却要求 collector 仍存在才验证和回复晚到 share，使 service grace 对
+该交换实际无效。修复后，每个 epoch service 保留本节点已验证 aggregate 的有界 responder 上下文；
+collector 完成后仍验证晚到 proof 并回复缓存 share，未知 digest 和无效 proof 仍被拒绝。本轮生命周期
+15 分 28 秒，约 8.25 instance-hours，保守记约 `$0.55`。
+
+`paper-n32-practical-fix-r1-20260821`、run ID `run-20260820-173513` 的部署控制面同样
+`32/32` 成功，但协议 `0/32`。31 台报告 `dumbo-mvba ... local input rejected by predicate`，
+另一台只得到 `7/21` APDB certificates 后超时。根因是 MVBA external-validity 校验把两个不同
+阈值混用：n=32、f=10 时 dealer set 为 `2f+1=21`，每个 APDB certificate receipts 则为
+`n-f=22`，旧代码错误要求 receipts 也等于 21。n=10、f=3 时两者恰好都为 7，因而旧测试没有
+暴露问题。修复后分别校验两个阈值，并新增 `n>3f+1` 回归测试。本轮生命周期 9 分 47 秒，约
+5.22 instance-hours，保守记约 `$0.36`。
+
+三轮新增估算费用约 `$1.17`，累计量化成本由约 `$4.33` 更新为约 **`$5.50`**，最终以
+Cost Explorer 为准。32 节点诊断还暴露出 artifact 收集的扩展性问题：当前控制机通过逐节点、
+分块 SSM 输出拉回日志，协议快速失败后，收集反而成为主要控制面尾部。100+ 节点前应改为节点直接
+上传加密 S3 prefix，控制机只下载 manifest 和必要失败样本；否则收集时间和 SSM 输出量会近似随
+节点数及 artifact 大小线性放大。
