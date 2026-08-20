@@ -55,8 +55,9 @@ go run ./cmd/cvv2ref \
 ```
 
 The three `reference-crypto` points are functional smoke measurements with
-three independent fresh runs each. The four secure points are
-`manifest-only`; they record fixed-fraction sampling parameters and must not be
+three independent fresh runs each. The ten secure points are `manifest-only`;
+they record exact finite-population parameters for the paper's `original` and
+`high-assurance` profiles at `n=32,48,64,96,128` and must not be
 reported as measured cryptographic performance. This file is a pilot reference
 matrix, not the separate multi-process network comparison matrix.
 

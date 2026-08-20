@@ -15,7 +15,7 @@ func TestReferenceMatrixV1LoadsAndDryRunsEveryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Schema != cvV2ReferenceMatrixReportSchema || report.MatrixID == "" || len(report.Points) != 7 {
+	if report.Schema != cvV2ReferenceMatrixReportSchema || report.MatrixID == "" || len(report.Points) != 13 {
 		t.Fatalf("invalid matrix dry-run report: %+v", report)
 	}
 	seenSecure := 0
@@ -27,13 +27,13 @@ func TestReferenceMatrixV1LoadsAndDryRunsEveryPoint(t *testing.T) {
 		switch point.Report.Manifest.ExperimentClass {
 		case "functional-smoke":
 			seenFunctional++
-		case "fixed-fraction-secure":
+		case "finite-population-secure":
 			seenSecure++
 		default:
 			t.Fatalf("unknown experiment class for %s", point.Name)
 		}
 	}
-	if seenFunctional != 3 || seenSecure != 4 {
+	if seenFunctional != 3 || seenSecure != 10 {
 		t.Fatalf("unexpected matrix partition functional=%d secure=%d", seenFunctional, seenSecure)
 	}
 }

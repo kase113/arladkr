@@ -1,83 +1,91 @@
 package core
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 )
 
-func TestCVV2FixedFractionSamplingDependsOnlyOnFailureTarget(t *testing.T) {
+func TestResolveCVV2SamplingMatchesPaperProfiles(t *testing.T) {
 	tests := []struct {
-		target                      string
+		profile                     string
+		n, f                        int
 		wantProposer, wantValidator int
 	}{
-		{target: "1e-8", wantProposer: 17, wantValidator: 313},
-		{target: "1e-10", wantProposer: 21, wantValidator: 391},
-		{target: "2^-80", wantProposer: 51, wantValidator: 943},
-		{target: "2^-128", wantProposer: 81, wantValidator: 1507},
+		{profile: "original", n: 32, f: 10, wantProposer: 11, wantValidator: 21},
+		{profile: "original", n: 48, f: 15, wantProposer: 14, wantValidator: 31},
+		{profile: "original", n: 64, f: 21, wantProposer: 16, wantValidator: 43},
+		{profile: "original", n: 96, f: 31, wantProposer: 18, wantValidator: 63},
+		{profile: "original", n: 128, f: 42, wantProposer: 19, wantValidator: 85},
+		{profile: "high-assurance", n: 32, f: 10, wantProposer: 11, wantValidator: 21},
+		{profile: "high-assurance", n: 48, f: 15, wantProposer: 16, wantValidator: 31},
+		{profile: "high-assurance", n: 64, f: 21, wantProposer: 22, wantValidator: 43},
+		{profile: "high-assurance", n: 96, f: 31, wantProposer: 32, wantValidator: 63},
+		{profile: "high-assurance", n: 128, f: 42, wantProposer: 37, wantValidator: 85},
 	}
 	for _, test := range tests {
-		t.Run(test.target, func(t *testing.T) {
-			target, err := cvParseFailureTargetV2(test.target)
+		t.Run(fmt.Sprintf("%s-n%d", test.profile, test.n), func(t *testing.T) {
+			report, err := ResolveCVV2Sampling(test.n, test.f, test.profile, 3, 3)
 			if err != nil {
 				t.Fatal(err)
 			}
-			proposer, validator := cvV2FixedFractionSampleSizes(target)
-			if proposer != test.wantProposer || validator != test.wantValidator {
-				t.Fatalf("fixed samples = (%d,%d), want (%d,%d)",
-					proposer, validator, test.wantProposer, test.wantValidator)
+			if report.Profile != test.profile || report.Policy != "exact-finite-population" ||
+				report.ProposerSampleSize != test.wantProposer || report.ValidatorSampleSize != test.wantValidator ||
+				report.ValidatorThreshold != test.wantValidator/2+1 || report.FaultFraction == "" ||
+				report.TotalFailureBudget == "" || report.PerEventFailureTarget == "" {
+				t.Fatalf("sampling report=%+v", report)
+			}
+			total, ok := new(big.Rat).SetString(report.TotalFailureBudget)
+			if !ok {
+				t.Fatalf("invalid total budget %q", report.TotalFailureBudget)
+			}
+			actual, ok := new(big.Rat).SetString(report.PerEpochCombinedSamplingFailureBound)
+			if !ok || actual.Cmp(total) > 0 {
+				t.Fatalf("actual bound %q exceeds total %q", report.PerEpochCombinedSamplingFailureBound, report.TotalFailureBudget)
 			}
 		})
 	}
 }
 
-func TestResolveCVV2SamplingUsesCommitteeIndependentSecureSamples(t *testing.T) {
-	first, err := ResolveCVV2Sampling(1024, 341, "1e-8", 3, 3)
+func TestResolveCVV2SamplingUsesTotalBudgetAndMinimalSamples(t *testing.T) {
+	report, err := ResolveCVV2Sampling(128, 42, "1e-10", 3, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ResolveCVV2Sampling(2048, 682, "1e-8", 3, 3)
-	if err != nil {
-		t.Fatal(err)
+	if report.Profile != "custom" || report.TotalFailureBudget != "1/10000000000" ||
+		report.PerEventFailureTarget != "1/20000000000" || report.ProposerSampleSize != 19 ||
+		report.ValidatorSampleSize != 85 {
+		t.Fatalf("custom sampling report=%+v", report)
 	}
-	if first.Policy != "fixed-fraction-1/3" || first.WorstCaseByzantineFraction != "1/3" ||
-		first.ProposerSampleSize != second.ProposerSampleSize ||
-		first.ValidatorSampleSize != second.ValidatorSampleSize {
-		t.Fatalf("committee-dependent secure sampling: first=%+v second=%+v", first, second)
+	target, _ := new(big.Rat).SetString(report.PerEventFailureTarget)
+	previousProposer, err := cvV2ProposerFailureBound(128, 42, report.ProposerSampleSize-1)
+	if err != nil || previousProposer.Cmp(target) <= 0 {
+		t.Fatalf("proposer sample is not minimal: previous=%v err=%v", previousProposer, err)
 	}
-	target := big.NewRat(1, 100000000)
-	for name, value := range map[string]string{
-		"proposer":  first.ProposerFailureBound,
-		"validator": first.ValidatorCombinedFailureBound,
-	} {
-		bound, ok := new(big.Rat).SetString(value)
-		if !ok || bound.Cmp(target) > 0 {
-			t.Fatalf("%s exact finite-population bound %q exceeds target", name, value)
-		}
+	previousValidator := report.ValidatorSampleSize - 1
+	_, _, previousValidatorBound, err := cvV2ValidatorFailureBounds(
+		128, 42, previousValidator, previousValidator/2+1,
+	)
+	if err != nil || previousValidatorBound.Cmp(target) <= 0 {
+		t.Fatalf("validator sample is not minimal: previous=%v err=%v", previousValidatorBound, err)
 	}
 }
 
-func TestResolveCVV2SamplingRejectsCommitteeBelowFixedSample(t *testing.T) {
-	if _, err := ResolveCVV2Sampling(128, 42, "1e-8", 3, 3); err == nil {
-		t.Fatal("secure policy silently shrank its fixed sample for a small committee")
-	}
-}
-
-func TestResolveCVV2SamplingLabelsSmallSamplesAsSmoke(t *testing.T) {
-	report, err := ResolveCVV2Sampling(7, 2, "smoke", 3, 3)
+func TestResolveCVV2SamplingLabelsExplicitSmoke(t *testing.T) {
+	report, err := ResolveCVV2Sampling(7, 2, "smoke", 3, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Target != "smoke" || report.ProposerSampleSize != 3 || report.ValidatorSampleSize != 3 ||
-		report.Policy != "explicit-smoke" || report.ValidatorCombinedFailureBound != "1/7" {
+	if report.Target != "smoke" || report.Profile != "smoke" || report.Policy != "explicit-smoke" ||
+		report.ProposerSampleSize != 3 || report.ValidatorSampleSize != 2 || report.ValidatorThreshold != 2 ||
+		report.TotalFailureBudget != "" || report.PerEventFailureTarget != "" ||
+		report.ValidatorCombinedFailureBound != "11/21" {
 		t.Fatalf("smoke sampling report=%+v", report)
-	}
-	if _, err := ResolveCVV2Sampling(7, 2, "smoke", 3, 2); err == nil {
-		t.Fatal("accepted an even smoke validator sample")
 	}
 }
 
 func TestResolveCVV2SamplingRejectsUnsupportedTarget(t *testing.T) {
-	for _, target := range []string{"0.01", "1e-0", "2^-0", "unknown"} {
+	for _, target := range []string{"0.01", "1e-0", "2^-0", "paper", "unknown"} {
 		if _, err := ResolveCVV2Sampling(128, 42, target, 3, 3); err == nil {
 			t.Fatalf("accepted unsupported target %q", target)
 		}

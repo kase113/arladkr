@@ -42,9 +42,6 @@ func cvDeriveV2Params(cfg Config) (cvV2Params, error) {
 	if c.CVValidatorSampleSize <= 0 || c.CVValidatorSampleSize > len(c.OldCommittee) {
 		return cvV2Params{}, fmt.Errorf("CV V2 validator sample size must be in [1,n_o]")
 	}
-	if c.CVValidatorSampleSize%2 == 0 {
-		return cvV2Params{}, fmt.Errorf("CV V2 validator sample size must be odd")
-	}
 	sampling, err := ResolveCVV2Sampling(
 		len(c.OldCommittee), c.OldFaults, c.CVSamplingFailureTarget,
 		c.CVProposerSampleSize, c.CVValidatorSampleSize,

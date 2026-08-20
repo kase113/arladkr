@@ -1540,3 +1540,22 @@ AWS 编排修改如下：
 测试通过，约 8 秒；Fabric `44/44` 测试通过；Terraform `fmt -check` 和 `validate` 通过。尚未运行
 百节点 AWS 数据，因此这些修改只能说明已移除已知实现和编排硬限制，不能预先宣称 n=100 latency
 已经符合预期。下一轮仍应按 `n=32 -> 64 -> 96 -> 128` 逐档记录 phase、CPU、RSS、连接数、重传和通信量。
+
+## 2026-08-20 ARL 论文采样参数口径修复（仅本地代码验证）
+
+对照 `bare.tex` 后确认，ARL 的 proposer、validator 和 contributor 均使用公开阈值币驱动的无放回
+采样；此前采样器和证书绑定逻辑正确，但非-smoke 参数求解使用了委员会规模无关的 `1/3` 保守界，
+导致 `n=32--128` 无法运行正式 profile，也没有按论文要求把总预算 `Delta` 分成两个 `Delta/2`。
+
+本轮只修改采样参数、报告、reference matrix 和测试，没有修改 TCP transport、连接复用、candidate
+fan-out、AWS timeout、Security Group 或部署编排：
+
+- 正式 profile 改为按实际 `n,f` 枚举精确超几何界并选择最小 proposer/validator sample；
+- `original` 固定为总预算 `Delta=1e-10`，`high-assurance` 固定为
+  `Delta=2^-64/525600`，自定义 `1e-*` 和 `2^-*` 也解释为总预算；
+- validator 阈值统一为论文定义的 `floor(c_val/2)+1`，允许偶数样本；
+- benchmark 新增 profile、policy、fault fraction、总预算和每项预算字段；
+- reference matrix 覆盖两套 profile 的 `n=32,48,64,96,128` manifest-only 参数点。
+
+此前 AWS 产物仍全部是 `(3,3)` smoke，不能追溯升级为正式安全参数数据，正式曲线必须重新运行。
+本轮未启动 AWS 资源，新增费用 `$0`，累计量化成本仍约 `$3.55`。

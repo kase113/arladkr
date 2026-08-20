@@ -161,7 +161,7 @@ func main() {
 		fNew                     = flag.Int("f-new", -1, "new-committee Byzantine threshold (-1 = use --f)")
 		cvProposerSample         = flag.Int("cv-proposer-sample", 3, "CV V2 eligibility proposer sample size")
 		cvValidatorSample        = flag.Int("cv-validator-sample", 3, "CV V2 aggregate validator sample size")
-		cvFailureTarget          = flag.String("cv-failure-target", "smoke", "CV V2 sampling target: smoke|1e-8|1e-10|2^-80|2^-128")
+		cvFailureTarget          = flag.String("cv-failure-target", "smoke", "CV V2 total sampling budget: smoke|original|high-assurance|1e-*|2^-*")
 		kappa                    = flag.Int("kappa", 0, "aggregate dealer count (0 = f_old+1; other values are rejected)")
 		runs                     = flag.Int("runs", 1, "number of benchmark runs (V2 fresh-epoch experiment requires 1)")
 		epochs                   = flag.Int("epochs", 1, "number of epochs (V2 fresh-epoch experiment requires 1)")
@@ -1038,8 +1038,13 @@ func formatBenchResult(in benchResultInput) string {
 		meanRawLatency, meanRawAllLatency, meanRawP50Latency, meanRawP95Latency,
 	)
 	line += fmt.Sprintf(
-		" cv_failure_target=%s cv_proposer_sample=%d cv_validator_sample=%d cv_validator_threshold=%d cv_proposer_failure_bound=%s cv_validator_soundness_failure_bound=%s cv_validator_liveness_failure_bound=%s cv_validator_combined_failure_bound=%s cv_contributor_sampling_failure_bound=%s cv_epoch_sampling_failure_bound=%s cv_sampling_epochs=%d cv_experiment_sampling_union_bound=%s",
+		" cv_failure_target=%s cv_sampling_profile=%s cv_sampling_policy=%s cv_fault_fraction=%s cv_total_failure_budget=%s cv_per_event_failure_target=%s cv_proposer_sample=%d cv_validator_sample=%d cv_validator_threshold=%d cv_proposer_failure_bound=%s cv_validator_soundness_failure_bound=%s cv_validator_liveness_failure_bound=%s cv_validator_combined_failure_bound=%s cv_contributor_sampling_failure_bound=%s cv_epoch_sampling_failure_bound=%s cv_sampling_epochs=%d cv_experiment_sampling_union_bound=%s",
 		in.cvSampling.Target,
+		in.cvSampling.Profile,
+		in.cvSampling.Policy,
+		in.cvSampling.FaultFraction,
+		cvSamplingOutputValue(in.cvSampling.TotalFailureBudget),
+		cvSamplingOutputValue(in.cvSampling.PerEventFailureTarget),
 		in.cvSampling.ProposerSampleSize,
 		in.cvSampling.ValidatorSampleSize,
 		in.cvSampling.ValidatorThreshold,
@@ -1133,6 +1138,13 @@ func formatBenchResult(in benchResultInput) string {
 		meanOf(in.stats, func(s runStat) float64 { return s.cvNewAggregateRecoveryMs }),
 		meanPhaseBytes(in.stats, "new_share_exchange", true), meanPhaseBytes(in.stats, "new_share_exchange", false),
 	)
+}
+
+func cvSamplingOutputValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "none"
+	}
+	return value
 }
 
 func summarizeConsensusHash(stats []runStat) string {

@@ -17,7 +17,7 @@ func main() {
 		newFaults          = flag.Int("new-f", 1, "new committee fault bound")
 		proposerSample     = flag.Int("proposer-sample", 3, "eligibility proposer sample size")
 		validatorSample    = flag.Int("validator-sample", 3, "eligibility validator sample size")
-		failureTarget      = flag.String("failure-target", "smoke", "sampling target: smoke|1e-8|1e-10|2^-80|2^-128")
+		failureTarget      = flag.String("failure-target", "smoke", "total sampling budget: smoke|original|high-assurance|1e-*|2^-*")
 		runs               = flag.Int("runs", 1, "number of independent reference epochs")
 		manifestOnly       = flag.Bool("manifest-only", false, "validate one point and emit its manifest without cryptographic execution")
 		matrixFile         = flag.String("matrix-file", "", "versioned local reference matrix JSON")

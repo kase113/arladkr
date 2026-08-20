@@ -54,8 +54,8 @@ func TestCVDeriveV2ParamsRejectsImplicitSamplesAndConflictingFaultBounds(t *test
 	}
 	evenValidators := cvV2ParamsTestConfig()
 	evenValidators.CVValidatorSampleSize = 2
-	if _, err := cvDeriveV2Params(evenValidators); err == nil {
-		t.Fatal("accepted an even CV V2 validator sample size")
+	if params, err := cvDeriveV2Params(evenValidators); err != nil || params.validatorThreshold != 2 {
+		t.Fatalf("rejected paper-compatible even validator sample: params=%+v err=%v", params, err)
 	}
 
 	conflict := cvV2ParamsTestConfig()
@@ -68,10 +68,10 @@ func TestCVDeriveV2ParamsRejectsImplicitSamplesAndConflictingFaultBounds(t *test
 func TestCVDeriveV2ParamsRejectsSampleSizesThatMislabelSecureTarget(t *testing.T) {
 	cfg := Config{
 		SID: "cv-v2-secure-target", Epoch: 1,
-		OldCommittee: make([]int, 1024), NewCommittee: []int{2000, 2001, 2002, 2003},
-		OldFaults: 341, NewFaults: 1,
+		OldCommittee: make([]int, 128), NewCommittee: []int{2000, 2001, 2002, 2003},
+		OldFaults: 42, NewFaults: 1,
 		CVProposerSampleSize: 3, CVValidatorSampleSize: 3,
-		CVSamplingFailureTarget: "1e-8",
+		CVSamplingFailureTarget: "original",
 	}
 	for i := range cfg.OldCommittee {
 		cfg.OldCommittee[i] = i
@@ -79,10 +79,10 @@ func TestCVDeriveV2ParamsRejectsSampleSizesThatMislabelSecureTarget(t *testing.T
 	if _, err := cvDeriveV2Params(cfg); err == nil {
 		t.Fatal("accepted smoke sample sizes labeled with a 1e-8 failure target")
 	}
-	cfg.CVProposerSampleSize = 17
-	cfg.CVValidatorSampleSize = 313
+	cfg.CVProposerSampleSize = 19
+	cfg.CVValidatorSampleSize = 85
 	if _, err := cvDeriveV2Params(cfg); err != nil {
-		t.Fatalf("rejected sample sizes resolved for the 1e-8 target: %v", err)
+		t.Fatalf("rejected sample sizes resolved for the paper original profile: %v", err)
 	}
 }
 

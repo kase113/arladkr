@@ -42,7 +42,9 @@ type Config struct {
 
 	// CVProposerSampleSize and CVValidatorSampleSize are explicit protocol
 	// parameters for the CV V2 eligibility coin. They intentionally have no
-	// hidden defaults: experiment tooling must record the chosen failure bounds.
+	// hidden defaults: experiment tooling must record the chosen total failure
+	// budget. Non-smoke profiles split that budget equally between proposer and
+	// validator sampling and solve the exact finite-population bounds.
 	CVProposerSampleSize    int
 	CVValidatorSampleSize   int
 	CVSamplingFailureTarget string

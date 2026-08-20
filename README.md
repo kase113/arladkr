@@ -50,10 +50,11 @@ Run a local multi-process TCP cluster:
 
 Relevant experiment controls are `-f-old`, `-f-new`, `-kappa`,
 `-cv-proposer-sample`, `-cv-validator-sample`, the explicit failure target,
-network timeouts, and V2 key/store directories. Secure sampling is derived
-against the fixed worst-case corruption fraction `f/n <= 1/3`; a committee too
-small for the requested bound is rejected instead of silently shrinking the
-sample. Benchmark output labels the network path as
+network timeouts, and V2 key/store directories. `-cv-failure-target original`
+uses the paper's total budget `Delta=1e-10`; `high-assurance` uses
+`Delta=2^-64/525600`. The solver allocates `Delta/2` to proposer and validator
+sampling separately and chooses the smallest samples from the exact
+finite-population bounds for the configured `n,f`. Benchmark output labels the network path as
 `cv-sapvss-v2-scalar-group` / `single-mvba-v2`; `cmd/cvv2ref` uses a distinct
 reference-only label.
 
@@ -65,14 +66,15 @@ without executing a very large cryptographic reference epoch:
 
 ```sh
 go run ./cmd/cvv2ref -old-n 4 -old-f 1 -new-n 4 -new-f 1 -runs 1
-go run ./cmd/cvv2ref -manifest-only -old-n 313 -old-f 104 \
-  -new-n 4 -new-f 1 -failure-target 1e-8
+go run ./cmd/cvv2ref -manifest-only -old-n 128 -old-f 42 \
+  -new-n 128 -new-f 42 -failure-target original
 go run ./cmd/cvv2ref -matrix-file experiments/cvv2_reference_matrix_v1.json \
   -matrix-manifest-only
 ```
 
 The versioned pilot matrix contains three executable functional reference
-points and four secure sampling-only points. Omitting `-matrix-manifest-only`
+points and ten secure sampling-only points covering both paper profiles at
+`n=32,48,64,96,128`. Omitting `-matrix-manifest-only`
 runs only the functional points; secure points never trigger large-committee
 cryptographic execution.
 

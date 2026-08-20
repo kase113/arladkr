@@ -26,18 +26,18 @@ func TestBuildCVV2ReferenceManifestSeparatesSmokeAndSecureClaims(t *testing.T) {
 		t.Fatalf("manifest identity is not stable across execution modes: %+v err=%v", repeated, err)
 	}
 
-	secure, err := core.ResolveCVV2Sampling(313, 104, "1e-8", 3, 3)
+	secure, err := core.ResolveCVV2Sampling(128, 42, "original", 3, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secureManifest, err := buildCVV2ReferenceManifest("paper-secure", 1, 1, 313, 104, 4, 1, secure,
+	secureManifest, err := buildCVV2ReferenceManifest("paper-secure", 1, 1, 128, 42, 4, 1, secure,
 		secure.PerEpochCombinedSamplingFailureBound, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secureManifest.ExperimentClass != "fixed-fraction-secure" ||
-		secureManifest.SecurityClaim != "fixed-fraction-hypergeometric-bound" ||
-		secureManifest.Sampling.ProposerSampleSize != 17 || secureManifest.Sampling.ValidatorSampleSize != 313 {
+	if secureManifest.ExperimentClass != "finite-population-secure" ||
+		secureManifest.SecurityClaim != "exact-hypergeometric-total-budget" ||
+		secureManifest.Sampling.ProposerSampleSize != 19 || secureManifest.Sampling.ValidatorSampleSize != 85 {
 		t.Fatalf("misclassified secure manifest: %+v", secureManifest)
 	}
 	if _, err := buildCVV2ReferenceManifest("invalid", 1, 1, 7, 2, 4, 2, smoke, "1", true); err == nil {

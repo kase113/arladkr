@@ -72,10 +72,10 @@ func buildCVV2ReferenceManifest(
 	case sampling.Target == "smoke" && sampling.Policy == "explicit-smoke":
 		experimentClass = "functional-smoke"
 		securityClaim = "functional-only-no-negligible-failure-claim"
-	case sampling.Target != "smoke" && sampling.Policy == "fixed-fraction-1/3" &&
-		sampling.WorstCaseByzantineFraction == "1/3":
-		experimentClass = "fixed-fraction-secure"
-		securityClaim = "fixed-fraction-hypergeometric-bound"
+	case sampling.Target != "smoke" && sampling.Policy == "exact-finite-population" &&
+		sampling.TotalFailureBudget != "" && sampling.PerEventFailureTarget != "":
+		experimentClass = "finite-population-secure"
+		securityClaim = "exact-hypergeometric-total-budget"
 	default:
 		return cvV2ReferenceManifest{}, fmt.Errorf("inconsistent CV V2 sampling class")
 	}

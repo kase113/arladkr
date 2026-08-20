@@ -53,8 +53,9 @@ loopback 和内核调度优势，破坏与一节点一实例结果的可比性�
 - 离线 setup 是否计时、缓存冷暖状态和日志级别；
 - 每个数据点的独立运行次数和失败数据处理规则。
 
-ARLADKR 与 PracticalADKR 的安全参数不是同一个变量。`high-assurance` 应作为额外 Practical
-曲线报告，不能仅凭名称宣称它与 ARLADKR 的 `cv-failure-target` 完全等价。
+ARLADKR 与 PracticalADKR 的安全参数不是同一个变量。两者的 `original` 和 `high-assurance`
+必须先对应同一个总失败预算 `Delta`，再分别由各自的公式求解样本；不能只凭 profile 名称判定等价。
+ARL runner 会输出总预算、每项 `Delta/2`、精确失败概率和实际 proposer/validator sample。
 
 每个远端进程使用 `runs=1`、一个新 epoch。重复测量通过多个独立 `run_id` 完成，不在同一进程
 中连续运行多个 epoch。
@@ -473,17 +474,18 @@ digest。Practical 默认与 high-assurance 只改变采样策略，可以在相
 
 ### 9.1 ARLADKR
 
-功能 smoke 可以使用 `-cv-failure-target smoke`。最终安全参数实验建议单独运行
-`1e-10`、`2^-80` 或论文明确采用的目标，并保存实际 proposer/validator sample 和失败概率输出。
+功能 smoke 可以使用 `-cv-failure-target smoke`。正式实验使用论文 profile：`original` 对应
+`Delta=1e-10`，`high-assurance` 对应 `Delta=2^-64/525600`。runner 将总预算平分为 proposer 与
+validator 的 `Delta/2`，并根据实际 `n,f` 的精确有限总体概率选择最小样本。
 
 ```bash
 ARL_ARGS="-n $N -f $F -runs 1 -epochs 1 \
   -transport tcp-distributed -strict-network=true -comm-metrics=true \
-  -timeout 900s -cv-failure-target 2^-80"
+  -timeout 900s -cv-failure-target original"
 ```
 
-如果所选 n 无法满足目标，程序应当拒绝启动。不要通过降低 threshold、关闭验证或启用 ablation
-来强行得到结果。
+额外运行 high-assurance 曲线时只将最后一个参数改为 `high-assurance`。不要通过手工降低 sample、
+关闭验证或启用 ablation 来强行得到结果。
 
 ### 9.2 PracticalADKR 默认配置
 
