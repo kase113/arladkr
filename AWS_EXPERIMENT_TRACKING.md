@@ -1849,3 +1849,24 @@ collector 的 offset 去重/进度检查，再重跑共享 suite。本轮标记 
 bench/status summary，并以 best-effort 处理节点级缺失；两个协议都完成后才收集 diagnostics/stderr
 等 full artifacts。full 失败记录为 `full_artifact_collection=partial`，不再阻塞 Practical 启动，
 也不会把日志控制面失败误报为协议失败或阻止最终 destroy。
+
+## 2026-08-21 n=32 bounded-worker 私网 ARL 结果与用户终止
+
+`paper-n32-summary-v4-use1f-20260821` 使用 `us-east-1f/use1-az5`、32 台
+`c7g.xlarge` Spot、私网协议和当前 `dcccd90` checkout staging binary。ARL 在 32/32 节点上
+完成；用户在 summary 收集尾部终止 suite，因此 Practical 未启动。已收集的 31 个成功节点达到
+`n-f=22` quorum，consensus hash 唯一：
+`8a89a6e527e499e3b4b324fa5ea2d1397949decacacc4d1ec44904ff59bb6a1f`。
+
+31 节点均值：service-grace-adjusted latency `35519.68 ms`，raw latency `45519.98 ms`，
+实际 responder service grace `10000.30 ms`；leaf build `3281.77 ms`，candidate formation
+`29775.65 ms`，proposer slots `29708.48 ms`，aggregate agreement `525.42 ms`，recover shard
+`11101.68 ms`。3 个 proposer 各扫描 22 个 component，component network recovery 只有
+`1239.51/1295.99/1562.69 ms`，但 slot 为 `29695.17/29427.76/29877.44 ms`。剩余约 28 秒主要是
+component decode/密码验证。`cvLeafVerifyWorkers` 在 4 vCPU 上使用 3 workers；该修改限制外层并发以
+降低 CPU/内存峰值并保障 liveness，不是 latency 优化，22 项重验证被排成更多批次后可能比无界并发更慢。
+
+下一步性能优化应拆分 I/O recovery 与 CPU verification，提前或流水化 verified-catalog 构建，并评估
+4-worker 和 batch verification；不能简单跳过完整 22-component 验证，否则会改变当前安全契约。
+Terraform 最终销毁 42 个资源；32 台实例均 terminated，EBS 和 VPC 为空。实例累计约 15
+instance-hours，本轮保守记增量 **约 `$0.86`**，累计量化成本约 **`$7.42`**，最终以 Cost Explorer 为准。
