@@ -102,8 +102,11 @@ allowlist；来源数超过 48 时使用一个临时的大规模实验 CIDR，�
 
 ### 4.1 Terraform 或 EC2 Fleet 的职责
 
-单 Region 论文实验推荐使用 `fab aws-paper-run`。该任务调用配置指定的 Terraform module 创建和销毁
-本轮 EC2 基础设施；Terraform 仍是资源声明与 state 的唯一所有者，Fabric 负责串联实验生命周期。
+单 Region 的独立论文实验使用 `fab aws-paper-run`；它为一个项目创建 fresh fleet，并在该项目结束后
+立即销毁。需要在完全相同的 AMI、AZ、实例和私网 roster 上比较 ARLADKR 与 PracticalADKR 时，使用
+`fab aws-private-suite`。suite 只 apply 一次，依次运行 ARLADKR、全节点 cleanup-ready 隔离屏障和
+PracticalADKR，两个项目分别 setup、收集 artifact，最后统一 destroy。Terraform 仍是资源声明与
+state 的唯一所有者，Fabric 负责串联实验生命周期。
 手工流程或多 Region 流程也可以直接使用 Terraform、CloudFormation 或 EC2 Fleet 创建：
 
 - VPC、子网、route table 和必要的互联网出口；
@@ -116,6 +119,27 @@ allowlist；来源数超过 48 时使用一个临时的大规模实验 CIDR，�
 `deployment/config*.yaml` 中的 `instance`、`placement`、`storage` 和 `terraform` 字段会被
 `aws-paper-run` 转换为当前 smoke module 的变量；module 不支持的字段仍只用于 inventory 和结果元数据，
 不能替代真实基础设施声明。
+
+32 节点同 AZ 私网对比示例：
+
+```bash
+AWS_PROFILE=arladkr-sso fab aws-private-suite \
+  --config-path=deployment/config.aws-private-n32-use1.yaml \
+  --experiment-name=paper-n32-shared-v4-use1f-YYYYMMDD \
+  --arladkr-bench-args='-n 32 -f 10 -runs 1 -epochs 1 -timeout 180s -base-port 30000' \
+  --practical-bench-args='-n 32 -f 10 -runs 1 -paillier-bits 3072 -kappa-profile matched-lifetime -mvba-network tcp -strict-network=true -comm-metrics=true -timeout 600s' \
+  --timeout-s=1800
+```
+
+共享 fleet 只消除重复的 EC2/SSM 启动和销毁开销，不复用某个协议的 trusted setup、进程、端口或
+artifact marker。任一项目失败时整套比较标记 failed，但 finally 仍执行全节点 cleanup-ready 和 destroy。
+仅在需要统计独立基础设施重复性或避免 Spot fleet 条件相关性时，才为两个项目分别使用 fresh
+`aws-paper-run`。
+
+`aws-private-suite` 在 fleet health check 后会交叉编译当前 checkout 的 ARM64
+`rladkrbench` 和 `bench_latency`，通过临时加密 S3 对象分发并原子安装到所有节点；两个二进制的
+SHA-256 会写入 experiment record。AMI 只提供固定运行环境和热缓存，不能把 AMI 内二进制当作
+当前源码。只有 record 中存在本轮 `binary_digests`，共享 fleet 的结果才可用于代码回归或性能比较。
 
 ### 4.2 AMI
 

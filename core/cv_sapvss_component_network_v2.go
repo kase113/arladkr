@@ -140,10 +140,19 @@ func (s *cvAPDBNetworkServiceV2) AwaitVerifiedComponentCatalogV2(
 		s.experimentMu.Lock()
 		s.experimentMetrics.proposerCatalogScanCount += len(candidates)
 		s.experimentMu.Unlock()
-		for _, ref := range candidates {
-			ref := ref
-			go func() { results <- s.recoverAndVerifyComponentV2(ctx, ref) }()
+		jobs := make(chan cvComponentRefV2, len(candidates))
+		workers := cvLeafVerifyWorkers(len(candidates))
+		for range workers {
+			go func() {
+				for ref := range jobs {
+					results <- s.recoverAndVerifyComponentV2(ctx, ref)
+				}
+			}()
 		}
+		for _, ref := range candidates {
+			jobs <- ref
+		}
+		close(jobs)
 		var recoveryErr error
 		for range candidates {
 			result := <-results

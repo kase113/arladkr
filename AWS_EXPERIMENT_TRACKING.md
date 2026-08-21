@@ -1807,3 +1807,25 @@ open/active Spot request、EBS volume、VPC、Security Group 或 IAM role。
 按当时约 `$0.0522/h` Spot、短时公网 IPv4/gp3 和新增 snapshot 的保守口径，本次 bake 记
 约 `$0.05`；累计量化成本由约 `$5.50` 更新为约 **`$5.55`**，最终以 Cost Explorer 为准。
 新 30 GiB snapshot 的持续存储费用单列，旧 AMI 在确认不再需要复现历史实验前不自动删除。
+
+## 2026-08-21 n=32 共享私网 fleet 失败轮与二进制 staging 修复
+
+`paper-n32-shared-v4-use1f-20260821` 使用 `us-east-1f/use1-az5`、32 台
+`c7g.xlarge` Spot、私网 `10.42.1.10`--`10.42.1.41` 和 v4 AMI
+`ami-08952339a071d1772`。Terraform apply 和 SSM Online 均达到 32/32，setup 分两批
+16/16 成功，ARL 进程也启动 32/32，但最终全部报告 `quitpd failed: context deadline exceeded`，
+没有成功协议样本。本轮不能解释为 proposer timeout 太短：失败发生在 MVBA agreement/quitpd，
+且部署流程使用当前 checkout 生成 setup，却遗漏了当前 benchmark binary staging，实际执行的是
+AMI v4 中的旧二进制。因此本轮标记为 `invalidated`，不计入协议性能统计。
+
+修复后，单区域 `aws-private-suite` 与跨区域 suite 一样，在 fleet health check 后、任何 setup/run
+之前交叉编译当前 ARM64 `rladkrbench` 和 `bench_latency`，通过临时加密 S3 对象分发并原子安装，
+把 archive 和两个 binary SHA-256 写入 experiment record。这样 AMI 继续作为固定系统环境和构建
+缓存，不再决定实际运行的代码版本。当前有界 component recovery/verification 修改可以用 v4 AMI
+直接做 n=10 验证；验证通过前无需额外承担 v5 bake 成本，后续正式 32/100+ 节点批次再制作 v5。
+
+本轮 32 台实例从约 `03:24:16--05Z` 运行至 `03:50:51--03:52:27Z`，合计约
+`14.6 instance-hours`。按 `c7g.xlarge` Spot 约 `$0.0522/h`，加短时 30 GiB gp3、公网 IPv4、
+SSM/S3，保守记增量 **约 `$0.84`**；累计量化成本由约 `$5.55` 更新为约 **`$6.39`**。
+Terraform 最终报告 42 个资源全部销毁；AWS 标签复核显示 32 台实例均为 `terminated`，EBS volume、
+VPC、subnet 和 security group 均为空。
