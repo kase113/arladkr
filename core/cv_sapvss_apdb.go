@@ -364,3 +364,41 @@ func cvCloneByteSlices(input [][]byte) [][]byte {
 	}
 	return out
 }
+
+const cvAPDBPayloadWireDomain = "ARL-CV-sAPVSS/v2-scalar-group/apdb-recover-payload"
+
+type cvAPDBPayloadResponseV2 struct {
+	InstanceDigest []byte
+	Payload        []byte
+}
+
+func cvAPDBPayloadResponseV2CanonicalBytes(response *cvAPDBPayloadResponseV2) ([]byte, error) {
+	if response == nil || len(response.InstanceDigest) != 32 || len(response.Payload) == 0 {
+		return nil, fmt.Errorf("invalid CV V2 APDB payload response")
+	}
+	var wire bytes.Buffer
+	_ = cvWriteBytes(&wire, []byte(cvAPDBPayloadWireDomain))
+	_ = cvWriteBytes(&wire, response.InstanceDigest)
+	_ = cvWriteBytes(&wire, response.Payload)
+	return wire.Bytes(), nil
+}
+
+func cvDecodeAPDBPayloadResponseV2(wire []byte, maximumPayload int) (*cvAPDBPayloadResponseV2, error) {
+	if maximumPayload <= 0 {
+		return nil, fmt.Errorf("invalid CV V2 APDB payload response limit")
+	}
+	r := newCVWireReader(wire)
+	domain, err := r.bytes(len(cvAPDBPayloadWireDomain))
+	if err != nil || !bytes.Equal(domain, []byte(cvAPDBPayloadWireDomain)) {
+		return nil, fmt.Errorf("invalid CV V2 APDB payload response domain")
+	}
+	instanceDigest, err := r.bytes(32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CV V2 APDB payload response instance")
+	}
+	payload, err := r.bytes(maximumPayload)
+	if err != nil || len(payload) == 0 || r.reader.Len() != 0 {
+		return nil, fmt.Errorf("invalid CV V2 APDB payload response body")
+	}
+	return &cvAPDBPayloadResponseV2{InstanceDigest: instanceDigest, Payload: payload}, nil
+}

@@ -237,6 +237,7 @@ type cvAPDBNetworkServiceV2 struct {
 	verifiedCatalogV2      []cvComponentRefV2
 	verifiedCatalogPrewarm bool
 	localComponentRefV2    []byte
+	dealerPayloadsV2       map[string][]byte
 	componentRefUpdatesV2  chan struct{}
 	certifiedCandidatesV2  map[string][]byte
 	candidateFanoutV2      map[string]*cvCandidateFanoutStateV2
@@ -560,7 +561,19 @@ func (s *cvAPDBNetworkServiceV2) setEligibilityCoin(output *cvCoinOutputV2) erro
 	s.eligibleProposers = nodeSet(proposers)
 	s.validatorSample = append([]int(nil), validators...)
 	prewarm := false
-	if _, eligible := s.eligibleProposers[s.cfg.LocalNode]; eligible && !s.verifiedCatalogPrewarm {
+	// Sampled validators prewarm the same verified catalog as proposers: the
+	// service shares one verifiedComponentsV2 cache, so a validator that has
+	// already verified the selected components serves validation requests from
+	// cache instead of running recovery on the post-candidate critical path.
+	_, proposerEligible := s.eligibleProposers[s.cfg.LocalNode]
+	validatorSampled := false
+	for _, member := range s.validatorSample {
+		if member == s.cfg.LocalNode {
+			validatorSampled = true
+			break
+		}
+	}
+	if (proposerEligible || validatorSampled) && !s.verifiedCatalogPrewarm {
 		s.verifiedCatalogPrewarm = true
 		prewarm = true
 	}
@@ -1479,11 +1492,12 @@ func (s *cvAPDBNetworkServiceV2) lockForPurposeV2(
 func (s *cvAPDBNetworkServiceV2) RecoverComponent(
 	ctx context.Context, lock *cvAPDBLockV2, bindingCheck func([]byte) error,
 ) ([]byte, error) {
-	return s.recoverComponentForPurpose(ctx, lock, bindingCheck, cvRecoveryUnclassifiedV2)
+	return s.recoverComponentForPurpose(ctx, lock, bindingCheck, cvRecoveryUnclassifiedV2, -1)
 }
 
 func (s *cvAPDBNetworkServiceV2) recoverComponentForPurpose(
 	ctx context.Context, lock *cvAPDBLockV2, bindingCheck func([]byte) error, purpose cvRecoveryPurposeV2,
+	dealerID int,
 ) ([]byte, error) {
 	if s == nil || ctx == nil || !cvMemberInRosterV2(s.cfg.LocalNode, s.cfg.OldRoster) {
 		return nil, fmt.Errorf("invalid CV V2 component recovery caller")
@@ -1501,7 +1515,14 @@ func (s *cvAPDBNetworkServiceV2) recoverComponentForPurpose(
 	if err != nil {
 		return nil, err
 	}
-	return s.runRecovery(ctx, cvTagAPDBRecoverGetV2, request, string(lock.InstanceDigest), collector, false, purpose)
+	// Ask the dealer plus a rotated holder prefix first: the dealer answers
+	// with one authenticated payload, and rotation spreads concurrent
+	// recoveries across holders instead of stampeding every holder at once.
+	firstWave := cvRecoveryFirstWaveV2(
+		collector.RequestRecipients(), s.cfg.DataShards+cvRecoveryFirstWaveHoldersV2, s.cfg.LocalNode, dealerID,
+	)
+	return s.runRecoveryWithWave(ctx, cvTagAPDBRecoverGetV2, request, string(lock.InstanceDigest), collector,
+		false, purpose, firstWave, cvRecoveryResponseGraceV2)
 }
 
 func (s *cvAPDBNetworkServiceV2) RecoverAggregate(
@@ -1517,22 +1538,23 @@ func (s *cvAPDBNetworkServiceV2) RecoverAggregate(
 	}
 	started := time.Now()
 	defer func() { s.recordRecoveryLatencyV2(cvRecoveryNewAggregateV2, time.Since(started)) }()
-	return s.runRecovery(ctx, cvTagAggregateRecoverGetV2, requestWire,
-		string(collector.lock.InstanceDigest), collector, true, cvRecoveryNewAggregateV2)
+	return s.runRecoveryWithWave(ctx, cvTagAggregateRecoverGetV2, requestWire,
+		string(collector.lock.InstanceDigest), collector, true, cvRecoveryNewAggregateV2, nil, 0)
 }
 
-func (s *cvAPDBNetworkServiceV2) runRecovery(
+func (s *cvAPDBNetworkServiceV2) runRecoveryWithWave(
 	ctx context.Context, requestTag string, request []byte, key string,
 	collector *cvAPDBRecoveryCollectorV2, aggregate bool, purpose cvRecoveryPurposeV2,
+	firstWave []int, responseGrace time.Duration,
 ) ([]byte, error) {
 	pending := &cvAPDBPendingRecoveryV2{collector: collector, ready: make(chan struct{}, 1), purpose: purpose}
 	if err := s.registerRecovery(key, pending, aggregate); err != nil {
 		return nil, err
 	}
 	defer s.unregisterRecovery(key, pending, aggregate)
-	ready, err := cvSendRecoveryRequestsWithRetryV2(
+	ready, err := cvSendRecoveryRequestsWithWavesV2(
 		ctx, s.ctx, pending.ready, collector.RequestRecipients(), collector.dataShards,
-		cvControlRetryMaxAttemptsV2, cvControlRetryDelayV2,
+		cvControlRetryMaxAttemptsV2, cvControlRetryDelayV2, firstWave, responseGrace,
 		func(recipients []int) []cvFanoutSendResultV2 {
 			return s.sendFanoutMeasuredV2(recipients, -1, requestTag, request)
 		},
@@ -1556,13 +1578,106 @@ func (s *cvAPDBNetworkServiceV2) runRecovery(
 	}
 }
 
+const (
+	cvRecoveryFirstWaveHoldersV2 = 3
+	cvRecoveryResponseGraceV2    = 500 * time.Millisecond
+)
+
+// cvRecoveryFirstWaveV2 orders a dealer-anchored, requester-rotated subset of
+// the recipients so the dealer's single payload response lands first while
+// concurrent requesters spread their shard fallback over different holders.
+func cvRecoveryFirstWaveV2(recipients []int, count, rotateBy, dealer int) []int {
+	if count <= 0 || len(recipients) == 0 {
+		return nil
+	}
+	ordered := append([]int(nil), recipients...)
+	if r := rotateBy % len(ordered); r > 0 {
+		ordered = append(ordered[r:], ordered[:r]...)
+	}
+	wave := make([]int, 0, count+1)
+	if dealer >= 0 {
+		wave = append(wave, dealer)
+	}
+	for _, member := range ordered {
+		if len(wave) >= count+1 {
+			break
+		}
+		if member == dealer {
+			continue
+		}
+		wave = append(wave, member)
+	}
+	return wave
+}
+
 func cvSendRecoveryRequestsWithRetryV2(
 	ctx, serviceCtx context.Context, ready <-chan struct{}, recipients []int, dataShards, maxRetries int,
 	retryDelay func(int) time.Duration, send func([]int) []cvFanoutSendResultV2,
 	onSuccess func(cvFanoutSendResultV2),
 ) (bool, error) {
+	return cvSendRecoveryRequestsWithWavesV2(
+		ctx, serviceCtx, ready, recipients, dataShards, maxRetries, retryDelay, nil, 0, send, onSuccess,
+	)
+}
+
+func cvSendRecoveryRequestsWithWavesV2(
+	ctx, serviceCtx context.Context, ready <-chan struct{}, recipients []int, dataShards, maxRetries int,
+	retryDelay func(int) time.Duration, firstWave []int, responseGrace time.Duration,
+	send func([]int) []cvFanoutSendResultV2,
+	onSuccess func(cvFanoutSendResultV2),
+) (bool, error) {
 	succeeded := make(map[int]struct{}, len(recipients))
-	missing := append([]int(nil), recipients...)
+	trackWave := func(targets []int) {
+		results := send(targets)
+		byRecipient := make(map[int]cvFanoutSendResultV2, len(results))
+		for _, result := range results {
+			byRecipient[result.recipient] = result
+		}
+		for _, recipient := range targets {
+			result, attempted := byRecipient[recipient]
+			if attempted && result.err == nil {
+				if _, duplicate := succeeded[recipient]; !duplicate {
+					succeeded[recipient] = struct{}{}
+					if onSuccess != nil {
+						onSuccess(result)
+					}
+				}
+			}
+		}
+	}
+	if len(firstWave) > 0 && len(firstWave) < len(recipients) {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-serviceCtx.Done():
+			return false, serviceCtx.Err()
+		case <-ready:
+			return true, nil
+		default:
+		}
+		trackWave(firstWave)
+		if len(succeeded) >= dataShards && responseGrace > 0 {
+			timer := time.NewTimer(responseGrace)
+			select {
+			case <-ctx.Done():
+				_ = timer.Stop()
+				return false, ctx.Err()
+			case <-serviceCtx.Done():
+				_ = timer.Stop()
+				return false, serviceCtx.Err()
+			case <-ready:
+				_ = timer.Stop()
+				return true, nil
+			case <-timer.C:
+			}
+		}
+	}
+	missing := make([]int, 0, len(recipients))
+	for _, recipient := range recipients {
+		if _, sent := succeeded[recipient]; !sent {
+			missing = append(missing, recipient)
+		}
+	}
 	for attempt := 0; ; attempt++ {
 		select {
 		case <-ctx.Done():
@@ -1636,6 +1751,37 @@ func (s *cvAPDBNetworkServiceV2) run() {
 	}
 }
 
+// cacheDealerPayloadV2 retains this node's own locked component payload so the
+// dealer can serve authenticated full-payload recovery responses.
+func (s *cvAPDBNetworkServiceV2) cacheDealerPayloadV2(instanceDigest, payload []byte) {
+	if s == nil || len(instanceDigest) != 32 || len(payload) == 0 || len(payload) > s.cfg.MaximumPayload {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dealerPayloadsV2 == nil {
+		s.dealerPayloadsV2 = make(map[string][]byte, 8)
+	}
+	if len(s.dealerPayloadsV2) < 64 {
+		if _, exists := s.dealerPayloadsV2[string(instanceDigest)]; !exists {
+			s.dealerPayloadsV2[string(instanceDigest)] = append([]byte(nil), payload...)
+		}
+	}
+}
+
+func (s *cvAPDBNetworkServiceV2) dealerPayloadV2(instanceDigest []byte) ([]byte, bool) {
+	if s == nil || len(instanceDigest) != 32 {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	payload, ok := s.dealerPayloadsV2[string(instanceDigest)]
+	if !ok {
+		return nil, false
+	}
+	return payload, true
+}
+
 func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 	s.recordTagBytesV2(msg.Tag, false, msg.WireBytes)
 	switch msg.Tag {
@@ -1664,10 +1810,38 @@ func (s *cvAPDBNetworkServiceV2) dispatch(msg Message) {
 		if s.holderStore == nil {
 			return
 		}
+		// The dealer of a component keeps its own locked payload and answers
+		// with one full-payload response, which the collector authenticates by
+		// deterministic re-encoding against the locked Merkle root. This
+		// removes the multi-holder shard burst for the common recovery path
+		// without changing thresholds or the shard fallback.
+		if lock, lockErr := cvDecodeAPDBLockV2(msg.Body); lockErr == nil {
+			if payload, cached := s.dealerPayloadV2(lock.InstanceDigest); cached {
+				response, payloadErr := cvAPDBPayloadResponseV2CanonicalBytes(
+					&cvAPDBPayloadResponseV2{InstanceDigest: lock.InstanceDigest, Payload: payload},
+				)
+				if payloadErr == nil {
+					_ = s.sendAsync(msg.From, cvTagAPDBRecoverPayloadV2, response, nil)
+					return
+				}
+			}
+		}
 		response, err := cvHandleAPDBRecoveryRequestV2(s.cfg.SID, s.cfg.Epoch, msg.From, s.cfg.LocalNode,
 			s.cfg.OldRoster, msg.Body, s.cfg.TotalShards, s.cfg.ShardBytes, s.holderStore, s.apdbSigner)
 		if err == nil {
 			_ = s.sendAsync(msg.From, cvTagAPDBRecoverStoreV2, response, nil)
+		}
+	case cvTagAPDBRecoverPayloadV2:
+		response, err := cvDecodeAPDBPayloadResponseV2(msg.Body, s.cfg.MaximumPayload)
+		if err != nil {
+			return
+		}
+		pending := s.lookupRecovery(string(response.InstanceDigest), false)
+		if pending != nil {
+			s.recordRecoveryBytesV2(pending.purpose, false, msg.WireBytes)
+			if complete, addErr := pending.collector.AddPayload(msg.From, msg.Body); addErr == nil && complete {
+				cvNotifyAPDBV2(pending.ready)
+			}
 		}
 	case cvTagAggregateRecoverGetV2:
 		if s.holderStore == nil {
@@ -2050,7 +2224,7 @@ func (s *cvAPDBNetworkServiceV2) validateAndSignAggregate(
 			return fmt.Errorf("CV V2 validation aggregate payload mismatch")
 		}
 		return nil
-	}, cvRecoveryValidatorAggregateV2)
+	}, cvRecoveryValidatorAggregateV2, -1)
 	if err != nil {
 		return
 	}

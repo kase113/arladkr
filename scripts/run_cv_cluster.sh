@@ -28,6 +28,9 @@ allow_experimental_apvss="${RLADKR_ALLOW_EXPERIMENTAL_APVSS:-false}"
 apvss_forced_fallback_count="${RLADKR_APVSS_FORCED_FALLBACK_COUNT:-0}"
 apvss_wait_all_acks="${RLADKR_APVSS_WAIT_ALL_ACKS:-false}"
 epochs="${RLADKR_CV_EPOCHS:-1}"
+# Formal paper runs must pass an explicit sampling target; smoke keeps the
+# historical flow-verification default.
+cv_failure_target="${RLADKR_CV_FAILURE_TARGET:-smoke}"
 runs="${RLADKR_CV_RUNS:-1}"
 # All n node processes share one host in this harness. Keep the default at one
 # crypto worker per process so the benchmark does not oversubscribe the host;
@@ -201,7 +204,7 @@ for ((i=0; i<n; i++)); do
     export RLADKR_MVBA_PEER_WAIT_TARGET="$mvba_peer_wait_target"
     export RLADKR_MVBA_PEER_WAIT_MS="$mvba_peer_wait_ms"
     if timeout --foreground --kill-after=5s "$runner_timeout" "$binary" -n "$n" -f "$f" -runs "$runs" -epochs "$epochs" \
-      -transport tcp-distributed \
+      -transport tcp-distributed -cv-failure-target "$cv_failure_target" \
       -bind-host 127.0.0.1 -base-port "$base_port" -start-at "$start_at" -timeout "$epoch_timeout" \
 			"${bench_timeout_args[@]}" \
 		-apvss-mode "$apvss_mode" \

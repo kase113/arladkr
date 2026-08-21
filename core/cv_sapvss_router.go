@@ -35,6 +35,7 @@ const (
 	cvTagAPDBStoredShareV2       = "CV_V2_APDB_STORED_SHARE"
 	cvTagAPDBRecoverGetV2        = "CV_V2_APDB_RECOVER_GET"
 	cvTagAPDBRecoverStoreV2      = "CV_V2_APDB_RECOVER_STORE"
+	cvTagAPDBRecoverPayloadV2    = "CV_V2_APDB_RECOVER_PAYLOAD"
 	cvTagAggregateRecoverGetV2   = "CV_V2_AGG_RECOVER_GET"
 	cvTagAggregateRecoverStoreV2 = "CV_V2_AGG_RECOVER_STORE"
 	cvTagCoinShareV2             = "CV_V2_COIN_SHARE"
@@ -77,6 +78,7 @@ func cvAllowedNetworkTag(tag string) bool {
 		cvTagAPDBStoredShareV2,
 		cvTagAPDBRecoverGetV2,
 		cvTagAPDBRecoverStoreV2,
+		cvTagAPDBRecoverPayloadV2,
 		cvTagAggregateRecoverGetV2,
 		cvTagAggregateRecoverStoreV2,
 		cvTagCoinShareV2,

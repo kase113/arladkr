@@ -21,6 +21,7 @@ type cvAPDBRecoveryCollectorV2 struct {
 	bindingCheck   func([]byte) error
 	stores         map[int]cvAPDBStoreV2
 	storeWires     map[int][]byte
+	payload        []byte
 }
 
 func newCVAPDBRecoveryCollectorV2(
@@ -128,9 +129,52 @@ func (c *cvAPDBRecoveryCollectorV2) AddStore(from int, wire []byte) (bool, error
 	return len(c.stores) >= c.dataShards, nil
 }
 
+// AddPayload accepts one full-payload recovery response. The payload is only
+// trusted after deterministic re-encoding reproduces the locked Merkle root,
+// which is the same binding the shard reconstruction path verifies.
+func (c *cvAPDBRecoveryCollectorV2) AddPayload(_ int, wire []byte) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("nil CV V2 APDB recovery collector")
+	}
+	response, err := cvDecodeAPDBPayloadResponseV2(wire, c.maximumPayload)
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(response.InstanceDigest, c.lock.InstanceDigest) {
+		return false, fmt.Errorf("CV V2 APDB payload response does not match lock")
+	}
+	reencoded, err := cvAPDBEncodeSizedV2(
+		c.lock.InstanceDigest, response.Payload, c.dataShards, c.totalShards, c.shardBytes, c.maximumPayload,
+	)
+	if err != nil || !bytes.Equal(reencoded.root, c.lock.Root) {
+		return false, fmt.Errorf("CV V2 APDB payload response root mismatch")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.payload != nil {
+		if !bytes.Equal(c.payload, response.Payload) {
+			return false, fmt.Errorf("conflicting CV V2 APDB payload response")
+		}
+		return true, nil
+	}
+	c.payload = append([]byte(nil), response.Payload...)
+	return true, nil
+}
+
 func (c *cvAPDBRecoveryCollectorV2) Recover() ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("nil CV V2 APDB recovery collector")
+	}
+	c.mu.Lock()
+	payload := c.payload
+	c.mu.Unlock()
+	if payload != nil {
+		if c.bindingCheck != nil {
+			if err := c.bindingCheck(payload); err != nil {
+				return nil, fmt.Errorf("CV V2 APDB binding check: %w", err)
+			}
+		}
+		return payload, nil
 	}
 	c.mu.Lock()
 	if len(c.stores) < c.dataShards {

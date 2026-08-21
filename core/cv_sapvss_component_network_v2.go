@@ -72,6 +72,7 @@ func (s *cvAPDBNetworkServiceV2) publishComponentPayloadV2(
 	if err != nil {
 		return nil, err
 	}
+	s.cacheDealerPayloadV2(instance, payload)
 	header := cvComponentHeaderV2{
 		ContextDigest: append([]byte(nil), s.cfg.ExpectedContext...), DealerID: s.cfg.LocalNode,
 		PayloadDigest: cvComponentPayloadDigestV2(payload), Instance: append([]byte(nil), instance...), Root: append([]byte(nil), lock.Root...),
@@ -208,7 +209,7 @@ func (s *cvAPDBNetworkServiceV2) recoverComponentPayloadV2(
 	ctx context.Context, ref cvComponentRefV2,
 ) cvComponentVerificationResultV2 {
 	result := cvComponentVerificationResultV2{ref: cloneComponentRefV2(ref)}
-	payload, err := s.recoverComponentForPurpose(ctx, &ref.Lock, nil, cvRecoveryProposerCatalogV2)
+	payload, err := s.recoverComponentForPurpose(ctx, &ref.Lock, nil, cvRecoveryProposerCatalogV2, ref.Header.DealerID)
 	if err != nil {
 		result.recoverErr = fmt.Errorf("recover CV V2 component %d: %w", ref.Header.DealerID, err)
 		return result
@@ -391,7 +392,7 @@ func (s *cvAPDBNetworkServiceV2) verifiedComponentLeafV2(
 			return fmt.Errorf("CV V2 component payload mismatch")
 		}
 		return nil
-	}, purpose)
+	}, purpose, ref.Header.DealerID)
 	var leaf *cvLeafV2
 	if err == nil {
 		leaf, err = cvDecodeLeafV2(payload, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators)
