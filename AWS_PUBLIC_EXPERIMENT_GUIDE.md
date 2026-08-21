@@ -851,3 +851,9 @@ compact summary 收集采用单节点容错：若某节点在服务退出竞态�
 最终是否可用由 quorum、consensus hash、setup digest 和 timing metadata 一起判断；只有有效节点
 不足 quorum 或元数据不一致时，实验才会被判为不可用。这样单个 SSM/服务尾部异常不会丢弃整轮
 协议性能数据。
+
+控制面还会对指定 `run_id` 的 bench/status 文件做最多 15 秒的落盘等待；compact 响应缺失节点
+随后只对这些节点执行一次逐节点精确路径 fallback。SSM 批命令若部分 invocation 失败，会保留
+成功响应并把失败节点写入 `collection_error`，不再在收集器入口直接中止。summary 记录每个节点的
+`available`、`collection_error` 和 benchmark 结果，避免把“协议已完成但结果尚未落盘”误判为协议
+失败。artifact 文件读取使用 `sudo`，兼容 runner 创建的受限目录。
