@@ -857,3 +857,5 @@ compact summary 收集采用单节点容错：若某节点在服务退出竞态�
 成功响应并把失败节点写入 `collection_error`，不再在收集器入口直接中止。summary 记录每个节点的
 `available`、`collection_error` 和 benchmark 结果，避免把“协议已完成但结果尚未落盘”误判为协议
 失败。artifact 文件读取使用 `sudo`，兼容 runner 创建的受限目录。
+compact 快路径也使用 `sudo test/grep/tail`，避免 systemd runner 的文件权限使所有节点都被误报为
+缺少 bench/status。
