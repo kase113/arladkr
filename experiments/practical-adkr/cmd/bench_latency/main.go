@@ -238,6 +238,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Optional synchronized start for shared-host multiprocess harnesses:
+	// every node waits until the same wall-clock deadline so startup skew does
+	// not eat into per-phase readiness windows. Deployment runners keep the
+	// historical immediate start by leaving the variable unset.
+	if raw := strings.TrimSpace(os.Getenv("PRACTICAL_START_AT_UNIX")); raw != "" {
+		if deadline, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil {
+			if wait := time.Until(time.Unix(deadline, 0)); wait > 0 {
+				time.Sleep(wait)
+			}
+		}
+	}
+
 	stats := make([]runStat, 0, *runs)
 	successRuns := 0
 	totalLatencyAllRuns := 0.0
@@ -425,7 +437,11 @@ func main() {
 	if successRuns != *runs {
 		os.Exit(1)
 	}
-	if grace := durationFromEnvMs("PRACTICAL_RECOVER_SERVICE_GRACE_MS"); grace > 0 {
+	grace := durationFromEnvMs("PRACTICAL_RECOVER_SERVICE_GRACE_MS")
+	if responderGrace := durationFromEnvMs("PRACTICAL_RESPONDER_GRACE_MS"); responderGrace > grace {
+		grace = responderGrace
+	}
+	if grace > 0 {
 		time.Sleep(grace)
 	}
 }

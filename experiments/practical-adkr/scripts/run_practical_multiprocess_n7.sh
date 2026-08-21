@@ -71,6 +71,12 @@ for id in $(seq 0 $((N - 1))); do
   proto_addrs+=",${new_id}=127.0.0.1:$((24000 + new_id))"
 done
 
+# Hold every node at one wall-clock start so spawn skew does not compress the
+# slowest nodes' readiness windows on a shared host. Unset the variable to keep
+# the historical immediate start.
+PRACTICAL_START_AT_UNIX="${PRACTICAL_START_AT_UNIX:-$(( $(date +%s) + 8 ))}"
+export PRACTICAL_START_AT_UNIX
+
 pids=()
 for id in $(seq 0 $((N - 1))); do
   log="${LOG_DIR}/node-${id}.log"

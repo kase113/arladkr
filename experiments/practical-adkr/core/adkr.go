@@ -336,7 +336,7 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return failWithPartial(err, "setup")
 	}
-	defer compService.close()
+	defer closeCompServiceAfterGrace(compService, ctx)
 	partialVerifyService, err := startPartialVerifyService(ctx, cfg, newC)
 	if err != nil {
 		if cfg.StrictNetwork {

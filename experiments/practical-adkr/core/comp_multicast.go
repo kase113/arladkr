@@ -107,6 +107,26 @@ func startCompKeyService(ctx context.Context, cfg Config, committee []int, local
 	return service, nil
 }
 
+// closeCompServiceAfterGrace keeps the CompProve responders reachable for a
+// bounded window after a successful epoch so slower peers can still satisfy
+// their readiness barriers; failed epochs and a zero grace close immediately.
+func closeCompServiceAfterGrace(service *compKeyService, ctx context.Context) {
+	if service == nil {
+		return
+	}
+	grace := durationFromEnvMsOr("PRACTICAL_RESPONDER_GRACE_MS", 0)
+	if grace <= 0 || ctx == nil || ctx.Err() != nil {
+		service.close()
+		return
+	}
+	go func() {
+		select {
+		case <-time.After(grace):
+		case <-ctx.Done():
+		}
+		service.close()
+	}()
+}
 func (service *compKeyService) close() {
 	if service == nil {
 		return
