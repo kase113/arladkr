@@ -125,7 +125,7 @@ state 的唯一所有者，Fabric 负责串联实验生命周期。
 ```bash
 AWS_PROFILE=arladkr-sso fab aws-private-suite \
   --config-path=deployment/config.aws-private-n32-use1.yaml \
-  --experiment-name=paper-n32-shared-v4-use1f-YYYYMMDD \
+  --experiment-name=paper-n32-shared-v5-use1f-YYYYMMDD \
   --arladkr-bench-args='-n 32 -f 10 -runs 1 -epochs 1 -timeout 180s -base-port 30000' \
   --practical-bench-args='-n 32 -f 10 -runs 1 -paillier-bits 3072 -kappa-profile matched-lifetime -mvba-network tcp -strict-network=true -comm-metrics=true -timeout 600s' \
   --timeout-s=1800
@@ -153,9 +153,10 @@ cleanup/destroy。100+ 节点建议进一步改为节点上传压缩 artifact �
 8 GiB 内存。相较 2 vCPU 配置，它能让 ARL 默认密码学 worker 并行度更接近协议实际计算需求。
 所有三种协议必须使用同一个 AMI 和实例类型。
 
-当前 `us-east-1` 基线镜像为 `ami-08952339a071d1772`
-（`arladkr-bench-arm64-v4-20260821`），是 Amazon Linux ARM64，使用 Go `1.26.5`，并包含提交
-`b50bcaf` 的 ARL scalar responder 和 Practical MVBA/APDB 阈值修复。AMI 至少包含：
+当前 `us-east-1` 基线镜像为 `ami-0a31eb4903947c28a`
+（`arladkr-bench-arm64-v5-252fe21-20260821`），是 Amazon Linux ARM64，使用 Go `1.26.5`，并包含
+提交 `252fe21` 的 proposer ownership/evaluation batch verification 和密码学测试加速；论文实验仍会
+staging 当前 checkout 的二进制并记录 digest。AMI 至少包含：
 
 - Amazon Linux ARM64；
 - 固定版本的 Go（当前为 `1.26.5`）；
@@ -519,6 +520,7 @@ aws:
     ssm_setup_timeout_seconds: 600
     ssm_setup_batch_size: 16
     ssm_setup_retries: 2
+    ssm_collect_chunk_bytes: 12288
     artifact_url_ttl_seconds: 3600
 ```
 
@@ -527,6 +529,10 @@ setup command 的执行上限，两者不能用较短的普通管理命令 timeo
 `send-command` 最多接收 50 个 instance ID；100--256 台建议每 Region 使用 16--25 台 setup
 批次、最多 50 并发，并保证 presigned URL 的 TTL 覆盖所有批次与重试。跨 Region 调用按 Region
 并发，各 Region 内再分批，避免 command ID 和 SSM client 跨区混用。
+
+`ssm_collect_chunk_bytes` 默认和硬上限均为 12 KiB；base64 与 marker 后仍低于 SSM 24 KiB inline
+输出限制。summary 模式只读取 bench/status，runner stderr 与 systemd diagnostics 只在两种协议都
+结束后的 full 模式收集。该设置减少 command 数量，但没有改变 100+ 节点控制机拉取模型的扩展性上限。
 
 当前分发只让每台实例下载一份公共 archive 和自己的 NodeSlot shard，去掉了全部私有 shard 在
 每台机器上的重复下载。公共 registry 本身随 n 增长且每台节点都需要，因此集群总下载量仍可能是
@@ -817,3 +823,10 @@ ARLADKR and agreed on one consensus hash. Adjusted latency averaged 3.821 second
 2.097 seconds; the 1.000-second responder service grace is reported separately and already removed from
 the adjusted value. The fleet was destroyed after artifact collection. See `AWS_EXPERIMENT_TRACKING.md`
 for the complete metrics and cost estimate.
+
+The later `paper-n10-ownership-v5-use1f-20260821` shared-fleet run used AMI
+`ami-0a31eb4903947c28a` and current commit `252fe21`. ARLADKR completed on 10/10 nodes with 3.490-second
+adjusted latency and 1.890-second proposer slots. PracticalADKR reached quorum on 8/10 nodes with
+4.205-second mean latency; two slower nodes lost CompProve responder reachability after the successful
+nodes exited, so this run also records an unresolved Practical responder-lifetime issue. Both protocols'
+full artifacts were collected before the common fleet was destroyed.

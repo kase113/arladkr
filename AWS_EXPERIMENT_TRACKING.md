@@ -1953,3 +1953,57 @@ mutation/adversarial 覆盖未删除。完整 `core` suite 从 `485.053 s` 降�
 完整 suite。n=127
 性能夹具仅由 `RLADKR_RUN_N127_OWNERSHIP_BENCH=1` 显式开启，不增加默认测试成本。本轮没有启动
 AWS 资源，新增 AWS 成本 `$0`，累计量化成本仍约 **`$8.07`**。
+
+## 2026-08-21 ownership batch v5 AMI 与 n=10 共享私网验证
+
+ownership 方程 batch、receiver evaluation batch 和密码学测试夹具复用已随提交 `252fe21`
+（完整提交 `252fe210325938ae0fe5739be4d6a42add376b4a`）推送到 `origin/main`。随后在
+`us-east-1f/use1-az5` 使用一台 `c7g.xlarge` 构建 ARM64 v5 镜像：
+
+- AMI：`ami-0a31eb4903947c28a`，名称 `arladkr-bench-arm64-v5-252fe21-20260821`；
+- source bundle SHA-256：`5efab9405c168dba727312dff88b40d362907c7eaaea8f10b6e952df3d827ee2`；
+- AMI 内 `rladkrbench` SHA-256：`1a1cf1e138b74cc2b3d09ff962eaa18066b5489476e2ec59bf45d0d0addb00c3`；
+- AMI 内 `bench_latency` SHA-256：`a1a6eee0cb1639716d416ed893bac64258b1029bd6383f6a784f07c916f87935`。
+
+bake 源实例 `i-0486cebf6802692c1` 从 `08:59:05Z` 到 `09:10:25Z`，Terraform 11/11
+资源已销毁。AMI 保持 `available`，仅有其预期的 30 GiB snapshot
+`snap-03ef25b557c1a77a2` 被保留；该 snapshot 后续存储约 `$1.50/月`，不计入本轮之后的未来累计。
+
+共享 suite `paper-n10-ownership-v5-use1f-20260821` 只 apply 一次，在同一组 10 台
+`c7g.xlarge` Spot、同一 AZ、私网 `10.42.1.10--10.42.1.19` 上依次运行 ARLADKR 和
+PracticalADKR。suite 仍按当前 checkout 重新构建并 staging 二进制，实际受测 SHA-256 为
+`rladkrbench=384b8db57383ed57a77e92186af21fd1d50b44f0db6d9ce52343ea10cda306d1`、
+`bench_latency=bc8b911498a2f13122d8bafbf2863666da8da24727bccd23ec9d235085792ec2`。
+
+ARLADKR `run-20260821-091504` 为 10/10 成功、quorum 7、唯一 consensus hash
+`10802e971fa5c83b4f4f8cff8667c43ade8a078cdfb89fded2b84581df7919ee`。10 节点平均
+service-grace-adjusted latency 为 **`3489.75 ms`**，raw latency `4490.11 ms`，已单列并扣除
+`1000.36 ms` responder service grace。`proposer_slots` 平均 `1889.75 ms`
+（范围 `1787.78--1951.13 ms`），4 个实际执行 catalog verification 的节点平均
+`746.40 ms`，其 component recovery 累计平均 `435.38 ms`；所有节点 leaf build 平均
+`716.60 ms`。setup digest 为
+`6e4b62922b8811ad77420349aaa471d7f6aea02898ecaeca4e6235580447713e`。
+
+PracticalADKR `run-20260821-092333` 达到 quorum，但不是全节点成功：8/10 成功，成功节点唯一
+consensus hash 为 `5b5f550bae04ba144baba29692236a08bdeead137a5d5d199b38d16afda0ceab`，
+平均 latency `4205.47 ms`（范围 `3798.36--4533.13 ms`），其中 partial verify
+`767.52 ms`、recover `1039.89 ms`、derive `1062.47 ms`。setup digest 为
+`d2c480c53f7c0e7e348b51341785df494d6f0435f0bc5d7ceadc2509b016eaaa`。节点
+`10.42.1.16` 和 `10.42.1.17` 分别在约 `49.30 s` 和 `49.00 s` 失败，错误为 CompProve
+readiness `reachable=2/7` 和 `1/7`。成功节点约在 `09:25:38--39Z` 已退出，而两个慢节点直到
+`09:26:23--24Z` 才超时，证据指向成功节点过早关闭 CompProve responder service 的尾部竞态；
+增加总 benchmark timeout 不能修复该问题，后续应给 Practical responder 增加有界 service grace
+或完成屏障。
+
+部署控制面也得到量化：ARL summary 到 `09:20:54Z` 才完成，Practical 在 `09:23:33Z` 启动，
+协议只运行数秒，但 2 KiB SSM 分块使 summary/full artifact 产生大量独立 command。控制脚本现将
+summary 限定为 bench/status，并将默认有界分块提高到 12 KiB；旧 2 KiB 配置仍兼容，完整 Fabric
+回归 `53/53` 通过。100+ 节点仍应使用节点到 S3 prefix 的上传式收集，而不是把控制机分块下载
+继续横向放大。
+
+suite 记录最终为 `status=success`、`final_cleanup=cleanup-ready`、`cleanup=destroyed`；Terraform
+20/20 资源已销毁。AWS 复核中实验与 bake 均无 EBS、VPC、Security Group 或 open/active Spot
+request 残留，两个 state 的 resource count 都为 0。10 台 suite 实例累计约 `3.91`
+instance-hours，bake 约 `0.19` instance-hours；按 `us-east-1f` Spot `$0.052/h`，加 gp3、公网
+IPv4、SSM/S3 并保守上浮，本轮记约 **`$0.30`**。累计量化成本由 `$8.07` 更新为约
+**`$8.37`**，最终仍以 Cost Explorer 为准。
