@@ -2108,3 +2108,22 @@ binary digest、cleanup barrier、launch 和 ready 检查，quorum 为 `10/7`，
 复核没有残留运行/停止实例。按本轮 10 台 Spot 的实际生命周期、gp3、公网 IPv4、SSM/S3 和少量
 控制流量保守记约 **`$0.18`**，量化累计成本由约 `$8.95` 更新为约 **`$9.13`**；AMI
 snapshot 持续存储费仍单列，最终金额以 Cost Explorer 为准。
+
+## 2026-08-21 v6 n=32 ARL 私网预检失败（Spot roster invalidated）
+
+尝试在 `us-east-1f/use1-az5` 使用 v6 AMI `ami-0da946b587756eba5` 启动 32 台
+`c7g.xlarge` Spot，仅运行 ARLADKR，实验组为
+`paper-arl-v6-final-n32-use1f-20260821`。Terraform 初始 apply 报告 32/32 实例创建，
+inventory 也成功写出；但 setup 前 Fabric 重新按 `NodeSlot` 查询 AWS roster 时发现
+`expected=0..31 missing=[14,18,20]`，因此没有生成 setup、没有启动 benchmark，也没有产生
+`proposer_slots_ms` 数据。
+
+该轮记录为 `status=failed`、`run_id=null`，不是协议失败或性能样本。原因是 Spot fleet 在创建后
+出现节点回收/EC2 查询最终一致性导致的 roster 不完整；控制脚本正确拒绝在缺少节点时继续，以免
+形成错误的 n=32 实验。Terraform finally 已销毁全部 38 个剩余资源，state resource count 为
+0，按 32 台实例约 12 分钟、gp3、SSM/S3 和公网 IPv4 保守估算新增成本约 **`$0.40`**，累计
+量化成本由约 `$9.13` 更新为约 **`$9.53`**；最终金额以 Cost Explorer 为准。
+
+下次 n=32 重试应在 apply 后增加一次稳定性窗口，连续两次查询都必须得到完整 `NodeSlot=0..31`
+且实例状态为 running/SSM Online；若仍使用 Spot，建议设置更高的 max price 或改用短时 On-Demand
+验证，以区分 Spot 回收与控制面最终一致性。
