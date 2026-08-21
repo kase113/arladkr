@@ -2072,3 +2072,16 @@ Terraform 资源已由 finally 自动销毁。按 32 台 Spot 约 11 分钟、gp
 
 后续重跑前应修复 compact summary：单节点缺少 `bench` 时标记该节点 unavailable 并保留其余
 节点原始结果，不应使整轮收集失败；同时为 summary 增加 schema 版本。
+
+## 2026-08-21 v6 n=10 ARL compact-fix 验证（仍 invalidated）
+
+使用修复后的 compact summary 在 `us-east-1f` 启动 10 台 v6 `c7g.xlarge` Spot，仅运行
+ARLADKR。setup、10/10 launch、10/10 ready、quorum `10/7` 均成功，run 为
+`run-20260821-141835`，状态轮询在 86 秒显示 `success=10/7, failed=0`。
+
+但收集结果显示 10 个节点均缺少 bench/status 内容，最终因
+`collected nodes disagree on setup bundle or timing metadata` 被标记 invalidated；这说明
+单节点容错修复已生效，但还需要在 compact SSM 命令中等待 benchmark/status 文件落盘后再读取。
+该等待修复已在本地实现并通过 56 个部署测试；本轮 AWS 代码仍未包含该最新等待修复，因此不
+重复启动 fleet。20 个 Terraform 资源已自动销毁，新增成本保守约 `$0.14`，累计量化成本由
+约 `$8.81` 更新为约 **`$8.95`**。
