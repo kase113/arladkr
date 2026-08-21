@@ -426,7 +426,7 @@ func cvDecodeReceiverLaneOfferV2Mode(
 	if err != nil || receiverIndex != expectedReceiverIndex {
 		return nil, fmt.Errorf("invalid CV V2 lane offer receiver index")
 	}
-	evaluation, err := r.point()
+	evaluation, err := r.pointDeferred()
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 lane offer evaluation")
 	}
@@ -443,14 +443,17 @@ func cvDecodeReceiverLaneOfferV2Mode(
 		return nil, fmt.Errorf("invalid CV V2 scalar chunk count")
 	}
 	for chunk := 0; chunk < chunks; chunk++ {
-		offer.ScalarChunks[chunk], err = r.ciphertext()
+		offer.ScalarChunks[chunk], err = r.ciphertextDeferred()
 		if err != nil {
 			return nil, fmt.Errorf("invalid CV V2 scalar ciphertext")
 		}
 	}
-	offer.Blinding, err = r.ciphertext()
+	offer.Blinding, err = r.ciphertextDeferred()
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 blinding ciphertext")
+	}
+	if err := r.assertDecodedSubgroup(); err != nil {
+		return nil, fmt.Errorf("invalid CV V2 lane offer point: %w", err)
 	}
 	proofWire, err := r.bytes(cvMaxLeafProofWireBytes)
 	if err != nil || r.reader.Len() != 0 {
@@ -535,23 +538,23 @@ func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnersh
 	if err != nil || !bytes.Equal(domain, []byte(cvOwnershipProofWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof domain")
 	}
-	coinCommitments, err := cvReadExactPointVector(r, chunks, "V2 ownership scalar coin commitments")
+	coinCommitments, err := cvReadExactPointVectorDeferred(r, chunks, "V2 ownership scalar coin commitments")
 	if err != nil {
 		return nil, err
 	}
-	cipherCommitments, err := cvReadExactPointVector(r, chunks, "V2 ownership scalar ciphertext commitments")
+	cipherCommitments, err := cvReadExactPointVectorDeferred(r, chunks, "V2 ownership scalar ciphertext commitments")
 	if err != nil {
 		return nil, err
 	}
-	blindingCoinCommitment, err := r.point()
+	blindingCoinCommitment, err := r.pointDeferred()
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 ownership blinding coin commitment")
 	}
-	blindingCipherCommitment, err := r.point()
+	blindingCipherCommitment, err := r.pointDeferred()
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 ownership blinding ciphertext commitment")
 	}
-	evaluationCommitment, err := r.point()
+	evaluationCommitment, err := r.pointDeferred()
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 ownership evaluation commitment")
 	}
@@ -577,6 +580,9 @@ func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnersh
 		EvaluationCommitment: evaluationCommitment, ScalarCoinResponses: coinResponses,
 		ScalarDigitResponses: digitResponses, BlindingCoinResponse: blindingCoinResponse,
 		BlindingShareResponse: blindingShareResponse,
+	}
+	if err := r.assertDecodedSubgroup(); err != nil {
+		return nil, fmt.Errorf("invalid CV V2 ownership proof point: %w", err)
 	}
 	canonical, err := cvOwnershipProofV2CanonicalBytesAfterValidation(proof, context)
 	if err != nil || !bytes.Equal(canonical, wire) {

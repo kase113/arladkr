@@ -8,7 +8,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-func cvCoreProofV2Fixture(t *testing.T) (*cvLeafContextV2, []fr.Element, []fr.Element) {
+func cvCoreProofV2Fixture(t testing.TB) (*cvLeafContextV2, []fr.Element, []fr.Element) {
 	t.Helper()
 	cfg := cvV2ParamsTestConfig()
 	context := &cvLeafContextV2{

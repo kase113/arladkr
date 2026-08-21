@@ -861,7 +861,9 @@ func cvDecodeLeafV2Unsigned(
 	if err != nil || dealer > uint64(^uint(0)>>1) {
 		return nil, fmt.Errorf("invalid CV V2 leaf dealer")
 	}
-	commitments, err := cvReadExactPointVector(r, expectedContext.SharingDegree+1, "V2 coefficient commitments")
+	commitments, err := cvReadExactPointVectorDeferred(
+		r, expectedContext.SharingDegree+1, "V2 coefficient commitments",
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -951,6 +953,9 @@ func cvDecodeLeafV2Unsigned(
 	}
 	if r.reader.Len() != 0 {
 		return nil, fmt.Errorf("trailing CV V2 unsigned leaf bytes")
+	}
+	if err := r.assertDecodedSubgroup(); err != nil {
+		return nil, fmt.Errorf("invalid CV V2 leaf coefficient point: %w", err)
 	}
 	canonical, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
 	if err != nil || !bytes.Equal(canonical, wire) {

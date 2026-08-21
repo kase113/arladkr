@@ -454,3 +454,134 @@ func BenchmarkCVV2OwnershipVerificationN127(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkCVV2LeafBuildN32(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N32_LOCAL_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N32_LOCAL_BENCH=1 to build the n=32 leaf fixture")
+	}
+	oldRoster := make([]int, 32)
+	newRoster := make([]int, 32)
+	for i := range oldRoster {
+		oldRoster[i] = i
+		newRoster[i] = 32 + i
+	}
+	cfg := Config{
+		SID: "cv-v2-n32-leaf-benchmark", Epoch: 1,
+		OldCommittee: oldRoster, NewCommittee: newRoster,
+		OldFaults: 10, NewFaults: 10,
+		CVProposerSampleSize: 3, CVValidatorSampleSize: 3,
+	}
+	params, err := cvDeriveV2Params(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	keyRoot := b.TempDir()
+	receiverPublic := filepath.Join(keyRoot, "receiver-public")
+	receiverSecret := filepath.Join(keyRoot, "receiver-secret")
+	if err := cvGenerateReceiverRegistryV2(receiverPublic, receiverSecret, cfg.SID, uint64(cfg.Epoch), newRoster); err != nil {
+		b.Fatal(err)
+	}
+	receivers, err := cvLoadReceiverRegistryV2(
+		receiverPublic, receiverSecret, cfg.SID, uint64(cfg.Epoch), newRoster, newRoster,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	validatorPublic := filepath.Join(keyRoot, "validator-public")
+	validatorSecret := filepath.Join(keyRoot, "validator-secret")
+	if err := cvGenerateValidatorRegistryV2(validatorPublic, validatorSecret, cfg.SID, uint64(cfg.Epoch), oldRoster); err != nil {
+		b.Fatal(err)
+	}
+	validators, err := cvLoadValidatorRegistryV2(
+		validatorPublic, validatorSecret, cfg.SID, uint64(cfg.Epoch), oldRoster, oldRoster,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	_ = validators
+	leafContext := &cvLeafContextV2{
+		SID: "cv-v2-n32-leaf-benchmark", Epoch: uint64(cfg.Epoch),
+		OldRoster: append([]int(nil), oldRoster...), NewRoster: append([]int(nil), newRoster...),
+		ReceiverRegistryDigest: append([]byte(nil), receivers.registryDigest...),
+		SharingDegree:          params.newShareDegree,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: params.componentCount},
+	}
+	previousProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previousProcs)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		count := leafContext.SharingDegree + 1
+		scalarCoefficients := make([]fr.Element, count)
+		blindingCoefficients := make([]fr.Element, count)
+		for i := 0; i < count; i++ {
+			if _, err := scalarCoefficients[i].SetRandom(); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := blindingCoefficients[i].SetRandom(); err != nil {
+				b.Fatal(err)
+			}
+		}
+		commitments, coreProof, buildErr := cvProveCoreV2(leafContext, oldRoster[0], scalarCoefficients, blindingCoefficients)
+		if buildErr != nil {
+			b.Fatal(buildErr)
+		}
+		_ = commitments
+		_ = coreProof
+		for i, receiverID := range leafContext.NewRoster {
+			index := i + 1
+			scalar := cvEvaluateScalarPolynomialV2(scalarCoefficients, index)
+			blinding := cvEvaluateScalarPolynomialV2(blindingCoefficients, index)
+			offer, _, offerErr := cvEncryptReceiverLanesV2(
+				leafContext, oldRoster[0], receiverID, index,
+				&receivers.encryptionPublicKeys[i], scalar, blinding,
+			)
+			if offerErr != nil {
+				b.Fatal(offerErr)
+			}
+			if _, err := cvReceiverLaneOfferV2CanonicalBytesAfterValidation(leafContext, oldRoster[0], offer); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func BenchmarkCVV2ReceiverLaneBatchedVsLegacy(b *testing.B) {
+	context, coefficients, blindings := cvCoreProofV2Fixture(b)
+	dealer := context.OldRoster[0]
+	receiverID := context.NewRoster[1]
+	receiverIndex := 2
+	receiverSecret := fr.NewElement(11)
+	receiverPublic, err := cvReceiverPublicKey(receiverSecret)
+	if err != nil {
+		b.Fatal(err)
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil {
+		b.Fatal(err)
+	}
+	randomness, err := cvGenerateReceiverLaneRandomnessV2(chunks)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("batched", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, _, err := cvComputeReceiverLaneOfferV2(
+				context, dealer, receiverID, receiverIndex, &receiverPublic,
+				coefficients[0], blindings[0], randomness,
+			); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("legacy", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, _, err := cvEncryptReceiverLanesLegacyV2(
+				context, dealer, receiverID, receiverIndex, &receiverPublic,
+				coefficients[0], blindings[0], randomness,
+			); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

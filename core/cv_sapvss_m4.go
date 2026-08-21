@@ -572,6 +572,10 @@ func cvBuildAggregateMerkle(nonce []byte, shards [][]byte) ([]byte, [][][]byte) 
 
 type cvWireReader struct {
 	reader *bytes.Reader
+	// deferredPoints collects points decoded without the per-point subgroup
+	// check; decode units flush them through one batch subgroup check via
+	// assertDecodedSubgroup before returning trusted structures.
+	deferredPoints []bls12381.G1Affine
 }
 
 func newCVWireReader(wire []byte) *cvWireReader {

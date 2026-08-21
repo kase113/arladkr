@@ -302,6 +302,24 @@ func cvReadExactPointVector(r *cvWireReader, expected int, field string) ([]bls1
 	return points, nil
 }
 
+func cvReadExactPointVectorDeferred(r *cvWireReader, expected int, field string) ([]bls12381.G1Affine, error) {
+	if err := cvReadExactCount(r, expected, field); err != nil {
+		return nil, err
+	}
+	if err := cvRequireRemaining(r, expected, bls12381.SizeOfG1AffineCompressed, field); err != nil {
+		return nil, err
+	}
+	points := make([]bls12381.G1Affine, expected)
+	for i := range points {
+		point, err := r.pointDeferred()
+		if err != nil {
+			return nil, fmt.Errorf("decode CV-sAPVSS %s point %d: %w", field, i, err)
+		}
+		points[i] = point
+	}
+	return points, nil
+}
+
 func cvReadExactScalarVector(r *cvWireReader, expected int, field string) ([]fr.Element, error) {
 	if err := cvReadExactCount(r, expected, field); err != nil {
 		return nil, err

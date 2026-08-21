@@ -316,7 +316,7 @@ func cvDecodeCoreProofV2(wire []byte, coefficientCount int) (*cvCoreProofV2, err
 	if err != nil || !bytes.Equal(domain, []byte(cvCoreProofWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 core proof domain")
 	}
-	nonceCommitments, err := cvReadExactPointVector(r, coefficientCount, "V2 core nonce commitments")
+	nonceCommitments, err := cvReadExactPointVectorDeferred(r, coefficientCount, "V2 core nonce commitments")
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +330,9 @@ func cvDecodeCoreProofV2(wire []byte, coefficientCount int) (*cvCoreProofV2, err
 	}
 	proof := &cvCoreProofV2{
 		NonceCommitments: nonceCommitments, ScalarResponses: scalarResponses, BlindingResponses: blindingResponses,
+	}
+	if err := r.assertDecodedSubgroup(); err != nil {
+		return nil, fmt.Errorf("invalid CV V2 core proof point: %w", err)
 	}
 	canonical, err := cvCoreProofV2CanonicalBytes(proof, coefficientCount)
 	if err != nil || !bytes.Equal(canonical, wire) {

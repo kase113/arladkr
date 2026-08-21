@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"sync"
 	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -140,22 +141,51 @@ func (s *cvAPDBNetworkServiceV2) BuildLeafMaterialV2(ctx context.Context) (*cvBu
 		ready: make(chan struct{}, 1), allReady: make(chan struct{}, 1),
 	}
 	offerWires := make([][]byte, len(s.cfg.NewRoster))
-	for i, receiverID := range s.cfg.NewRoster {
+	buildErrs := make([]error, len(s.cfg.NewRoster))
+	buildReceiverLane := func(i int) {
+		receiverID := s.cfg.NewRoster[i]
 		index := i + 1
 		scalar := cvEvaluateScalarPolynomialV2(scalarCoefficients, index)
 		blinding := cvEvaluateScalarPolynomialV2(blindingCoefficients, index)
+		var err error
 		pending.offers[i], pending.witnesses[i], err = cvEncryptReceiverLanesV2(
 			s.cfg.LeafContext, s.cfg.LocalNode, receiverID, index,
 			&s.cfg.Receivers.encryptionPublicKeys[i], scalar, blinding,
 		)
 		if err != nil {
-			return nil, err
+			buildErrs[i] = err
+			return
 		}
 		offerWires[i], err = cvReceiverLaneOfferV2CanonicalBytesAfterValidation(
 			s.cfg.LeafContext, s.cfg.LocalNode, pending.offers[i],
 		)
-		if err != nil {
-			return nil, err
+		buildErrs[i] = err
+	}
+	if workers := cvLeafBuildWorkers(len(s.cfg.NewRoster)); workers > 1 {
+		jobs := make(chan int, len(s.cfg.NewRoster))
+		for i := range s.cfg.NewRoster {
+			jobs <- i
+		}
+		close(jobs)
+		var group sync.WaitGroup
+		group.Add(workers)
+		for worker := 0; worker < workers; worker++ {
+			go func() {
+				defer group.Done()
+				for i := range jobs {
+					buildReceiverLane(i)
+				}
+			}()
+		}
+		group.Wait()
+	} else {
+		for i := range s.cfg.NewRoster {
+			buildReceiverLane(i)
+		}
+	}
+	for i := range buildErrs {
+		if buildErrs[i] != nil {
+			return nil, buildErrs[i]
 		}
 	}
 	s.mu.Lock()

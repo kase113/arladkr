@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const cvDefaultACKSettleGraceV2 = 25 * time.Millisecond
+const cvDefaultACKSettleGraceV2 = 250 * time.Millisecond
 
 func cvACKSettleGraceV2() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("RLADKR_ACK_SETTLE_GRACE_MS"))
@@ -35,6 +35,26 @@ func cvLeafVerifyWorkers(jobs int) int {
 	// Inner MSM work is already single-threaded. Use all four vCPUs for the
 	// outer leaf batch while transport remains asynchronous.
 	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_LEAF_VERIFY_WORKERS"))); err == nil && configured > 0 {
+		workers = configured
+	}
+	if workers > 4 {
+		workers = 4
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
+
+func cvLeafBuildWorkers(jobs int) int {
+	if jobs <= 1 {
+		return jobs
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_LEAF_BUILD_WORKERS"))); err == nil && configured > 0 {
 		workers = configured
 	}
 	if workers > 4 {
