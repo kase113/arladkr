@@ -1844,3 +1844,8 @@ experiment record。说明有界 component verification 修改在 n=10 私网下
 collector 的 offset 去重/进度检查，再重跑共享 suite。本轮标记 `invalidated`。
 实例约运行 `04:01:10--04:13:00Z`，约 `2.0 instance-hours`；按 Spot、gp3、IPv4、SSM/S3
 保守记增量 **约 `$0.17`**，累计量化成本约 **`$6.56`**（Cost Explorer 为最终账单）。
+
+部署修复：`aws_collect` 新增 `artifact_mode=summary|full`。共享 suite 在每个协议完成后只同步收集
+bench/status summary，并以 best-effort 处理节点级缺失；两个协议都完成后才收集 diagnostics/stderr
+等 full artifacts。full 失败记录为 `full_artifact_collection=partial`，不再阻塞 Practical 启动，
+也不会把日志控制面失败误报为协议失败或阻止最终 destroy。

@@ -141,6 +141,12 @@ artifact marker。任一项目失败时整套比较标记 failed，但 finally �
 SHA-256 会写入 experiment record。AMI 只提供固定运行环境和热缓存，不能把 AMI 内二进制当作
 当前源码。只有 record 中存在本轮 `binary_digests`，共享 fleet 的结果才可用于代码回归或性能比较。
 
+共享 suite 的 artifact 收集分成两个等级。每个协议结束后同步执行 `summary` 收集，只拉取
+bench/status 并生成结果摘要；ARL 与 Practical 都完成后才 best-effort 执行 `full` 收集，补充
+systemd diagnostics 和日志。full 收集失败只写入 experiment record，不阻塞后续协议，也不阻止
+cleanup/destroy。100+ 节点建议进一步改为节点上传压缩 artifact 到固定的 S3 transient prefix，
+控制机只下载 manifest、summary 和失败节点样本。
+
 ### 4.2 AMI
 
 推荐使用统一的 arm64 Graviton AMI，并固定 AMI ID。基线实例类型为 `c7g.xlarge`：4 vCPU、
