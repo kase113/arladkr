@@ -1829,3 +1829,18 @@ AMI v4 中的旧二进制。因此本轮标记为 `invalidated`，不计入协�
 SSM/S3，保守记增量 **约 `$0.84`**；累计量化成本由约 `$5.55` 更新为约 **`$6.39`**。
 Terraform 最终报告 42 个资源全部销毁；AWS 标签复核显示 32 台实例均为 `terminated`，EBS volume、
 VPC、subnet 和 security group 均为空。
+
+## 2026-08-21 n=10 当前代码私网 smoke 与 artifact collector 阻塞
+
+`paper-n10-bounded-v4-use1f-20260821` 在同一 `us-east-1f/use1-az5` 启动 10 台
+`c7g.xlarge` Spot，使用 v4 AMI，但在 setup 后强制 staging 当前 `eefde30` checkout 的 ARM64
+二进制。ARL run `run-20260821-040328` 成功，`success_rate=1.0`，调整后延迟均值
+`5654.36 ms`，proposer slots `3054.55 ms`，recover shard `1316 ms`；binary digests 已写入
+experiment record。说明有界 component verification 修改在 n=10 私网下可以完成协议。
+
+本轮未形成 ARL/Practical 对比样本：ARL artifact 已收集，但 SSM artifact collector 在拉取
+`unit_diagnostics` 时重复请求相同 offset，阻塞了 suite 进入 Practical。为停止无效计费，已停止
+控制服务并手动 Terraform destroy；20 个资源全部销毁，10 台实例均 terminated。后续必须先修复
+collector 的 offset 去重/进度检查，再重跑共享 suite。本轮标记 `invalidated`。
+实例约运行 `04:01:10--04:13:00Z`，约 `2.0 instance-hours`；按 Spot、gp3、IPv4、SSM/S3
+保守记增量 **约 `$0.17`**，累计量化成本约 **`$6.56`**（Cost Explorer 为最终账单）。
