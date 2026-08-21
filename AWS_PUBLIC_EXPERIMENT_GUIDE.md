@@ -845,3 +845,9 @@ full artifacts were collected before the common fleet was destroyed.
 `a1a6eee0cb1639716d416ed893bac64258b1029bd6383f6a784f07c916f87935`。n=10/n=32 配置会在
 启动前校验这些 digest，并在预构建模式跳过源码同步、远程编译和成功节点的完整日志收集；失败
 节点仍收集诊断。v5 (`ami-0a31eb4903947c28a`) 仅作为历史基线，不应与 v6 混用。
+
+compact summary 收集采用单节点容错：若某节点在服务退出竞态中没有返回 `bench` 内容，收集器
+会在该节点目录写入 `collection_error.txt` 并标记为 `unavailable`，继续保存其他节点的结果。
+最终是否可用由 quorum、consensus hash、setup digest 和 timing metadata 一起判断；只有有效节点
+不足 quorum 或元数据不一致时，实验才会被判为不可用。这样单个 SSM/服务尾部异常不会丢弃整轮
+协议性能数据。
