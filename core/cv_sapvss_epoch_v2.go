@@ -267,6 +267,7 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVProposerRecoverySentBytes:             experimentMetrics.proposerRecoverySentBytes,
 		CVProposerRecoveryRecvBytes:             experimentMetrics.proposerRecoveryRecvBytes,
 		CVProposerRecoveryLatency:               experimentMetrics.proposerRecoveryLatency,
+		CVProposerCatalogVerificationLatency:    experimentMetrics.proposerCatalogVerificationLatency,
 		CVProposerCatalogScanCount:              experimentMetrics.proposerCatalogScanCount,
 		CVProposerRejectedComponentCount:        experimentMetrics.proposerRejectedCount,
 		CVValidatorComponentRecoverySentBytes:   experimentMetrics.validatorComponentRecoverySentBytes,

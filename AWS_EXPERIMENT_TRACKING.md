@@ -1870,3 +1870,42 @@ component decode/密码验证。`cvLeafVerifyWorkers` 在 4 vCPU 上使用 3 wor
 4-worker 和 batch verification；不能简单跳过完整 22-component 验证，否则会改变当前安全契约。
 Terraform 最终销毁 42 个资源；32 台实例均 terminated，EBS 和 VPC 为空。实例累计约 15
 instance-hours，本轮保守记增量 **约 `$0.86`**，累计量化成本约 **`$7.42`**，最终以 Cost Explorer 为准。
+
+## 2026-08-21 n=32 proposer catalog 两级流水线与本地基准
+
+针对上一轮 proposer slots `29708.48 ms`、其中网络恢复仅约 `1.2--1.6 s` 的结果，catalog 路径已改为
+两个有界阶段：第一阶段用独立 recovery worker pool 恢复 APDB payload 并校验 payload digest；第二阶段
+按 leaf worker budget 对已恢复 payload 解码并完成原有逐 component 密码验证。`c7g.xlarge` 的
+`GOMAXPROCS=4` 默认使用 4 个 leaf workers，不再固定预留一个 CPU；recovery 默认使用
+`2*GOMAXPROCS`，上限 16，也可分别用 `RLADKR_LEAF_VERIFY_WORKERS` 和
+`RLADKR_COMPONENT_RECOVERY_WORKERS` 覆盖。n=32 的 22 项 catalog 因而按 `4+4+4+4+4+2`
+执行验证，同时 recovery 可在当前验证批运行时填充后续缓冲区。
+
+eligibility coin 确定后，只有被抽中的本地 proposer 会启动一次后台 catalog prewarm；如果 component ref
+尚未全部到达，已有 update channel 会继续唤醒 builder。成功结果写入 service 级
+`verifiedComponentsV2`，后续 pool selection 和同 service 的 proposer 路径直接复用，第二次读取冻结
+catalog 不触发 APDB recovery 或重复验证。非 proposer 节点不会预热，避免把 22 项重验证放大到全部
+32 台。新输出 `mean_proposer_catalog_verify_ms` 记录各 CPU 验证批墙钟时间之和，和旧的
+`mean_proposer_component_recovery_ms` 分开；后者是各 component recovery latency 的累计值，不等于
+整个 recovery stage 的墙钟时间。
+
+本地隔离基准命令：
+
+```bash
+RLADKR_RUN_N32_LOCAL_BENCH=1 GOMAXPROCS=4 \
+  go test ./core -run '^$' \
+  -bench '^BenchmarkCVV2ProposerCatalogVerifyN32$' -benchtime=1x -count=1 -timeout=15m
+```
+
+AMD EPYC 7H12 主机上，22 个真实 n=32 APVSS payload 的 4-worker 验证为
+`14159401959 ns/op`，即 **`14159.40 ms`**，约为旧 AWS proposer slots 均值的 47.7%。该数字只包含
+payload decode/逐 component proof verification，不包含 APDB network recovery、PoolCert、coin、aggregate
+或 candidate relay，也不是 ARM `c7g.xlarge` 的替代数据。32 个本地进程的完整 TCP distributed opt-in
+测试在共享主机上因 CPU 超卖未在 420 秒外层限制内完成，node 0 在被终止前未输出结果，因此本轮没有
+可报告的本地完整 proposer slots 数字；该失败不能解释为协议阻塞或 AWS 性能回归。
+
+这里的 batch verification 是有界批执行，仍对 22 个 component 分别运行现有完整验证。没有实现随机
+线性组合、共享 pairing 或其他聚合密码学 verifier；在独立安全分析、错误定位策略和 adversarial 测试
+完成前，不能把本次优化表述为减少了密码学验证方程。新增回归覆盖 4-worker/recovery worker budget、
+eligible-only 一次性 prewarm、无效 payload 拒绝、catalog dealer 顺序及缓存命中。此次仅使用本地计算，
+没有启动 AWS 资源，新增 AWS 成本 `$0`，累计量化成本仍约 **`$7.42`**。

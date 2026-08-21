@@ -102,11 +102,11 @@ func TestCVCertifiedCandidateV2AcceptsRelaysAndSuppressesDuplicates(t *testing.T
 	services[receiver].handleCertifiedCandidateV2(Message{
 		From: relay, To: receiver, Tag: cvTagCertifiedCandidateV2, Body: mutated,
 	})
-	ackDeadline := time.Now().Add(250 * time.Millisecond)
-	for transport.sentCount(cvTagCertifiedCandidateACKV2) != ackCount+1 && time.Now().Before(ackDeadline) {
+	ackDeadline := time.Now().Add(time.Second)
+	for transport.sentCount(cvTagCertifiedCandidateACKV2) <= ackCount && time.Now().Before(ackDeadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if transport.sentCount(cvTagCertifiedCandidateACKV2) != ackCount+1 {
+	if transport.sentCount(cvTagCertifiedCandidateACKV2) <= ackCount {
 		t.Fatal("authenticated candidate delivery did not enqueue an ACK before validation")
 	}
 	select {

@@ -672,6 +672,32 @@ fab aws-collect \
 主延迟指标使用第 `n-f` 个成功节点完成时刻，即 quorum latency。全节点最大延迟作为次要指标。
 ARLADKR 默认报告应扣除 recovery service grace，同时保留 raw latency 字段供审计。
 
+ARL n=32 的 proposer catalog 固定验证 `n-f=22` 个 component。当前实现将 APDB recovery 和 CPU
+verification 分成两级流水线；4 vCPU 实例默认使用 4 个 leaf verification workers，recovery worker
+默认是 `2*GOMAXPROCS` 且最多 16。eligible proposer 在 eligibility coin 到达后预热 catalog，冻结后由
+同一 service 的 pool/selection 路径共享。正式实验同时检查：
+
+- `mean_proposer_component_recovery_ms`：逐 component recovery latency 累计值；
+- `mean_proposer_catalog_verify_ms`：有界验证批的墙钟时间之和；
+- `mean_proposer_catalog_scan_count`：n=32 正常 proposer 应为 22；
+- `proposer_slots_ms`：还包含 PoolCert、coin、aggregate 和 candidate relay，不能与前两项直接等同。
+
+若要覆盖 worker 数，必须在所有节点写入相同 env 并记录到 experiment manifest。论文主数据保持
+`RLADKR_LEAF_VERIFY_WORKERS=4`；只在单独的 ablation 轮比较 1/2/3/4 workers。所谓 batch 是 22 个
+独立完整验证的有界调度，不是聚合 proof verifier，不能据此改变安全声明。
+
+本地可运行隔离的 22-component CPU 基准：
+
+```bash
+RLADKR_RUN_N32_LOCAL_BENCH=1 GOMAXPROCS=4 \
+  go test ./core -run '^$' \
+  -bench '^BenchmarkCVV2ProposerCatalogVerifyN32$' -benchtime=1x -count=1 -timeout=15m
+```
+
+完整 32 进程测试由 `TestBenchMultiProcessN32PrivateStyle` 提供且同样需要上述 opt-in env，但共享主机
+必须有足够 CPU/内存。资源不足导致的外层 timeout 不应记录为协议性能点；正式结论仍以 32 台独立
+`c7g.xlarge`、私网、同 AZ 的成功轮为准。
+
 失败轮不能只删除失败节点后计算均值。应保存完整日志，标记失败原因，并重新执行整轮。
 
 ## 12. RTT、系统与成本元数据

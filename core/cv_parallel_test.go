@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,9 +31,15 @@ func TestCVCryptoWorkerBudget(t *testing.T) {
 }
 
 func TestCVLeafVerifyWorkerBudget(t *testing.T) {
-	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "3")
-	if got := cvLeafVerifyWorkers(10); got != 3 {
-		t.Fatalf("configured leaf verification workers=%d, want 3", got)
+	previous := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previous)
+	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "")
+	if got := cvLeafVerifyWorkers(22); got != 4 {
+		t.Fatalf("four-vCPU leaf verification workers=%d, want 4", got)
+	}
+	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "4")
+	if got := cvLeafVerifyWorkers(10); got != 4 {
+		t.Fatalf("configured leaf verification workers=%d, want 4", got)
 	}
 	if got := cvLeafVerifyWorkers(2); got != 2 {
 		t.Fatalf("job-limited leaf verification workers=%d, want 2", got)
@@ -40,6 +47,20 @@ func TestCVLeafVerifyWorkerBudget(t *testing.T) {
 	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "99")
 	if got := cvLeafVerifyWorkers(10); got != 4 {
 		t.Fatalf("capped leaf verification workers=%d, want 4", got)
+	}
+}
+
+func TestCVComponentRecoveryWorkerBudget(t *testing.T) {
+	t.Setenv("RLADKR_COMPONENT_RECOVERY_WORKERS", "8")
+	if got := cvComponentRecoveryWorkers(22); got != 8 {
+		t.Fatalf("configured component recovery workers=%d, want 8", got)
+	}
+	if got := cvComponentRecoveryWorkers(3); got != 3 {
+		t.Fatalf("job-limited component recovery workers=%d, want 3", got)
+	}
+	t.Setenv("RLADKR_COMPONENT_RECOVERY_WORKERS", "99")
+	if got := cvComponentRecoveryWorkers(22); got != 16 {
+		t.Fatalf("capped component recovery workers=%d, want 16", got)
 	}
 }
 

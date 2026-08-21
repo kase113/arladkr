@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
+	"time"
 )
 
 type cvComponentVerificationResultV2 struct {
@@ -136,26 +138,12 @@ func (s *cvAPDBNetworkServiceV2) AwaitVerifiedComponentCatalogV2(
 		if len(candidates) > needed {
 			candidates = candidates[:needed]
 		}
-		results := make(chan cvComponentVerificationResultV2, len(candidates))
 		s.experimentMu.Lock()
 		s.experimentMetrics.proposerCatalogScanCount += len(candidates)
 		s.experimentMu.Unlock()
-		jobs := make(chan cvComponentRefV2, len(candidates))
-		workers := cvLeafVerifyWorkers(len(candidates))
-		for range workers {
-			go func() {
-				for ref := range jobs {
-					results <- s.recoverAndVerifyComponentV2(ctx, ref)
-				}
-			}()
-		}
-		for _, ref := range candidates {
-			jobs <- ref
-		}
-		close(jobs)
+		results := s.recoverAndVerifyComponentBatchV2(ctx, candidates)
 		var recoveryErr error
-		for range candidates {
-			result := <-results
+		for _, result := range results {
 			if result.recoverErr != nil {
 				if recoveryErr == nil {
 					recoveryErr = result.recoverErr
@@ -206,7 +194,7 @@ func (s *cvAPDBNetworkServiceV2) AwaitVerifiedComponentCatalogV2(
 	}
 }
 
-func (s *cvAPDBNetworkServiceV2) recoverAndVerifyComponentV2(
+func (s *cvAPDBNetworkServiceV2) recoverComponentPayloadV2(
 	ctx context.Context, ref cvComponentRefV2,
 ) cvComponentVerificationResultV2 {
 	result := cvComponentVerificationResultV2{ref: cloneComponentRefV2(ref)}
@@ -219,6 +207,18 @@ func (s *cvAPDBNetworkServiceV2) recoverAndVerifyComponentV2(
 		result.verifyErr = fmt.Errorf("CV V2 component %d payload digest mismatch", ref.Header.DealerID)
 		return result
 	}
+	result.payload = append([]byte(nil), payload...)
+	return result
+}
+
+func (s *cvAPDBNetworkServiceV2) verifyRecoveredComponentV2(
+	result cvComponentVerificationResultV2,
+) cvComponentVerificationResultV2 {
+	if result.recoverErr != nil || result.verifyErr != nil {
+		return result
+	}
+	ref := result.ref
+	payload := result.payload
 	leaf, err := cvDecodeLeafV2(payload, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators)
 	if err != nil {
 		result.verifyErr = fmt.Errorf("invalid CV V2 component %d payload: %w", ref.Header.DealerID, err)
@@ -228,10 +228,81 @@ func (s *cvAPDBNetworkServiceV2) recoverAndVerifyComponentV2(
 		result.verifyErr = fmt.Errorf("CV V2 component dealer mismatch: leaf=%d ref=%d", leaf.DealerID, ref.Header.DealerID)
 		return result
 	}
-	result.payload = append([]byte(nil), payload...)
 	result.leafDigest = append([]byte(nil), leaf.Digest...)
 	result.leaf = leaf
 	return result
+}
+
+func (s *cvAPDBNetworkServiceV2) verifyRecoveredComponentBatchV2(
+	items []cvComponentVerificationResultV2,
+) []cvComponentVerificationResultV2 {
+	if len(items) == 0 {
+		return nil
+	}
+	started := time.Now()
+	verified := make([]cvComponentVerificationResultV2, len(items))
+	var verifyWG sync.WaitGroup
+	verifyWG.Add(len(items))
+	for index := range items {
+		index := index
+		go func() {
+			defer verifyWG.Done()
+			verified[index] = s.verifyRecoveredComponentV2(items[index])
+		}()
+	}
+	verifyWG.Wait()
+	s.experimentMu.Lock()
+	s.experimentMetrics.proposerCatalogVerificationLatency += time.Since(started)
+	s.experimentMu.Unlock()
+	return verified
+}
+
+// recoverAndVerifyComponentBatchV2 keeps network recovery ahead of the
+// CPU-bound verifier. Recovery uses a wider I/O pool; recovered payloads are
+// verified in bounded batches so the next batch can arrive while leaf
+// verifiers consume the current one.
+func (s *cvAPDBNetworkServiceV2) recoverAndVerifyComponentBatchV2(
+	ctx context.Context, refs []cvComponentRefV2,
+) []cvComponentVerificationResultV2 {
+	if len(refs) == 0 {
+		return nil
+	}
+	jobs := make(chan cvComponentRefV2, len(refs))
+	recovered := make(chan cvComponentVerificationResultV2, len(refs))
+	var recoveryWG sync.WaitGroup
+	recoveryWorkers := cvComponentRecoveryWorkers(len(refs))
+	recoveryWG.Add(recoveryWorkers)
+	for range recoveryWorkers {
+		go func() {
+			defer recoveryWG.Done()
+			for ref := range jobs {
+				recovered <- s.recoverComponentPayloadV2(ctx, ref)
+			}
+		}()
+	}
+	for _, ref := range refs {
+		jobs <- ref
+	}
+	close(jobs)
+	go func() {
+		recoveryWG.Wait()
+		close(recovered)
+	}()
+
+	results := make([]cvComponentVerificationResultV2, 0, len(refs))
+	batchSize := cvLeafVerifyWorkers(len(refs))
+	batch := make([]cvComponentVerificationResultV2, 0, batchSize)
+	for result := range recovered {
+		batch = append(batch, result)
+		if len(batch) == batchSize {
+			results = append(results, s.verifyRecoveredComponentBatchV2(batch)...)
+			batch = make([]cvComponentVerificationResultV2, 0, batchSize)
+		}
+	}
+	if len(batch) != 0 {
+		results = append(results, s.verifyRecoveredComponentBatchV2(batch)...)
+	}
+	return results
 }
 
 func (s *cvAPDBNetworkServiceV2) verifiedComponentLeafV2(

@@ -97,6 +97,60 @@ func TestCVSendRecoveryRequestsWithRetryV2StopsOnContextCancellation(t *testing.
 	}
 }
 
+func TestCVVerifiedCatalogPrewarmStartsOnlyOnceForEligibleProposer(t *testing.T) {
+	_, public := cvAgreementObjectV2Fixture(t)
+	proposers, _, err := cvDeriveEligibilitySamplesV2(
+		public.OldCommittee, public.EligibilityCoin.Value,
+		public.Params.proposerSampleSize, public.Params.validatorSampleSize,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligible := proposers[0]
+	nonEligible := -1
+	for _, member := range public.OldCommittee {
+		if !cvContainsID(proposers, member) {
+			nonEligible = member
+			break
+		}
+	}
+	if nonEligible < 0 {
+		t.Fatal("test fixture did not include a non-proposer")
+	}
+
+	newService := func(localNode int) *cvAPDBNetworkServiceV2 {
+		return &cvAPDBNetworkServiceV2{
+			ctx: context.Background(),
+			cfg: cvAPDBNetworkServiceConfigV2{
+				SID: public.SID, Epoch: public.Epoch, LocalNode: localNode,
+				OldRoster: public.OldCommittee, Params: public.Params,
+			},
+			coinSigner: public.CoinSigner,
+		}
+	}
+	eligibleService := newService(eligible)
+	if err := eligibleService.setEligibilityCoin(public.EligibilityCoin); err != nil {
+		t.Fatal(err)
+	}
+	if !eligibleService.verifiedCatalogPrewarm {
+		t.Fatal("eligible proposer did not start verified catalog prewarm")
+	}
+	if err := eligibleService.setEligibilityCoin(public.EligibilityCoin); err != nil {
+		t.Fatal(err)
+	}
+	if !eligibleService.verifiedCatalogPrewarm {
+		t.Fatal("eligible proposer lost verified catalog prewarm state")
+	}
+
+	nonEligibleService := newService(nonEligible)
+	if err := nonEligibleService.setEligibilityCoin(public.EligibilityCoin); err != nil {
+		t.Fatal(err)
+	}
+	if nonEligibleService.verifiedCatalogPrewarm {
+		t.Fatal("non-proposer started verified catalog prewarm")
+	}
+}
+
 func TestCVAPDBNetworkServiceV2BuildsVCertAfterRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real APVSS aggregate validation network test in short mode")

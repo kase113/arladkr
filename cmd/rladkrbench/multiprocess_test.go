@@ -94,7 +94,8 @@ func TestBenchMultiProcessFourNodePrivateStyleSubsets(t *testing.T) {
 		}
 		for _, field := range []string{
 			"mean_proposer_component_recovery_sent_bytes", "mean_proposer_component_recovery_recv_bytes",
-			"mean_proposer_component_recovery_ms", "mean_proposer_catalog_scan_count",
+			"mean_proposer_component_recovery_ms", "mean_proposer_catalog_verify_ms",
+			"mean_proposer_catalog_scan_count",
 			"mean_validator_component_recovery_sent_bytes", "mean_validator_component_recovery_recv_bytes",
 			"mean_validator_component_recovery_ms",
 			"mean_validator_aggregate_recovery_sent_bytes", "mean_validator_aggregate_recovery_recv_bytes",
@@ -122,6 +123,45 @@ func TestBenchMultiProcessFourNodePrivateStyleSubsets(t *testing.T) {
 			t.Fatalf("four-node V2 benchmark aggregate field %s=%f, want > 0", field, total)
 		}
 	}
+}
+
+func TestBenchMultiProcessN32PrivateStyle(t *testing.T) {
+	if os.Getenv("RLADKR_RUN_N32_LOCAL_BENCH") != "1" {
+		t.Skip("set RLADKR_RUN_N32_LOCAL_BENCH=1 to run the 32-process private-style benchmark")
+	}
+	localNodeSets := make([][]int, 32)
+	for node := range localNodeSets {
+		localNodeSets[node] = []int{node}
+	}
+	results := runBenchProcessesDetailedWithTopology(t, benchProcessTopology{
+		n: 32, f: 10, kappa: 11, timeout: 5 * time.Minute, localNodeSets: localNodeSets,
+	})
+	var proposerSlotsTotal float64
+	var catalogVerifyTotal float64
+	verifiedProposers := 0
+	for node, result := range results {
+		line := extractBenchLine(t, result.stdout)
+		if !strings.Contains(line, "success_runs=1") {
+			t.Fatalf("n32 node %d did not complete: %s", node, line)
+		}
+		proposerSlotsTotal += benchNumericField(t, line, "proposer_slots_ms")
+		catalogVerify := benchNumericField(t, line, "mean_proposer_catalog_verify_ms")
+		catalogVerifyTotal += catalogVerify
+		if catalogVerify > 0 {
+			verifiedProposers++
+			t.Logf("n32 proposer node=%d slots_ms=%.2f catalog_verify_ms=%.2f recovery_ms=%.2f",
+				node,
+				benchNumericField(t, line, "proposer_slots_ms"),
+				catalogVerify,
+				benchNumericField(t, line, "mean_proposer_component_recovery_ms"),
+			)
+		}
+	}
+	if verifiedProposers == 0 || catalogVerifyTotal <= 0 {
+		t.Fatal("n32 run completed without proposer catalog verification metrics")
+	}
+	t.Logf("n32 mean proposer_slots_ms=%.2f verified_proposers=%d mean_catalog_verify_ms=%.2f",
+		proposerSlotsTotal/float64(len(results)), verifiedProposers, catalogVerifyTotal/float64(verifiedProposers))
 }
 
 func benchNumericField(t *testing.T, line, name string) float64 {
@@ -165,9 +205,15 @@ type benchProcessTopology struct {
 
 func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopology) []benchProcResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), topo.timeout+2*time.Minute)
 	defer cancel()
 	workdir := filepath.Dir(filepath.Dir(mustGetwd(t)))
+	benchBinary := filepath.Join(t.TempDir(), "rladkrbench")
+	build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", benchBinary, "./cmd/rladkrbench")
+	build.Dir = workdir
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build multiprocess benchmark binary: %v\n%s", err, output)
+	}
 	basePort := uniqueBasePort(t)
 	addrParts := make([]string, 0, topo.n)
 	mvbaAddrParts := make([]string, 0, topo.n)
@@ -199,7 +245,6 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 		t.Fatalf("generate multiprocess V2 keys: %v", err)
 	}
 	args := []string{
-		"run", "./cmd/rladkrbench",
 		"-n", fmt.Sprintf("%d", topo.n),
 		"-f", fmt.Sprintf("%d", topo.f),
 		"-kappa", fmt.Sprintf("%d", topo.kappa),
@@ -215,7 +260,7 @@ func runBenchProcessesDetailedWithTopology(t *testing.T, topo benchProcessTopolo
 	results := make([]benchProcResult, len(topo.localNodeSets))
 	chans := make([]chan benchProcResult, len(topo.localNodeSets))
 	for idx, localSet := range topo.localNodeSets {
-		cmd := exec.CommandContext(ctx, "go", args...)
+		cmd := exec.CommandContext(ctx, benchBinary, args...)
 		cmd.Dir = workdir
 		localReceivers := make([]int, len(localSet))
 		for i, nodeID := range localSet {

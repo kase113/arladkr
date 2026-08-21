@@ -434,6 +434,19 @@ func TestCVComponentNetworkV2VerifiedCatalogSkipsInvalidPayload(t *testing.T) {
 			proposerCatalog = refs
 		}
 	}
+	recoveriesBeforeCachedCatalog := transport.sentCount(cvTagAPDBRecoverGetV2)
+	cachedCatalog, err := services[cfg.OldCommittee[0]].AwaitVerifiedComponentCatalogV2(ctx)
+	if err != nil || len(cachedCatalog) != params.poolSize {
+		t.Fatalf("read cached verified catalog: refs=%d err=%v", len(cachedCatalog), err)
+	}
+	if recoveriesAfter := transport.sentCount(cvTagAPDBRecoverGetV2); recoveriesAfter != recoveriesBeforeCachedCatalog {
+		t.Fatalf("cached verified catalog triggered recovery: before=%d after=%d", recoveriesBeforeCachedCatalog, recoveriesAfter)
+	}
+	for i := range cachedCatalog {
+		if !equalComponentRefsV2(cachedCatalog[i], proposerCatalog[i]) {
+			t.Fatalf("cached verified catalog changed component %d", i)
+		}
+	}
 	pool, err := cvBuildPoolV2(contextDigest, cfg.OldCommittee[0], proposerCatalog, params)
 	if err != nil {
 		t.Fatal(err)

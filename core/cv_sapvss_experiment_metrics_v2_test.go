@@ -10,6 +10,9 @@ func TestCVServiceExperimentMetricsSeparateRecoveryPurposes(t *testing.T) {
 	service.recordRecoveryBytesV2(cvRecoveryProposerCatalogV2, true, 11)
 	service.recordRecoveryBytesV2(cvRecoveryProposerCatalogV2, false, 12)
 	service.recordRecoveryLatencyV2(cvRecoveryProposerCatalogV2, 13*time.Millisecond)
+	service.experimentMu.Lock()
+	service.experimentMetrics.proposerCatalogVerificationLatency = 14 * time.Millisecond
+	service.experimentMu.Unlock()
 	service.recordRecoveryBytesV2(cvRecoveryValidatorComponentV2, true, 21)
 	service.recordRecoveryBytesV2(cvRecoveryValidatorComponentV2, false, 22)
 	service.recordRecoveryLatencyV2(cvRecoveryValidatorComponentV2, 23*time.Millisecond)
@@ -27,7 +30,8 @@ func TestCVServiceExperimentMetricsSeparateRecoveryPurposes(t *testing.T) {
 
 	metrics := service.experimentMetricsV2()
 	if metrics.proposerRecoverySentBytes != 11 || metrics.proposerRecoveryRecvBytes != 12 ||
-		metrics.proposerRecoveryLatency != 13*time.Millisecond {
+		metrics.proposerRecoveryLatency != 13*time.Millisecond ||
+		metrics.proposerCatalogVerificationLatency != 14*time.Millisecond {
 		t.Fatalf("proposer recovery metrics=%+v", metrics)
 	}
 	if metrics.validatorComponentRecoverySentBytes != 21 || metrics.validatorComponentRecoveryRecvBytes != 22 ||

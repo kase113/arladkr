@@ -32,17 +32,33 @@ func cvLeafVerifyWorkers(jobs int) int {
 		return jobs
 	}
 	workers := runtime.GOMAXPROCS(0)
-	// Leaf verification is CPU-heavy. Keep one scheduler slot for transport,
-	// MVBA, and timers, and avoid multiplying this outer parallelism by the
-	// inner MSM worker count.
-	if workers > 1 {
-		workers--
-	}
+	// Inner MSM work is already single-threaded. Use all four vCPUs for the
+	// outer leaf batch while transport remains asynchronous.
 	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_LEAF_VERIFY_WORKERS"))); err == nil && configured > 0 {
 		workers = configured
 	}
 	if workers > 4 {
 		workers = 4
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
+
+func cvComponentRecoveryWorkers(jobs int) int {
+	if jobs <= 1 {
+		return jobs
+	}
+	workers := runtime.GOMAXPROCS(0) * 2
+	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_COMPONENT_RECOVERY_WORKERS"))); err == nil && configured > 0 {
+		workers = configured
+	}
+	if workers > 16 {
+		workers = 16
 	}
 	if workers > jobs {
 		workers = jobs

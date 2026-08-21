@@ -92,6 +92,7 @@ type cvServiceExperimentMetricsV2 struct {
 	proposerRecoverySentBytes           uint64
 	proposerRecoveryRecvBytes           uint64
 	proposerRecoveryLatency             time.Duration
+	proposerCatalogVerificationLatency  time.Duration
 	proposerCatalogScanCount            int
 	proposerRejectedCount               int
 	validatorComponentRecoverySentBytes uint64
@@ -234,6 +235,7 @@ type cvAPDBNetworkServiceV2 struct {
 	verifiedComponentCalls map[int]*cvVerifiedComponentCallV2
 	rejectedComponentsV2   map[int]struct{}
 	verifiedCatalogV2      []cvComponentRefV2
+	verifiedCatalogPrewarm bool
 	localComponentRefV2    []byte
 	componentRefUpdatesV2  chan struct{}
 	certifiedCandidatesV2  map[string][]byte
@@ -549,14 +551,23 @@ func (s *cvAPDBNetworkServiceV2) setEligibilityCoin(output *cvCoinOutputV2) erro
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.eligibilityValue) != 0 && !bytes.Equal(s.eligibilityValue, output.Value) {
+		s.mu.Unlock()
 		return fmt.Errorf("conflicting CV V2 network eligibility coin")
 	}
 	s.eligibilityValue = append([]byte(nil), output.Value...)
 	s.eligibilityCoin = coin
 	s.eligibleProposers = nodeSet(proposers)
 	s.validatorSample = append([]int(nil), validators...)
+	prewarm := false
+	if _, eligible := s.eligibleProposers[s.cfg.LocalNode]; eligible && !s.verifiedCatalogPrewarm {
+		s.verifiedCatalogPrewarm = true
+		prewarm = true
+	}
+	s.mu.Unlock()
+	if prewarm {
+		go func() { _, _ = s.AwaitVerifiedComponentCatalogV2(s.ctx) }()
+	}
 	return nil
 }
 

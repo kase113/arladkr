@@ -3,6 +3,9 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -233,4 +236,100 @@ func BenchmarkCVAVerVerified(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N32_LOCAL_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N32_LOCAL_BENCH=1 to build and verify the n=32 catalog fixture")
+	}
+	oldRoster := make([]int, 32)
+	newRoster := make([]int, 32)
+	for i := range oldRoster {
+		oldRoster[i] = i
+		newRoster[i] = 32 + i
+	}
+	cfg := Config{
+		SID: "cv-v2-n32-catalog-benchmark", Epoch: 1,
+		OldCommittee: oldRoster, NewCommittee: newRoster,
+		OldFaults: 10, NewFaults: 10,
+		CVProposerSampleSize: 3, CVValidatorSampleSize: 3,
+	}
+	params, err := cvDeriveV2Params(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if params.poolSize != 22 {
+		b.Fatalf("n=32 pool size=%d, want 22", params.poolSize)
+	}
+
+	keyRoot := b.TempDir()
+	receiverPublic := filepath.Join(keyRoot, "receiver-public")
+	receiverSecret := filepath.Join(keyRoot, "receiver-secret")
+	if err := cvGenerateReceiverRegistryV2(receiverPublic, receiverSecret, cfg.SID, uint64(cfg.Epoch), newRoster); err != nil {
+		b.Fatal(err)
+	}
+	receivers, err := cvLoadReceiverRegistryV2(
+		receiverPublic, receiverSecret, cfg.SID, uint64(cfg.Epoch), newRoster, newRoster,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	validatorPublic := filepath.Join(keyRoot, "validator-public")
+	validatorSecret := filepath.Join(keyRoot, "validator-secret")
+	if err := cvGenerateValidatorRegistryV2(validatorPublic, validatorSecret, cfg.SID, uint64(cfg.Epoch), oldRoster); err != nil {
+		b.Fatal(err)
+	}
+	validators, err := cvLoadValidatorRegistryV2(
+		validatorPublic, validatorSecret, cfg.SID, uint64(cfg.Epoch), oldRoster, oldRoster,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	leafContext := &cvLeafContextV2{
+		SID: cfg.SID, Epoch: uint64(cfg.Epoch),
+		OldRoster: append([]int(nil), oldRoster...), NewRoster: append([]int(nil), newRoster...),
+		ReceiverRegistryDigest: append([]byte(nil), receivers.registryDigest...),
+		SharingDegree:          params.newShareDegree,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: params.componentCount},
+	}
+	components := make([]cvComponentVerificationResultV2, params.poolSize)
+	for i := range components {
+		leaf, buildErr := cvBuildReferenceAllACKLeafV2(oldRoster[i], leafContext, receivers, validators)
+		if buildErr != nil {
+			b.Fatalf("build component %d: %v", i, buildErr)
+		}
+		payload, encodeErr := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
+		if encodeErr != nil {
+			b.Fatalf("encode component %d: %v", i, encodeErr)
+		}
+		components[i] = cvComponentVerificationResultV2{
+			ref:     cvComponentRefV2{Header: cvComponentHeaderV2{DealerID: oldRoster[i]}},
+			payload: payload,
+		}
+	}
+	service := &cvAPDBNetworkServiceV2{cfg: cvAPDBNetworkServiceConfigV2{
+		LeafContext: leafContext, Receivers: receivers, Validators: validators,
+	}}
+	previousProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previousProcs)
+	b.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "4")
+	b.ReportAllocs()
+	b.ReportMetric(float64(len(components)), "components/op")
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		verified := make([]cvComponentVerificationResultV2, 0, len(components))
+		workers := cvLeafVerifyWorkers(len(components))
+		for start := 0; start < len(components); start += workers {
+			end := start + workers
+			if end > len(components) {
+				end = len(components)
+			}
+			verified = append(verified, service.verifyRecoveredComponentBatchV2(components[start:end])...)
+		}
+		for i := range verified {
+			if verified[i].verifyErr != nil || verified[i].leaf == nil {
+				b.Fatalf("verify component %d: %v", i, verified[i].verifyErr)
+			}
+		}
+	}
 }

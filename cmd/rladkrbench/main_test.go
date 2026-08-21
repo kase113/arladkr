@@ -195,7 +195,8 @@ func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
 			cvPoolCertificateBytes: 306, cvValidationCertificateBytes: 307, cvARCCertificateBytes: 308,
 			cvDecisionCertificateBytes: 309, cvHandoffWireBytes: 310,
 			cvProposerRecoverySentBytes: 401, cvProposerRecoveryRecvBytes: 402,
-			cvProposerRecoveryMs: 4.5, cvProposerCatalogScanCount: 3, cvProposerRejectedCount: 1,
+			cvProposerRecoveryMs: 4.5, cvProposerCatalogVerificationMs: 4.75,
+			cvProposerCatalogScanCount: 3, cvProposerRejectedCount: 1,
 			cvValidatorComponentRecoverySentBytes: 501, cvValidatorComponentRecoveryRecvBytes: 502,
 			cvValidatorComponentRecoveryMs: 5.5, cvValidatorAggregateRecoverySentBytes: 601,
 			cvValidatorAggregateRecoveryRecvBytes: 602, cvValidatorAggregateRecoveryMs: 6.5,
@@ -223,6 +224,7 @@ func TestFormatBenchResultIncludesCVPhaseLabels(t *testing.T) {
 	})
 	for _, token := range []string{
 		"mean_cv_component_count=2", "mean_cv_arc_holder_count=3",
+		"mean_proposer_catalog_verify_ms=4.75",
 		"mean_cv_recovered_shard_count=2", "mean_cv_verified_receipt_count=2",
 		"leaf_build_ms=7", "component_disperse_ms=1", "candidate_formation_ms=2",
 		"eligibility_coin_ms=2.50", "proposer_slots_ms=3.50", "mean_coin_fanout_ms=4.50", "aggregate_disperse_ms=3",

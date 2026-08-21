@@ -131,6 +131,7 @@ type EpochResult struct {
 	CVProposerRecoverySentBytes             uint64
 	CVProposerRecoveryRecvBytes             uint64
 	CVProposerRecoveryLatency               time.Duration
+	CVProposerCatalogVerificationLatency    time.Duration
 	CVProposerCatalogScanCount              int
 	CVProposerRejectedComponentCount        int
 	CVValidatorComponentRecoverySentBytes   uint64
