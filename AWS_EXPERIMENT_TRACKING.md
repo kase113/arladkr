@@ -2085,3 +2085,26 @@ ARLADKR。setup、10/10 launch、10/10 ready、quorum `10/7` 均成功，run 为
 该等待修复已在本地实现并通过 56 个部署测试；本轮 AWS 代码仍未包含该最新等待修复，因此不
 重复启动 fleet。20 个 Terraform 资源已自动销毁，新增成本保守约 `$0.14`，累计量化成本由
 约 `$8.81` 更新为约 **`$8.95`**。
+
+## 2026-08-21 v6 n=10 ARL 私网 compact-fix 重跑（成功）
+
+使用同一 v6 AMI `ami-0da946b587756eba5` 在 `us-east-1f/use1-az5` 启动 10 台
+`c7g.xlarge` Spot，仅运行 ARLADKR，实验组为
+`paper-arl-v6-finalcollect-n10-use1f-2`，run 为 `run-20260821-145915`。10/10 节点通过
+binary digest、cleanup barrier、launch 和 ready 检查，quorum 为 `10/7`，协议状态为
+`success=10/7, failed=0, running=0`；setup bundle digest
+`9c10f6aa1c53c7ae134577f8bee3b175227c9ac0296083bf59767675e704cfaf` 在所有节点一致。
+
+新的逐节点 fallback 收集器成功保留了 10/10 节点的原始 bench 结果，尽管 compact 命令仍记录
+`missing bench,status` 的诊断信息；这不再使整轮失效，但说明后续应把 compact 命令的文件等待
+和 fallback 状态显式纳入 schema，避免把“fallback 成功”显示成收集错误。10 个节点的
+`mean_latency_ms` 平均为 **`3419.07 ms`**（`3042.84--3897.38 ms`），
+`proposer_slots_ms` 平均为 **`1722.35 ms`**（`1611.24--1784.74 ms`）。
+`mean_recover_service_grace_ms` 平均约 `1000.32 ms`；catalog verify 和 component recovery
+分别平均 `217.55 ms`、`168.06 ms`，仅在实际 proposer 节点非零，不能按节点简单相加。
+本轮没有 PracticalADKR，不能用于两协议比较；n=10 仍是 smoke sampling，不是正式安全参数点。
+
+实验记录最终为 `status=success`、`cleanup=destroyed`；Terraform 20/20 资源已销毁，AWS
+复核没有残留运行/停止实例。按本轮 10 台 Spot 的实际生命周期、gp3、公网 IPv4、SSM/S3 和少量
+控制流量保守记约 **`$0.18`**，量化累计成本由约 `$8.95` 更新为约 **`$9.13`**；AMI
+snapshot 持续存储费仍单列，最终金额以 Cost Explorer 为准。
