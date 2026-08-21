@@ -2007,3 +2007,26 @@ request 残留，两个 state 的 resource count 都为 0。10 台 suite 实例�
 instance-hours，bake 约 `0.19` instance-hours；按 `us-east-1f` Spot `$0.052/h`，加 gp3、公网
 IPv4、SSM/S3 并保守上浮，本轮记约 **`$0.30`**。累计量化成本由 `$8.07` 更新为约
 **`$8.37`**，最终仍以 Cost Explorer 为准。
+
+## 2026-08-21 proposer component 持续流式验证
+
+n=32 的 proposer catalog 路径已从“recovery 结果凑满 4 个后同步验证、完成后再处理下一批”改为
+真正的两级有界流水线。APDB recovery worker 持续产出 component，完成一个即送入有界 channel；
+4 个常驻 leaf verifier worker 持续消费，不再存在 4-component wave 之间的同步屏障。流水线内部仍
+按输入索引恢复确定性结果顺序，worker 数继续由现有有界配置控制，默认 4 vCPU 节点使用 4 个
+verifier。旧 batch helper 已删除，避免后续调用重新引入同步等待。
+
+`mean_proposer_catalog_verify_ms` 的语义相应调整为首个验证开始到最后一个验证结束的墙钟窗口。该窗口
+会和 `mean_proposer_component_recovery_ms` 重叠，两项不能再相加推导 `proposer_slots_ms`；正式 AWS
+结果应以 proposer slots 的端到端变化为主，两个分项只用于定位流水线瓶颈。
+
+新增确定性测试验证：(1) 第一个 component 恢复后、其余 recovery 仍阻塞时 verifier 已开始工作；
+(2) 12 个输入下最大 verifier 并发严格为 4；(3) 输出顺序保持稳定。`go test -race ./core -run
+'TestCVComponentPipeline|TestCVVerifiedCatalogPrewarm' -count=1` 与 `go test -short ./core -count=1`
+均通过，后者耗时 `69.481 s`。
+
+AMD EPYC 7H12、`GOMAXPROCS=4`、22-component、4-worker 单次本地 catalog benchmark 为
+**`3643.17 ms/op`**，相对上一版同步 wave 的 `6686.03 ms/op` 再降低约 **`45.5%`**，相对最初
+`14159.40 ms/op` 累计降低约 **`74.3%`**。该基准使用已恢复的 payload，主要量化固定 verifier pool
+消除 wave 尾部等待的收益；APDB recovery 与 verification 的真实重叠及 proposer slots 改善仍须在
+下一轮 AWS n=32 私网实验验证。本轮没有启动 AWS 资源，新增 AWS 成本 `$0`。

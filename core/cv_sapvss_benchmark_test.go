@@ -315,17 +315,19 @@ func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
 	b.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "4")
 	b.ReportAllocs()
 	b.ReportMetric(float64(len(components)), "components/op")
+	refs := make([]cvComponentRefV2, len(components))
+	for index := range components {
+		refs[index] = components[index].ref
+	}
 	b.ResetTimer()
 	for iteration := 0; iteration < b.N; iteration++ {
-		verified := make([]cvComponentVerificationResultV2, 0, len(components))
-		workers := cvLeafVerifyWorkers(len(components))
-		for start := 0; start < len(components); start += workers {
-			end := start + workers
-			if end > len(components) {
-				end = len(components)
-			}
-			verified = append(verified, service.verifyRecoveredComponentBatchV2(components[start:end])...)
-		}
+		verified, _ := cvRunComponentPipelineV2(
+			refs, 1, cvLeafVerifyWorkers(len(components)),
+			func(ref cvComponentRefV2) cvComponentVerificationResultV2 {
+				return components[ref.Header.DealerID]
+			},
+			service.verifyRecoveredComponentV2,
+		)
 		for i := range verified {
 			if verified[i].verifyErr != nil || verified[i].leaf == nil {
 				b.Fatalf("verify component %d: %v", i, verified[i].verifyErr)

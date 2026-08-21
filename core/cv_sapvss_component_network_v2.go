@@ -18,6 +18,16 @@ type cvComponentVerificationResultV2 struct {
 	verifyErr  error
 }
 
+type cvComponentPipelineJobV2 struct {
+	index int
+	ref   cvComponentRefV2
+}
+
+type cvComponentPipelineResultV2 struct {
+	index  int
+	result cvComponentVerificationResultV2
+}
+
 func (s *cvAPDBNetworkServiceV2) PublishComponentV2(ctx context.Context, leaf *cvLeafV2) (*cvComponentRefV2, error) {
 	if s == nil || ctx == nil || leaf == nil || s.cfg.LeafContext == nil ||
 		!cvMemberInRosterV2(s.cfg.LocalNode, s.cfg.OldRoster) || leaf.DealerID != s.cfg.LocalNode {
@@ -141,7 +151,7 @@ func (s *cvAPDBNetworkServiceV2) AwaitVerifiedComponentCatalogV2(
 		s.experimentMu.Lock()
 		s.experimentMetrics.proposerCatalogScanCount += len(candidates)
 		s.experimentMu.Unlock()
-		results := s.recoverAndVerifyComponentBatchV2(ctx, candidates)
+		results := s.recoverAndVerifyComponentPipelineV2(ctx, candidates)
 		var recoveryErr error
 		for _, result := range results {
 			if result.recoverErr != nil {
@@ -233,76 +243,112 @@ func (s *cvAPDBNetworkServiceV2) verifyRecoveredComponentV2(
 	return result
 }
 
-func (s *cvAPDBNetworkServiceV2) verifyRecoveredComponentBatchV2(
-	items []cvComponentVerificationResultV2,
-) []cvComponentVerificationResultV2 {
-	if len(items) == 0 {
-		return nil
-	}
-	started := time.Now()
-	verified := make([]cvComponentVerificationResultV2, len(items))
-	var verifyWG sync.WaitGroup
-	verifyWG.Add(len(items))
-	for index := range items {
-		index := index
-		go func() {
-			defer verifyWG.Done()
-			verified[index] = s.verifyRecoveredComponentV2(items[index])
-		}()
-	}
-	verifyWG.Wait()
-	s.experimentMu.Lock()
-	s.experimentMetrics.proposerCatalogVerificationLatency += time.Since(started)
-	s.experimentMu.Unlock()
-	return verified
-}
-
-// recoverAndVerifyComponentBatchV2 keeps network recovery ahead of the
-// CPU-bound verifier. Recovery uses a wider I/O pool; recovered payloads are
-// verified in bounded batches so the next batch can arrive while leaf
-// verifiers consume the current one.
-func (s *cvAPDBNetworkServiceV2) recoverAndVerifyComponentBatchV2(
+// recoverAndVerifyComponentPipelineV2 keeps network recovery ahead of a fixed
+// verifier pool. Each recovered payload flows directly to a verifier instead
+// of waiting for a complete verification batch.
+func (s *cvAPDBNetworkServiceV2) recoverAndVerifyComponentPipelineV2(
 	ctx context.Context, refs []cvComponentRefV2,
 ) []cvComponentVerificationResultV2 {
 	if len(refs) == 0 {
 		return nil
 	}
-	jobs := make(chan cvComponentRefV2, len(refs))
-	recovered := make(chan cvComponentVerificationResultV2, len(refs))
-	var recoveryWG sync.WaitGroup
 	recoveryWorkers := cvComponentRecoveryWorkers(len(refs))
+	verificationWorkers := cvLeafVerifyWorkers(len(refs))
+	results, verificationLatency := cvRunComponentPipelineV2(
+		refs, recoveryWorkers, verificationWorkers,
+		func(ref cvComponentRefV2) cvComponentVerificationResultV2 {
+			return s.recoverComponentPayloadV2(ctx, ref)
+		},
+		func(result cvComponentVerificationResultV2) cvComponentVerificationResultV2 {
+			return s.verifyRecoveredComponentV2(result)
+		},
+	)
+	if verificationLatency > 0 {
+		s.experimentMu.Lock()
+		s.experimentMetrics.proposerCatalogVerificationLatency += verificationLatency
+		s.experimentMu.Unlock()
+	}
+	return results
+}
+
+func cvRunComponentPipelineV2(
+	refs []cvComponentRefV2, recoveryWorkers, verificationWorkers int,
+	recoverComponent func(cvComponentRefV2) cvComponentVerificationResultV2,
+	verifyComponent func(cvComponentVerificationResultV2) cvComponentVerificationResultV2,
+) ([]cvComponentVerificationResultV2, time.Duration) {
+	if len(refs) == 0 || recoveryWorkers < 1 || verificationWorkers < 1 ||
+		recoverComponent == nil || verifyComponent == nil {
+		return nil, 0
+	}
+	if recoveryWorkers > len(refs) {
+		recoveryWorkers = len(refs)
+	}
+	if verificationWorkers > len(refs) {
+		verificationWorkers = len(refs)
+	}
+
+	jobs := make(chan cvComponentPipelineJobV2, recoveryWorkers)
+	recovered := make(chan cvComponentPipelineResultV2, verificationWorkers)
+	verified := make(chan cvComponentPipelineResultV2, verificationWorkers)
+	var recoveryWG sync.WaitGroup
 	recoveryWG.Add(recoveryWorkers)
 	for range recoveryWorkers {
 		go func() {
 			defer recoveryWG.Done()
-			for ref := range jobs {
-				recovered <- s.recoverComponentPayloadV2(ctx, ref)
+			for job := range jobs {
+				recovered <- cvComponentPipelineResultV2{
+					index: job.index, result: recoverComponent(job.ref),
+				}
 			}
 		}()
 	}
-	for _, ref := range refs {
-		jobs <- ref
-	}
-	close(jobs)
+	go func() {
+		for index, ref := range refs {
+			jobs <- cvComponentPipelineJobV2{index: index, ref: ref}
+		}
+		close(jobs)
+	}()
 	go func() {
 		recoveryWG.Wait()
 		close(recovered)
 	}()
 
-	results := make([]cvComponentVerificationResultV2, 0, len(refs))
-	batchSize := cvLeafVerifyWorkers(len(refs))
-	batch := make([]cvComponentVerificationResultV2, 0, batchSize)
-	for result := range recovered {
-		batch = append(batch, result)
-		if len(batch) == batchSize {
-			results = append(results, s.verifyRecoveredComponentBatchV2(batch)...)
-			batch = make([]cvComponentVerificationResultV2, 0, batchSize)
-		}
+	var verificationWG sync.WaitGroup
+	var timingMu sync.Mutex
+	var firstStarted, lastFinished time.Time
+	verificationWG.Add(verificationWorkers)
+	for range verificationWorkers {
+		go func() {
+			defer verificationWG.Done()
+			for item := range recovered {
+				started := time.Now()
+				result := verifyComponent(item.result)
+				finished := time.Now()
+				timingMu.Lock()
+				if firstStarted.IsZero() || started.Before(firstStarted) {
+					firstStarted = started
+				}
+				if lastFinished.IsZero() || finished.After(lastFinished) {
+					lastFinished = finished
+				}
+				timingMu.Unlock()
+				verified <- cvComponentPipelineResultV2{index: item.index, result: result}
+			}
+		}()
 	}
-	if len(batch) != 0 {
-		results = append(results, s.verifyRecoveredComponentBatchV2(batch)...)
+	go func() {
+		verificationWG.Wait()
+		close(verified)
+	}()
+
+	results := make([]cvComponentVerificationResultV2, len(refs))
+	for item := range verified {
+		results[item.index] = item.result
 	}
-	return results
+	if firstStarted.IsZero() || lastFinished.Before(firstStarted) {
+		return results, 0
+	}
+	return results, lastFinished.Sub(firstStarted)
 }
 
 func (s *cvAPDBNetworkServiceV2) verifiedComponentLeafV2(

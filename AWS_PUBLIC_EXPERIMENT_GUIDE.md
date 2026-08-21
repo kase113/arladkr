@@ -679,18 +679,23 @@ fab aws-collect \
 ARLADKR 默认报告应扣除 recovery service grace，同时保留 raw latency 字段供审计。
 
 ARL n=32 的 proposer catalog 固定验证 `n-f=22` 个 component。当前实现将 APDB recovery 和 CPU
-verification 分成两级流水线；4 vCPU 实例默认使用 4 个 leaf verification workers，recovery worker
-默认是 `2*GOMAXPROCS` 且最多 16。eligible proposer 在 eligibility coin 到达后预热 catalog，冻结后由
-同一 service 的 pool/selection 路径共享。正式实验同时检查：
+verification 分成两级有界流式流水线：每个 recovery 完成后立即进入常驻 verifier 队列，不再等待凑满
+4-component batch。4 vCPU 实例默认使用 4 个固定 leaf verification workers，recovery worker 默认是
+`2*GOMAXPROCS` 且最多 16。eligible proposer 在 eligibility coin 到达后预热 catalog，冻结后由同一
+service 的 pool/selection 路径共享。正式实验同时检查：
 
 - `mean_proposer_component_recovery_ms`：逐 component recovery latency 累计值；
-- `mean_proposer_catalog_verify_ms`：有界验证批的墙钟时间之和；
+- `mean_proposer_catalog_verify_ms`：首个 component 开始验证到最后一个完成的 verifier 流水线窗口；
 - `mean_proposer_catalog_scan_count`：n=32 正常 proposer 应为 22；
 - `proposer_slots_ms`：还包含 PoolCert、coin、aggregate 和 candidate relay，不能与前两项直接等同。
 
+recovery 与 verification 现在会重叠，因此前两个 latency 指标不能相加解释 proposer slots。应以
+`proposer_slots_ms` 判断端到端收益，并用 recovery/verification 两项定位哪一级限制吞吐。
+
 若要覆盖 worker 数，必须在所有节点写入相同 env 并记录到 experiment manifest。论文主数据保持
-`RLADKR_LEAF_VERIFY_WORKERS=4`；只在单独的 ablation 轮比较 1/2/3/4 workers。所谓 batch 是 22 个
-独立 component 的有界调度；每个 component 内部会对 receiver evaluation 和 ACK ownership 线性群
+`RLADKR_LEAF_VERIFY_WORKERS=4`；只在单独的 ablation 轮比较 1/2/3/4 workers。所谓 ownership batch
+发生在单个 component 内部；22 个独立 component 由持续流式的固定 worker pool 调度。每个 component
+内部会对 receiver evaluation 和 ACK ownership 线性群
 方程做域分离的随机批验证，失败时回退逐项验证。它不减少 component 数、ACK 数或 fallback 证明，
 不能据此改变 `L=n-f` 的安全声明。
 
