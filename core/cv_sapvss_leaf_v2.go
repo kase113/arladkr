@@ -13,6 +13,8 @@ const (
 	cvLeafWireDomainV2         = "ARL-CV-sAPVSS/v2-scalar-group/leaf"
 	cvLeafDigestDomainV2       = "ARL-CV-sAPVSS/v2-scalar-group/leaf-digest"
 	cvDealerSignatureDomainV2  = "ARL-CV-sAPVSS/v2-scalar-group/dealer-signature"
+	cvLeafEvaluationBatchV2    = "ARL-CV-sAPVSS/v2-scalar-group/leaf-evaluation-batch"
+	cvLeafOwnershipBatchV2     = "ARL-CV-sAPVSS/v2-scalar-group/leaf-ownership-batch"
 )
 
 type cvLeafReceiverV2 struct {
@@ -274,6 +276,256 @@ func cvVerifyLeafStatementAfterPointDecodingV2(
 	return cvVerifyLeafStatementModeV2(leaf, expectedContext, receivers, false)
 }
 
+func cvVerifyReceiverEvaluationsExactV2(
+	commitments []bls12381.G1Affine, evaluations []bls12381.G1Affine,
+) error {
+	for index := range evaluations {
+		expected := cvEvaluateCommitments(commitments, index+1)
+		if !evaluations[index].Equal(&expected) {
+			return fmt.Errorf("CV V2 receiver %d evaluation does not match coefficient polynomial", index+1)
+		}
+	}
+	return nil
+}
+
+func cvVerifyReceiverEvaluationsBatchV2(
+	context *cvLeafContextV2, dealerID int, commitments, evaluations []bls12381.G1Affine,
+	validatePoints bool,
+) error {
+	if context == nil || dealerID < 0 || len(commitments) == 0 || len(evaluations) != len(context.NewRoster) {
+		return fmt.Errorf("invalid CV V2 receiver evaluation batch")
+	}
+	contextWire, err := cvLeafContextV2CanonicalBytes(context)
+	if err != nil {
+		return err
+	}
+	var statement bytes.Buffer
+	_ = cvWriteBytes(&statement, contextWire)
+	cvWriteUint64(&statement, uint64(dealerID))
+	if err := cvWritePointVectorMode(&statement, commitments, validatePoints); err != nil {
+		return fmt.Errorf("invalid CV V2 receiver evaluation commitments: %w", err)
+	}
+	if err := cvWritePointVectorMode(&statement, evaluations, validatePoints); err != nil {
+		return fmt.Errorf("invalid CV V2 receiver evaluations: %w", err)
+	}
+	challenge, err := cvHashToFr(cvLeafEvaluationBatchV2, statement.Bytes())
+	if err != nil {
+		return err
+	}
+	if challenge.IsZero() {
+		challenge, err = cvHashToFr(cvLeafEvaluationBatchV2, statement.Bytes(), []byte("nonzero"))
+		if err != nil {
+			return err
+		}
+		if challenge.IsZero() {
+			return fmt.Errorf("zero CV V2 receiver evaluation batch challenge")
+		}
+	}
+	weights := cvFrPowers(challenge, len(evaluations))
+	powers := cvEvaluationPowers(len(commitments), len(evaluations))
+	commitmentWeights := make([]fr.Element, len(commitments))
+	// Check sum_u r_u*V_u = sum_v (sum_u r_u*u^v)*A_v with two MSMs.
+	for receiver := range evaluations {
+		for coefficient := range commitments {
+			var term fr.Element
+			term.Mul(&weights[receiver], &powers[receiver][coefficient])
+			commitmentWeights[coefficient].Add(&commitmentWeights[coefficient], &term)
+		}
+	}
+	combinedEvaluations := cvEvaluateCommitmentsWithPowers(evaluations, weights)
+	combinedCommitments := cvEvaluateCommitmentsWithPowers(commitments, commitmentWeights)
+	if combinedEvaluations.Equal(&combinedCommitments) {
+		return nil
+	}
+	if err := cvVerifyReceiverEvaluationsExactV2(commitments, evaluations); err != nil {
+		return err
+	}
+	return fmt.Errorf("CV V2 receiver evaluation batch mismatch")
+}
+
+func cvVerifyOwnershipBatchV2(
+	context *cvLeafContextV2, dealerID int, offers []*cvReceiverLaneOfferV2,
+	receiverPublicKeys []bls12381.G1Affine, validatePoints bool,
+) error {
+	if context == nil || dealerID < 0 || len(offers) == 0 || len(offers) != len(receiverPublicKeys) {
+		return fmt.Errorf("invalid CV V2 ownership batch")
+	}
+	chunks, err := cvChunkCount(context.Profile)
+	if err != nil {
+		return err
+	}
+	contextWire, err := cvLeafContextV2CanonicalBytes(context)
+	if err != nil {
+		return err
+	}
+	var statement bytes.Buffer
+	_ = cvWriteBytes(&statement, contextWire)
+	cvWriteUint64(&statement, uint64(dealerID))
+	if err := cvWriteUint32(&statement, len(offers)); err != nil {
+		return err
+	}
+	ownershipChallenges := make([]fr.Element, len(offers))
+	for i, offer := range offers {
+		var shapeErr error
+		if validatePoints {
+			shapeErr = cvValidateLaneOfferShapeV2(context, offer, &receiverPublicKeys[i])
+		} else {
+			shapeErr = cvValidateLaneOfferShapeAfterPointDecodingV2(context, offer, &receiverPublicKeys[i])
+		}
+		if shapeErr != nil {
+			return fmt.Errorf("invalid CV V2 ownership batch receiver %d statement", offer.ReceiverIndex)
+		}
+		proof := &offer.Ownership
+		if len(proof.ScalarCoinCommitments) != chunks || len(proof.ScalarCipherCommitments) != chunks ||
+			len(proof.ScalarCoinResponses) != chunks || len(proof.ScalarDigitResponses) != chunks {
+			return fmt.Errorf("invalid CV V2 ownership batch receiver %d proof dimensions", offer.ReceiverIndex)
+		}
+		if validatePoints {
+			for chunk := 0; chunk < chunks; chunk++ {
+				if !cvValidG1(&proof.ScalarCoinCommitments[chunk], true) ||
+					!cvValidG1(&proof.ScalarCipherCommitments[chunk], true) {
+					return fmt.Errorf("invalid CV V2 ownership batch receiver %d proof point", offer.ReceiverIndex)
+				}
+			}
+			if !cvValidG1(&proof.BlindingCoinCommitment, true) ||
+				!cvValidG1(&proof.BlindingCipherCommitment, true) ||
+				!cvValidG1(&proof.EvaluationCommitment, true) {
+				return fmt.Errorf("invalid CV V2 ownership batch receiver %d proof point", offer.ReceiverIndex)
+			}
+		}
+		ownershipChallenges[i], err = cvOwnershipChallengeScalarAfterValidationV2(
+			context, dealerID, offer, &receiverPublicKeys[i], proof,
+		)
+		if err != nil {
+			return err
+		}
+		cvWritePoint(&statement, &receiverPublicKeys[i])
+		offerWire, wireErr := cvReceiverLaneOfferV2CanonicalBytesAfterValidation(context, dealerID, offer)
+		if wireErr != nil {
+			return wireErr
+		}
+		_ = cvWriteBytes(&statement, offerWire)
+	}
+	batchChallenge, err := cvHashToFr(cvLeafOwnershipBatchV2, statement.Bytes())
+	if err != nil {
+		return err
+	}
+	if batchChallenge.IsZero() {
+		batchChallenge, err = cvHashToFr(cvLeafOwnershipBatchV2, statement.Bytes(), []byte("nonzero"))
+		if err != nil {
+			return err
+		}
+		if batchChallenge.IsZero() {
+			return fmt.Errorf("zero CV V2 ownership batch challenge")
+		}
+	}
+
+	equationCount := len(offers) * (2*chunks + 3)
+	weights := make([]fr.Element, equationCount)
+	weights[0] = batchChallenge
+	for i := 1; i < equationCount; i++ {
+		weights[i].Mul(&weights[i-1], &batchChallenge)
+	}
+	h, err := cvPedersenBase()
+	if err != nil {
+		return err
+	}
+	points := make([]bls12381.G1Affine, 0, 2*equationCount+len(offers)+2)
+	scalars := make([]fr.Element, 0, cap(points))
+	appendNegative := func(point *bls12381.G1Affine, scalar *fr.Element) {
+		var negative fr.Element
+		negative.Neg(scalar)
+		points = append(points, *point)
+		scalars = append(scalars, negative)
+	}
+	appendNegativeProduct := func(point *bls12381.G1Affine, first, second *fr.Element) {
+		var product fr.Element
+		product.Mul(first, second).Neg(&product)
+		points = append(points, *point)
+		scalars = append(scalars, product)
+	}
+	var generatorScalar, pedersenScalar fr.Element
+	publicKeyScalars := make([]fr.Element, len(offers))
+	weightIndex := 0
+	for i, offer := range offers {
+		proof := &offer.Ownership
+		challenge := &ownershipChallenges[i]
+		for chunk := 0; chunk < chunks; chunk++ {
+			coinWeight := &weights[weightIndex]
+			weightIndex++
+			var term fr.Element
+			term.Mul(coinWeight, &proof.ScalarCoinResponses[chunk])
+			generatorScalar.Add(&generatorScalar, &term)
+			appendNegative(&proof.ScalarCoinCommitments[chunk], coinWeight)
+			appendNegativeProduct(&offer.ScalarChunks[chunk].r, coinWeight, challenge)
+
+			cipherWeight := &weights[weightIndex]
+			weightIndex++
+			term.Mul(cipherWeight, &proof.ScalarDigitResponses[chunk])
+			generatorScalar.Add(&generatorScalar, &term)
+			term.Mul(cipherWeight, &proof.ScalarCoinResponses[chunk])
+			publicKeyScalars[i].Add(&publicKeyScalars[i], &term)
+			appendNegative(&proof.ScalarCipherCommitments[chunk], cipherWeight)
+			appendNegativeProduct(&offer.ScalarChunks[chunk].c, cipherWeight, challenge)
+		}
+
+		blindingCoinWeight := &weights[weightIndex]
+		weightIndex++
+		var term fr.Element
+		term.Mul(blindingCoinWeight, &proof.BlindingCoinResponse)
+		generatorScalar.Add(&generatorScalar, &term)
+		appendNegative(&proof.BlindingCoinCommitment, blindingCoinWeight)
+		appendNegativeProduct(&offer.Blinding.r, blindingCoinWeight, challenge)
+
+		blindingCipherWeight := &weights[weightIndex]
+		weightIndex++
+		term.Mul(blindingCipherWeight, &proof.BlindingCoinResponse)
+		publicKeyScalars[i].Add(&publicKeyScalars[i], &term)
+		term.Mul(blindingCipherWeight, &proof.BlindingShareResponse)
+		pedersenScalar.Add(&pedersenScalar, &term)
+		appendNegative(&proof.BlindingCipherCommitment, blindingCipherWeight)
+		appendNegativeProduct(&offer.Blinding.c, blindingCipherWeight, challenge)
+
+		evaluationWeight := &weights[weightIndex]
+		weightIndex++
+		weightedResponse, weightedErr := cvWeightedScalarV2(
+			proof.ScalarDigitResponses, context.Profile.chunkBits,
+		)
+		if weightedErr != nil {
+			return weightedErr
+		}
+		term.Mul(evaluationWeight, &weightedResponse)
+		generatorScalar.Add(&generatorScalar, &term)
+		term.Mul(evaluationWeight, &proof.BlindingShareResponse)
+		pedersenScalar.Add(&pedersenScalar, &term)
+		appendNegative(&proof.EvaluationCommitment, evaluationWeight)
+		appendNegativeProduct(&offer.Evaluation, evaluationWeight, challenge)
+	}
+	points = append(points, genG1, h)
+	scalars = append(scalars, generatorScalar, pedersenScalar)
+	for i := range receiverPublicKeys {
+		points = append(points, receiverPublicKeys[i])
+		scalars = append(scalars, publicKeyScalars[i])
+	}
+	combined, err := cvG1LinearCombination(points, scalars)
+	if err != nil {
+		return err
+	}
+	var identity fr.Element
+	zero := cvPointTimes(&genG1, &identity)
+	if combined.Equal(&zero) {
+		return nil
+	}
+	for i, offer := range offers {
+		if err := cvVerifyOwnershipModeV2(
+			context, dealerID, offer, &receiverPublicKeys[i], validatePoints,
+		); err != nil {
+			return fmt.Errorf("invalid CV V2 ownership batch receiver %d: %w", offer.ReceiverIndex, err)
+		}
+	}
+	return fmt.Errorf("CV V2 ownership batch mismatch")
+}
+
 func cvVerifyLeafStatementModeV2(
 	leaf *cvLeafV2, expectedContext *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2,
 	validatePoints bool,
@@ -315,16 +567,25 @@ func cvVerifyLeafStatementModeV2(
 	}
 	fallbackOffers := make([]*cvReceiverLaneOfferV2, 0, len(fallbackSet))
 	fallbackKeys := make([]bls12381.G1Affine, 0, len(fallbackSet))
+	ackOffers := make([]*cvReceiverLaneOfferV2, 0, len(leaf.Receivers)-len(fallbackSet))
+	ackKeys := make([]bls12381.G1Affine, 0, len(leaf.Receivers)-len(fallbackSet))
+	ackReceiverIndices := make([]int, 0, len(leaf.Receivers)-len(fallbackSet))
+	evaluations := make([]bls12381.G1Affine, len(leaf.Receivers))
 	for i := range leaf.Receivers {
 		receiver := &leaf.Receivers[i]
 		expectedID := expectedContext.NewRoster[i]
 		if receiver.Offer.ReceiverID != expectedID || receiver.Offer.ReceiverIndex != i+1 {
 			return fmt.Errorf("invalid CV V2 leaf receiver ordering")
 		}
-		expectedEvaluation := cvEvaluateCommitments(leaf.CoefficientCommitments, i+1)
-		if !receiver.Offer.Evaluation.Equal(&expectedEvaluation) {
-			return fmt.Errorf("CV V2 receiver evaluation does not match coefficient polynomial")
-		}
+		evaluations[i] = receiver.Offer.Evaluation
+	}
+	if err := cvVerifyReceiverEvaluationsBatchV2(
+		expectedContext, leaf.DealerID, leaf.CoefficientCommitments, evaluations, validatePoints,
+	); err != nil {
+		return err
+	}
+	for i := range leaf.Receivers {
+		receiver := &leaf.Receivers[i]
 		if _, isFallback := fallbackSet[i+1]; isFallback {
 			if receiver.ACK != nil {
 				return fmt.Errorf("CV V2 fallback receiver also carries ACK evidence")
@@ -335,21 +596,25 @@ func cvVerifyLeafStatementModeV2(
 			if receiver.ACK == nil {
 				return fmt.Errorf("CV V2 ACK receiver is missing evidence")
 			}
-			var ackErr error
-			if validatePoints {
-				ackErr = cvVerifyACKV2(
-					expectedContext, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
-					receivers.identityPublicKeys[i], receiver.ACK,
-				)
-			} else {
-				ackErr = cvVerifyACKAfterPointDecodingV2(
-					expectedContext, leaf.DealerID, &receiver.Offer, &receivers.encryptionPublicKeys[i],
-					receivers.identityPublicKeys[i], receiver.ACK,
-				)
-			}
-			if ackErr != nil {
-				return fmt.Errorf("invalid CV V2 receiver %d ACK: %w", i+1, ackErr)
-			}
+			ackOffers = append(ackOffers, &receiver.Offer)
+			ackKeys = append(ackKeys, receivers.encryptionPublicKeys[i])
+			ackReceiverIndices = append(ackReceiverIndices, i)
+		}
+	}
+	if len(ackOffers) != 0 {
+		if err := cvVerifyOwnershipBatchV2(
+			expectedContext, leaf.DealerID, ackOffers, ackKeys, validatePoints,
+		); err != nil {
+			return err
+		}
+	}
+	for _, i := range ackReceiverIndices {
+		receiver := &leaf.Receivers[i]
+		if err := cvVerifyACKAfterLocalOwnershipValidationV2(
+			expectedContext, leaf.DealerID, &receiver.Offer,
+			receivers.identityPublicKeys[i], receiver.ACK,
+		); err != nil {
+			return fmt.Errorf("invalid CV V2 receiver %d ACK: %w", i+1, err)
 		}
 	}
 	if len(fallbackOffers) == 0 {

@@ -684,7 +684,9 @@ verification 分成两级流水线；4 vCPU 实例默认使用 4 个 leaf verifi
 
 若要覆盖 worker 数，必须在所有节点写入相同 env 并记录到 experiment manifest。论文主数据保持
 `RLADKR_LEAF_VERIFY_WORKERS=4`；只在单独的 ablation 轮比较 1/2/3/4 workers。所谓 batch 是 22 个
-独立完整验证的有界调度，不是聚合 proof verifier，不能据此改变安全声明。
+独立 component 的有界调度；每个 component 内部会对 receiver evaluation 和 ACK ownership 线性群
+方程做域分离的随机批验证，失败时回退逐项验证。它不减少 component 数、ACK 数或 fallback 证明，
+不能据此改变 `L=n-f` 的安全声明。
 
 本地可运行隔离的 22-component CPU 基准：
 
@@ -693,6 +695,19 @@ RLADKR_RUN_N32_LOCAL_BENCH=1 GOMAXPROCS=4 \
   go test ./core -run '^$' \
   -bench '^BenchmarkCVV2ProposerCatalogVerifyN32$' -benchtime=1x -count=1 -timeout=15m
 ```
+
+单独复现 n=127 ownership exact/batch 差异：
+
+```bash
+RLADKR_RUN_N127_OWNERSHIP_BENCH=1 GOMAXPROCS=4 \
+  go test ./core -run '^$' \
+  -bench '^BenchmarkCVV2OwnershipVerificationN127$' -benchtime=3x -count=1
+```
+
+日常密码学回归先运行 `go test -short ./core`；该模式跳过明确标记的 proof-heavy integration fixture，
+当前 AMD EPYC 7H12 主机实测约 `81.1 s`。
+合并或构建 AMI 前仍运行 `go test ./core -count=1`。不要并发运行相同的 multiprocess network suite，
+否则端口与 CPU 竞争会造成与协议无关的超时。
 
 完整 32 进程测试由 `TestBenchMultiProcessN32PrivateStyle` 提供且同样需要上述 opt-in env，但共享主机
 必须有足够 CPU/内存。资源不足导致的外层 timeout 不应记录为协议性能点；正式结论仍以 32 台独立
@@ -794,3 +809,11 @@ SSM 源码同步/AMI 预热也已使用一次归档、一次临时 S3 object 和
 输入，不能替代尚未完成的统一多 Region Fabric 编排。
 
 这些是实验编排缺口，不是 ARLADKR 或 PracticalADKR 密码学协议的一部分。
+## Recent private validation
+
+The 2026-08-21 `paper-n10-catalog-pipeline-v4-use1f-2` run used ten `c7g.xlarge` Spot instances in
+`us-east-1f` with private-only protocol traffic and AMI `ami-08952339a071d1772`. All ten nodes completed
+ARLADKR and agreed on one consensus hash. Adjusted latency averaged 3.821 seconds and proposer slots
+2.097 seconds; the 1.000-second responder service grace is reported separately and already removed from
+the adjusted value. The fleet was destroyed after artifact collection. See `AWS_EXPERIMENT_TRACKING.md`
+for the complete metrics and cost estimate.

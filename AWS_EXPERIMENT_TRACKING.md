@@ -1909,3 +1909,47 @@ payload decode/逐 component proof verification，不包含 APDB network recover
 完成前，不能把本次优化表述为减少了密码学验证方程。新增回归覆盖 4-worker/recovery worker budget、
 eligible-only 一次性 prewarm、无效 payload 拒绝、catalog dealer 顺序及缓存命中。此次仅使用本地计算，
 没有启动 AWS 资源，新增 AWS 成本 `$0`，累计量化成本仍约 **`$7.42`**。
+## 2026-08-21 n=10 v4 AMI 同 AZ 私网 ARL 验证
+
+`paper-n10-catalog-pipeline-v4-use1f-2` 在 `us-east-1f/use1-az5` 启动 10 台 `c7g.xlarge` Spot，使用 v4 AMI `ami-08952339a071d1772`，并 staging 当前 `44e8b84` ARM64 二进制。10/10 节点成功，quorum 7，consensus hash 唯一：`893497522c333e0282c94d48466f6feaa69a22f648ad1d535d6f6a72bcc166f7`。
+
+平均 service-grace-adjusted latency `3821.12 ms`，raw latency `4821.48 ms`，`mean_recover_service_grace_ms=1000.35 ms` 已扣除；proposer slots `2096.92 ms`，catalog verify `502.10 ms`，component recovery `164.10 ms`，scan count `2.1`。没有 artifact collector 阻塞。Terraform destroy 完成，EC2/EBS/VPC/Spot request 均清理。约 `1.83` aggregate instance-hours，本轮保守增量成本 **`$0.16`**，累计量化成本更新为 **`$8.07`**（Cost Explorer 为最终依据）。完整 artifact、summary、manifest、inventory 与成本字段已写入 experiment record。
+
+## 2026-08-21 proposer receiver-evaluation 批量验证
+
+为降低 n=127 时 proposer 对 `L=85` 个 component 的验证成本，leaf verifier 不再为每个 receiver
+分别执行一次 coefficient-commitment polynomial MSM。实现先用域分离 Fiat-Shamir challenge 固定
+随机线性组合，再以两个 MSM 检查全部 receiver evaluation；批检查失败时回退逐项验证并拒绝具体
+错误项。该修改没有减少被验证的 component、ownership proof 或 ACK，也不改变 `L=n-f` pool 与
+`K=f+1` contributor selection。
+
+AMD EPYC 7H12、`GOMAXPROCS=4` 本地结果：n=127 单 leaf evaluation 检查由
+`374.72--495.55 ms` 降至 `9.31--10.38 ms`，约快 `39--48x`，分配量由约 `4.44 MB`
+降至约 `0.15 MB`。完整 n=32、22-component、4-worker catalog benchmark 从修改前
+`14159.40 ms` 降至 `10770.48 ms`，改善约 `23.9%`；剩余成本主要在 ownership proof 和 ACK
+验证。本轮只使用本地计算，没有新增 AWS 成本，累计量化成本仍约 **`$8.07`**。
+
+## 2026-08-21 proposer ownership 方程批量验证与测试加速
+
+leaf verifier 现将所有 ACK lane 的 ownership Schnorr 方程放入一个域分离的随机线性组合。批量
+challenge 在 context、dealer、按 receiver 排序的 public key 和完整 canonical offer/proof 固定后产生；
+系数按方程位置使用非零 challenge 的连续幂。实现先严格检查 lane shape、proof dimensions 和点有效性，
+再把每个 chunk 的 coin/ciphertext 方程及 blinding/evaluation 三个方程合并为一次 G1 MSM。批检查失败
+时仍逐 receiver 执行原精确 verifier，返回真实 receiver index；成功后 ACK ownership equality 和
+Ed25519 signature 仍逐项检查。若一片 leaf 含有 $E$ 个方程，随机预言机模型中的附加 soundness loss
+至多为 $E/q$，并且未减少 `L=n-f` component 验证或任何 ACK/fallback 证据。
+
+AMD EPYC 7H12、`GOMAXPROCS=4`、n=127 单 leaf ownership 基准：batch 为
+`87.46 ms/op`，exact 为 `3197.51 ms/op`，约快 **`36.6x`**。n=32、22-component、4-worker
+catalog 从 evaluation batch 后的 `10770.48 ms` 再降到 **`6686.03 ms`**，再改善 `37.9%`；相对
+最初 `14159.40 ms` 共改善约 **`52.8%`**。该本地 catalog 数字仍不包含 APDB 网络、PoolCert、coin、
+aggregate 或 candidate relay。
+
+测试耗时分析使用 `go test -json ./core -count=1` 的逐 test elapsed。主要重复开销是 41 个测试各自
+重新生成两份 exact-range M4 leaf。现在 proof-heavy 母夹具每个 test process 只生成一次，每个测试
+获得 leaf、proof、context 和 secrets 的完整深拷贝，并继续使用独立 `t.TempDir()` 和 runtime config；
+mutation/adversarial 覆盖未删除。完整 `core` suite 从 `485.053 s` 降至 `309.226 s`，减少
+`175.827 s`（`36.2%`）。`go test -short ./core -count=1` 实测通过，耗时 `81.104 s`；合并前仍运行
+完整 suite。n=127
+性能夹具仅由 `RLADKR_RUN_N127_OWNERSHIP_BENCH=1` 显式开启，不增加默认测试成本。本轮没有启动
+AWS 资源，新增 AWS 成本 `$0`，累计量化成本仍约 **`$8.07`**。

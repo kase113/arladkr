@@ -333,3 +333,122 @@ func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkCVV2ReceiverEvaluationVerificationN127(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N127_EVAL_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N127_EVAL_BENCH=1 to benchmark n=127 receiver evaluation verification")
+	}
+	const (
+		n = 127
+		f = 42
+	)
+	oldRoster := make([]int, n)
+	newRoster := make([]int, n)
+	for index := range oldRoster {
+		oldRoster[index] = index
+		newRoster[index] = n + index
+	}
+	context := &cvLeafContextV2{
+		SID: "cv-v2-n127-evaluation-benchmark", Epoch: 1,
+		OldRoster: oldRoster, NewRoster: newRoster,
+		ReceiverRegistryDigest: hashBytes([]byte("cv-v2-n127-evaluation-benchmark-registry")),
+		SharingDegree:          n - f - 1,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: f + 1},
+	}
+	commitments := make([]bls12381.G1Affine, context.SharingDegree+1)
+	for index := range commitments {
+		var scalar fr.Element
+		if _, err := scalar.SetRandom(); err != nil {
+			b.Fatal(err)
+		}
+		commitments[index] = cvPointTimes(&genG1, &scalar)
+	}
+	evaluations := make([]bls12381.G1Affine, n)
+	for index := range evaluations {
+		evaluations[index] = cvEvaluateCommitments(commitments, index+1)
+	}
+	previousProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	b.Run("batch", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			if err := cvVerifyReceiverEvaluationsBatchV2(context, 0, commitments, evaluations, false); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("exact", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			if err := cvVerifyReceiverEvaluationsExactV2(commitments, evaluations); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkCVV2OwnershipVerificationN127(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N127_OWNERSHIP_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N127_OWNERSHIP_BENCH=1 to benchmark n=127 ownership verification")
+	}
+	const (
+		n = 127
+		f = 42
+	)
+	oldRoster := make([]int, n)
+	newRoster := make([]int, n)
+	for index := range oldRoster {
+		oldRoster[index] = index
+		newRoster[index] = n + index
+	}
+	context := &cvLeafContextV2{
+		SID: "cv-v2-n127-ownership-benchmark", Epoch: 1,
+		OldRoster: oldRoster, NewRoster: newRoster,
+		ReceiverRegistryDigest: hashBytes([]byte("cv-v2-n127-ownership-benchmark-registry")),
+		SharingDegree:          n - f - 1,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: f + 1},
+	}
+	offers := make([]*cvReceiverLaneOfferV2, n)
+	publicKeys := make([]bls12381.G1Affine, n)
+	for index := range offers {
+		secret := cvTestScalar(uint64(index + 1))
+		publicKey, err := cvReceiverPublicKey(secret)
+		if err != nil {
+			b.Fatal(err)
+		}
+		publicKeys[index] = publicKey
+		scalar := cvTestScalar(uint64(1000 + index))
+		blinding := cvTestScalar(uint64(2000 + index))
+		offers[index], _, err = cvEncryptReceiverLanesV2(
+			context, oldRoster[0], newRoster[index], index+1,
+			&publicKeys[index], scalar, blinding,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	previousProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	b.Run("batch", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			if err := cvVerifyOwnershipBatchV2(context, oldRoster[0], offers, publicKeys, false); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("exact", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			for index := range offers {
+				if err := cvVerifyOwnershipAfterPointDecodingV2(
+					context, oldRoster[0], offers[index], &publicKeys[index],
+				); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+}

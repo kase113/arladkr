@@ -2,11 +2,10 @@ package core
 
 import (
 	"bytes"
-	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
@@ -552,11 +551,15 @@ func TestCVSAPVSSM4DecodeAggregateRejectsCommitmentCountBeyondRemainingWire(t *t
 	}
 }
 
-func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) {
+var (
+	cvM4FixtureOnce            sync.Once
+	cvM4FixtureContext         cvLeafContext
+	cvM4FixtureReceiverSecrets []fr.Element
+	cvM4FixtureLeaves          []*cvLeaf
+)
+
+func cvBuildSharedM4Fixture(t testing.TB) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping exact-range CV M4 fixture in short mode")
-	}
 	receiverSecrets := []fr.Element{
 		cvTestScalar(13),
 		cvTestScalar(17),
@@ -571,7 +574,7 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) 
 			t.Fatal(err)
 		}
 	}
-	sid := fmt.Sprintf("cv-m4-%d", time.Now().UnixNano())
+	const sid = "cv-m4-shared-fixture-v1"
 	leafContext := cvLeafContext{
 		sessionID:                 []byte(sid),
 		epoch:                     1,
@@ -606,8 +609,78 @@ func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) 
 		deal(0, []fr.Element{cvTestScalar(5), cvTestScalar(3)}, []fr.Element{cvTestScalar(7), cvTestScalar(2)}, 100),
 		deal(1, []fr.Element{cvTestScalar(11), cvTestScalar(5)}, []fr.Element{cvTestScalar(13), cvTestScalar(4)}, 300),
 	}
+	cvM4FixtureContext = cvCloneLeafContext(leafContext)
+	cvM4FixtureReceiverSecrets = append([]fr.Element(nil), receiverSecrets...)
+	cvM4FixtureLeaves = leaves
+}
+
+func cvCloneM4LeafForTest(leaf *cvLeaf) *cvLeaf {
+	if leaf == nil {
+		return nil
+	}
+	cloned := *leaf
+	cloned.context = cvCloneLeafContext(leaf.context)
+	cloned.coefficientCommitments = append([]bls12381.G1Affine(nil), leaf.coefficientCommitments...)
+	cloned.receivers = make([]cvLeafReceiver, len(leaf.receivers))
+	for i := range leaf.receivers {
+		cloned.receivers[i] = leaf.receivers[i]
+		if leaf.receivers[i].encryptedShare != nil {
+			encrypted := *leaf.receivers[i].encryptedShare
+			encrypted.scalarChunks = append([]cvElGamalCiphertext(nil), encrypted.scalarChunks...)
+			cloned.receivers[i].encryptedShare = &encrypted
+		}
+	}
+	if leaf.proof != nil {
+		proof := *leaf.proof
+		proof.chunking.b = append([]bls12381.G1Affine(nil), leaf.proof.chunking.b...)
+		proof.chunking.c = append([]bls12381.G1Affine(nil), leaf.proof.chunking.c...)
+		proof.chunking.d = append([]bls12381.G1Affine(nil), leaf.proof.chunking.d...)
+		proof.chunking.zCoins = append([]fr.Element(nil), leaf.proof.chunking.zCoins...)
+		proof.chunking.zDigits = append([]fr.Element(nil), leaf.proof.chunking.zDigits...)
+		proof.chunking.exactRange.commitments = append(
+			[]bls12381.G1Affine(nil), leaf.proof.chunking.exactRange.commitments...,
+		)
+		proof.chunking.exactRange.bits = append(
+			[]cvBitProof(nil), leaf.proof.chunking.exactRange.bits...,
+		)
+		proof.chunking.exactRange.links = make(
+			[]cvRangeLinkProof, len(leaf.proof.chunking.exactRange.links),
+		)
+		for i := range leaf.proof.chunking.exactRange.links {
+			proof.chunking.exactRange.links[i] = leaf.proof.chunking.exactRange.links[i]
+			proof.chunking.exactRange.links[i].tCommitments = append(
+				[]bls12381.G1Affine(nil), leaf.proof.chunking.exactRange.links[i].tCommitments...,
+			)
+			proof.chunking.exactRange.links[i].tCiphertexts = append(
+				[]bls12381.G1Affine(nil), leaf.proof.chunking.exactRange.links[i].tCiphertexts...,
+			)
+			proof.chunking.exactRange.links[i].zDigits = append(
+				[]fr.Element(nil), leaf.proof.chunking.exactRange.links[i].zDigits...,
+			)
+			proof.chunking.exactRange.links[i].zRhos = append(
+				[]fr.Element(nil), leaf.proof.chunking.exactRange.links[i].zRhos...,
+			)
+		}
+		cloned.proof = &proof
+	}
+	cloned.digest = append([]byte(nil), leaf.digest...)
+	return &cloned
+}
+
+func cvM4Fixture(t testing.TB) (Config, cvLeafContext, []fr.Element, []*cvLeaf) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping exact-range CV M4 fixture in short mode")
+	}
+	cvM4FixtureOnce.Do(func() { cvBuildSharedM4Fixture(t) })
+	leafContext := cvCloneLeafContext(cvM4FixtureContext)
+	receiverSecrets := append([]fr.Element(nil), cvM4FixtureReceiverSecrets...)
+	leaves := make([]*cvLeaf, len(cvM4FixtureLeaves))
+	for i := range cvM4FixtureLeaves {
+		leaves[i] = cvCloneM4LeafForTest(cvM4FixtureLeaves[i])
+	}
 	cfg := NormalizeConfig(Config{
-		SID:                sid,
+		SID:                string(leafContext.sessionID),
 		Epoch:              1,
 		OldCommittee:       []int{0, 1, 2, 3},
 		NewCommittee:       []int{0, 1, 2, 3},

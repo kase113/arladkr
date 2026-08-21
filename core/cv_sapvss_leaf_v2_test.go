@@ -126,6 +126,95 @@ func TestCVAllACKLeafV2BuildVerifyAndCodec(t *testing.T) {
 	}
 }
 
+func TestCVReceiverEvaluationBatchV2MatchesExactVerification(t *testing.T) {
+	leaf, context, _, _ := cvAllACKLeafV2Fixture(t)
+	evaluations := make([]bls12381.G1Affine, len(leaf.Receivers))
+	for index := range leaf.Receivers {
+		evaluations[index] = leaf.Receivers[index].Offer.Evaluation
+	}
+	if err := cvVerifyReceiverEvaluationsExactV2(leaf.CoefficientCommitments, evaluations); err != nil {
+		t.Fatalf("exact receiver evaluation verification: %v", err)
+	}
+	for _, validatePoints := range []bool{true, false} {
+		if err := cvVerifyReceiverEvaluationsBatchV2(
+			context, leaf.DealerID, leaf.CoefficientCommitments, evaluations, validatePoints,
+		); err != nil {
+			t.Fatalf("batch receiver evaluation verification validate_points=%t: %v", validatePoints, err)
+		}
+	}
+
+	mutated := append([]bls12381.G1Affine(nil), evaluations...)
+	mutated[len(mutated)-1].Add(&mutated[len(mutated)-1], &genG1)
+	if err := cvVerifyReceiverEvaluationsBatchV2(
+		context, leaf.DealerID, leaf.CoefficientCommitments, mutated, false,
+	); err == nil {
+		t.Fatal("batch receiver evaluation verification accepted a mutated evaluation")
+	}
+}
+
+func TestCVOwnershipBatchV2MatchesExactAndRejectsMutations(t *testing.T) {
+	leaf, context, receivers, _ := cvAllACKLeafV2Fixture(t)
+	offers := make([]*cvReceiverLaneOfferV2, len(leaf.Receivers))
+	keys := append([]bls12381.G1Affine(nil), receivers.encryptionPublicKeys...)
+	for i := range leaf.Receivers {
+		offers[i] = &leaf.Receivers[i].Offer
+		if err := cvVerifyOwnershipV2(context, leaf.DealerID, offers[i], &keys[i]); err != nil {
+			t.Fatalf("exact ownership verification receiver %d: %v", i+1, err)
+		}
+	}
+	for _, validatePoints := range []bool{true, false} {
+		if err := cvVerifyOwnershipBatchV2(
+			context, leaf.DealerID, offers, keys, validatePoints,
+		); err != nil {
+			t.Fatalf("batch ownership verification validate_points=%t: %v", validatePoints, err)
+		}
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*cvReceiverLaneOfferV2)
+	}{
+		{
+			name: "commitment",
+			mutate: func(offer *cvReceiverLaneOfferV2) {
+				offer.Ownership.ScalarCoinCommitments[0].Add(
+					&offer.Ownership.ScalarCoinCommitments[0], &genG1,
+				)
+			},
+		},
+		{
+			name: "response",
+			mutate: func(offer *cvReceiverLaneOfferV2) {
+				var one fr.Element
+				one.SetOne()
+				offer.Ownership.BlindingShareResponse.Add(
+					&offer.Ownership.BlindingShareResponse, &one,
+				)
+			},
+		},
+		{
+			name: "ciphertext",
+			mutate: func(offer *cvReceiverLaneOfferV2) {
+				offer.ScalarChunks[0].c.Add(&offer.ScalarChunks[0].c, &genG1)
+			},
+		},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutatedOffers := append([]*cvReceiverLaneOfferV2(nil), offers...)
+			mutatedOffers[len(mutatedOffers)-1] = cvCloneReceiverLaneOfferV2(
+				offers[len(offers)-1],
+			)
+			mutation.mutate(mutatedOffers[len(mutatedOffers)-1])
+			if err := cvVerifyOwnershipBatchV2(
+				context, leaf.DealerID, mutatedOffers, keys, false,
+			); err == nil {
+				t.Fatal("batch ownership verification accepted a mutation")
+			}
+		})
+	}
+}
+
 func TestCVAllACKLeafV2RejectsCryptographicMutations(t *testing.T) {
 	leaf, context, receivers, validators := cvAllACKLeafV2Fixture(t)
 
