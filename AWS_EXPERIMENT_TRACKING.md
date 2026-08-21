@@ -2054,3 +2054,21 @@ VPC、subnet、route table、IGW、SG、IAM 和 source instance 已在凭证恢�
 Terraform 报告 `11 destroyed`，并复核实例、Spot request、EBS、VPC、subnet、SG、IAM role/profile
 均为 0。AMI 与 snapshot 不属于 destroy 范围，仍按实验需要保留。烘焙成本约 `$0.06`，累计量化
 成本由约 `$8.37` 更新为约 **`$8.43`**（最终金额以 Cost Explorer 为准）。
+## 2026-08-21 v6 n=32 ARL 私网验证（收集失败，invalidated）
+
+使用 v6 AMI `ami-0da946b587756eba5` 在 `us-east-1f/use1-az5` 启动 32 台
+`c7g.xlarge` Spot，仅运行 ARLADKR，实验组为 `paper-arl-v6-pipeline-n32-use1f-20260`。
+32 台节点固定私网地址 `10.42.1.10--10.42.1.41`，SSM、setup、ready quorum 和 benchmark
+启动均成功：setup bundle digest 为
+`6f3f4fe5ba4424c8f6e2d09969d51fa7f6515017065ad7c15503a24bca0c8a3d`；benchmark run 为
+`run-20260821-135655`；`start` 32/32、`ready` 32/32、quorum `32/22`，协议状态轮询约
+11 秒时显示 `success=32/22, failed=0, running=0`。
+
+随后 compact summary 收集在节点 `i-081d5f3c38589a846` 返回缺少 `bench` 字段，控制面报错
+`invalid compact summary response ... missing bench`，因此没有生成完整的 `proposer_slots_ms`
+汇总。本轮不能作为性能样本；这是收集器 schema 校验失败，不是 32 节点协议失败。所有 42 个
+Terraform 资源已由 finally 自动销毁。按 32 台 Spot 约 11 分钟、gp3、SSM/S3 保守估算新增约
+`$0.38`，累计量化成本由约 `$8.43` 更新为约 **`$8.81`**，最终金额以 Cost Explorer 为准。
+
+后续重跑前应修复 compact summary：单节点缺少 `bench` 时标记该节点 unavailable 并保留其余
+节点原始结果，不应使整轮收集失败；同时为 summary 增加 schema 版本。
