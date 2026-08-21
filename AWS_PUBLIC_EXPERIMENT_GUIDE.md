@@ -835,3 +835,13 @@ adjusted latency and 1.890-second proposer slots. PracticalADKR reached quorum o
 4.205-second mean latency; two slower nodes lost CompProve responder reachability after the successful
 nodes exited, so this run also records an unresolved Practical responder-lifetime issue. Both protocols'
 full artifacts were collected before the common fleet was destroyed.
+
+### v6 流式 pipeline AMI（2026-08-21）
+
+后续 n=10/n=32 `us-east-1f` 私网实验使用 `ami-0da946b587756eba5`（名称
+`arladkr-bench-arm64-v6-pipeline-98bce4f-20260821`），对应提交 `98bce4f`。该镜像内
+`rladkrbench` SHA-256 为
+`477f8f9158fc2c4efa94fe5e01d974548497c82f32bcf7d716ce1e9b4bb63ddf`，`bench_latency` 为
+`a1a6eee0cb1639716d416ed893bac64258b1029bd6383f6a784f07c916f87935`。n=10/n=32 配置会在
+启动前校验这些 digest，并在预构建模式跳过源码同步、远程编译和成功节点的完整日志收集；失败
+节点仍收集诊断。v5 (`ami-0a31eb4903947c28a`) 仅作为历史基线，不应与 v6 混用。

@@ -14,8 +14,8 @@ AWS access key、SSO token、SSH private key、节点 secret share 或 setup bun
 | AZ | `us-east-1f` (`use1-az5`) |
 | 实例类型 | `c7g.xlarge` Spot，4 vCPU、8 GiB、ARM64 |
 | 最近 ExperimentGroup | `p10-use1-dxtreadyfix-20260818`（success，已销毁） |
-| 固定实验 AMI | `ami-0cee8a82967ef97ac` |
-| 当前基线 AMI snapshot | `snap-0a49c63bc97d1d443` |
+| 固定实验 AMI | `ami-0da946b587756eba5` (v6, commit `98bce4f`) |
+| 当前基线 AMI snapshot | v6 snapshot（以 EC2 `describe-images` 返回值为准；v5 `snap-03ef25b557c1a77a2` 保留为历史基线） |
 | 保留自有 AMI / snapshot | `4 / 4` |
 | Terraform instance count | `0` |
 | 当前运行实例 | `0`（最新两批 n=10 fleet 均已终止） |
@@ -2030,3 +2030,24 @@ AMD EPYC 7H12、`GOMAXPROCS=4`、22-component、4-worker 单次本地 catalog be
 `14159.40 ms/op` 累计降低约 **`74.3%`**。该基准使用已恢复的 payload，主要量化固定 verifier pool
 消除 wave 尾部等待的收益；APDB recovery 与 verification 的真实重叠及 proposer slots 改善仍须在
 下一轮 AWS n=32 私网实验验证。本轮没有启动 AWS 资源，新增 AWS 成本 `$0`。
+
+## 2026-08-21 v6 流式验证 AMI
+
+为承载提交 `98bce4f39d2bdd13bcc7113b36ca566e37555cf3` 的连续 recovery producer 与四个固定
+verifier workers，基于 v5 历史镜像重新创建 ARM64 AMI。新镜像与 v5 严格区分：
+
+- AMI：`ami-0da946b587756eba5`，名称 `arladkr-bench-arm64-v6-pipeline-98bce4f-20260821`；
+- 源实例：`i-004d754c78029388a`，`us-east-1f`；烘焙 Terraform state 为
+  `deployment/aws-state/ami-bake-pipeline-98bce4f-20260821`；
+- 源 bundle digest：`78ba893c506db66089e362c22521bddd778670e5a9141341dfee8b9031f83118`；
+- `rladkrbench` digest：`477f8f9158fc2c4efa94fe5e01d974548497c82f32bcf7d716ce1e9b4bb63ddf`；
+- `bench_latency` digest：`a1a6eee0cb1639716d416ed893bac64258b1029bd6383f6a784f07c916f87935`。
+
+n=10 与 n=32 私网配置已切换到该 AMI，并启用 `stage_current_binaries: false`、单批 SSM
+setup、批量 summary、成功节点跳过完整 artifact 收集及预期 digest 校验。这样实验启动阶段不再
+重复源码同步和远程编译；失败节点仍保留诊断收集。v5 AMI 不删除，继续作为历史对照。
+
+本次只计入 AMI 烘焙源实例、临时 gp3、SSM/S3 的保守估算约 `$0.06`；没有启动实验 fleet，新增
+实验成本为 `$0`。v6 snapshot 的持续存储成本单列，最终金额以 Cost Explorer 为准。临时烘焙
+VPC、subnet、route table、IGW、SG、IAM 和 source instance 应在凭证可用后通过该 state destroy，
+AMI 与 snapshot 不属于 destroy 范围。
