@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -199,57 +201,60 @@ type cvAPDBNetworkServiceV2 struct {
 	coinSigner    *tblsThresholdSigner
 	inbox         <-chan Message
 
-	mu                     sync.Mutex
-	experimentMu           sync.Mutex
-	verifiedCatalogMu      sync.Mutex
-	pendingLocks           map[string]*cvAPDBPendingLockV2
-	pendingComponents      map[string]*cvAPDBPendingRecoveryV2
-	pendingAggregates      map[string]*cvAPDBPendingRecoveryV2
-	pendingCoins           map[string]*cvPendingCoinV2
-	localCoinShares        map[string][]byte
-	coinShareReplies       map[string]map[int]struct{}
-	coinShareReplyInFlight map[string]map[int]struct{}
-	poolSlots              map[int]*cvNetworkPoolSlotV2
-	eligibleProposers      map[int]struct{}
-	eligibilityValue       []byte
-	eligibilityCoin        *cvCoinOutputV2
-	validatorSample        []int
-	pendingValidation      map[string]*cvPendingValidationV2
-	validationRecords      map[string]*cvValidationRecordV2
-	validationInFlight     map[string]struct{}
-	validationOneShot      map[int][]byte
-	validationLocalShares  map[string][]byte
-	certifiedValidation    map[int]*cvCertifiedValidationV2
-	certifiedReady         map[int]chan struct{}
-	pendingDecisions       map[string]*cvPendingDecisionV2
-	decisionLocalShares    map[string][]byte
-	decisionCertificates   map[string][]byte
-	acceptedHandoff        []byte
-	handoffReady           chan struct{}
-	localScalarOutputs     map[string][]byte
-	scalarAggregates       map[string]*cvAggregateV2
-	pendingScalarShares    map[string]*cvPendingScalarSharesV2
-	pendingLaneACKsV2      *cvPendingLaneACKsV2
-	componentRefsV2        map[int]cvComponentRefV2
-	verifiedComponentsV2   map[int]cvVerifiedComponentV2
-	verifiedComponentCalls map[int]*cvVerifiedComponentCallV2
-	rejectedComponentsV2   map[int]struct{}
-	verifiedCatalogV2      []cvComponentRefV2
-	verifiedCatalogPrewarm bool
-	localComponentRefV2    []byte
-	dealerPayloadsV2       map[string][]byte
-	componentRefUpdatesV2  chan struct{}
-	certifiedCandidatesV2  map[string][]byte
-	candidateFanoutV2      map[string]*cvCandidateFanoutStateV2
-	certifiedCandidateChV2 chan *cvAgreementObjectV2
-	outbound               chan cvOutboundMessageV2
-	outboundWG             sync.WaitGroup
-	cryptoQueue            chan cvCryptoJobV2
-	cryptoWG               sync.WaitGroup
-	processingLaneOffersV2 map[[2]int]struct{}
-	processingCandidatesV2 map[string]struct{}
-	experimentMetrics      cvServiceExperimentMetricsV2
-	done                   chan struct{}
+	mu                      sync.Mutex
+	experimentMu            sync.Mutex
+	verifiedCatalogMu       sync.Mutex
+	pendingLocks            map[string]*cvAPDBPendingLockV2
+	pendingComponents       map[string]*cvAPDBPendingRecoveryV2
+	pendingAggregates       map[string]*cvAPDBPendingRecoveryV2
+	pendingCoins            map[string]*cvPendingCoinV2
+	localCoinShares         map[string][]byte
+	coinShareReplies        map[string]map[int]struct{}
+	coinShareReplyInFlight  map[string]map[int]struct{}
+	poolSlots               map[int]*cvNetworkPoolSlotV2
+	eligibleProposers       map[int]struct{}
+	eligibilityValue        []byte
+	eligibilityCoin         *cvCoinOutputV2
+	validatorSample         []int
+	pendingValidation       map[string]*cvPendingValidationV2
+	validationRecords       map[string]*cvValidationRecordV2
+	validationInFlight      map[string]struct{}
+	validationOneShot       map[int][]byte
+	validationLocalShares   map[string][]byte
+	certifiedValidation     map[int]*cvCertifiedValidationV2
+	certifiedReady          map[int]chan struct{}
+	pendingDecisions        map[string]*cvPendingDecisionV2
+	decisionLocalShares     map[string][]byte
+	decisionCertificates    map[string][]byte
+	acceptedHandoff         []byte
+	handoffReady            chan struct{}
+	localScalarOutputs      map[string][]byte
+	scalarAggregates        map[string]*cvAggregateV2
+	pendingScalarShares     map[string]*cvPendingScalarSharesV2
+	pendingLaneACKsV2       *cvPendingLaneACKsV2
+	componentRefsV2         map[int]cvComponentRefV2
+	verifiedComponentsV2    map[int]cvVerifiedComponentV2
+	verifiedComponentCalls  map[int]*cvVerifiedComponentCallV2
+	rejectedComponentsV2    map[int]struct{}
+	verifiedCatalogV2       []cvComponentRefV2
+	verifiedCatalogPrewarm  bool
+	localComponentRefV2     []byte
+	dealerPayloadsV2        map[string][]byte
+	recoveryPrewarmV2       bool
+	recoveredPayloadsV2     map[string][]byte
+	recoveredPayloadCallsV2 map[string]*cvRecoveredPayloadCallV2
+	componentRefUpdatesV2   chan struct{}
+	certifiedCandidatesV2   map[string][]byte
+	candidateFanoutV2       map[string]*cvCandidateFanoutStateV2
+	certifiedCandidateChV2  chan *cvAgreementObjectV2
+	outbound                chan cvOutboundMessageV2
+	outboundWG              sync.WaitGroup
+	cryptoQueue             chan cvCryptoJobV2
+	cryptoWG                sync.WaitGroup
+	processingLaneOffersV2  map[[2]int]struct{}
+	processingCandidatesV2  map[string]struct{}
+	experimentMetrics       cvServiceExperimentMetricsV2
+	done                    chan struct{}
 }
 
 func newCVAPDBNetworkServiceV2(
@@ -560,11 +565,12 @@ func (s *cvAPDBNetworkServiceV2) setEligibilityCoin(output *cvCoinOutputV2) erro
 	s.eligibilityCoin = coin
 	s.eligibleProposers = nodeSet(proposers)
 	s.validatorSample = append([]int(nil), validators...)
-	prewarm := false
-	// Sampled validators prewarm the same verified catalog as proposers: the
-	// service shares one verifiedComponentsV2 cache, so a validator that has
-	// already verified the selected components serves validation requests from
-	// cache instead of running recovery on the post-candidate critical path.
+	prewarmCatalog := false
+	prewarmRecovery := false
+	// Proposers still prewarm the full verified catalog. Sampled validators
+	// only pre-recover payloads: verification is deferred to the components a
+	// validation request actually selects, which keeps validator CPU linear in
+	// the selection instead of the whole pool at large n.
 	_, proposerEligible := s.eligibleProposers[s.cfg.LocalNode]
 	validatorSampled := false
 	for _, member := range s.validatorSample {
@@ -573,13 +579,29 @@ func (s *cvAPDBNetworkServiceV2) setEligibilityCoin(output *cvCoinOutputV2) erro
 			break
 		}
 	}
-	if (proposerEligible || validatorSampled) && !s.verifiedCatalogPrewarm {
+	validatorPrewarmMode := cvValidatorPrewarmModeFromEnvV2(len(s.cfg.OldRoster))
+	if proposerEligible && !s.verifiedCatalogPrewarm {
 		s.verifiedCatalogPrewarm = true
-		prewarm = true
+		prewarmCatalog = true
+	}
+	if validatorSampled && !proposerEligible && !s.recoveryPrewarmV2 {
+		switch validatorPrewarmMode {
+		case cvValidatorPrewarmRecoverV2:
+			s.recoveryPrewarmV2 = true
+			prewarmRecovery = true
+		case cvValidatorPrewarmFullV2:
+			if !s.verifiedCatalogPrewarm {
+				s.verifiedCatalogPrewarm = true
+				prewarmCatalog = true
+			}
+		}
 	}
 	s.mu.Unlock()
-	if prewarm {
+	if prewarmCatalog {
 		go func() { _, _ = s.AwaitVerifiedComponentCatalogV2(s.ctx) }()
+	}
+	if prewarmRecovery {
+		go s.prewarmComponentRecoveryV2()
 	}
 	return nil
 }
@@ -1747,6 +1769,148 @@ func (s *cvAPDBNetworkServiceV2) run() {
 				return
 			}
 			s.dispatch(msg)
+		}
+	}
+}
+
+type cvValidatorPrewarmModeV2 int
+
+const (
+	cvValidatorPrewarmOffV2 cvValidatorPrewarmModeV2 = iota
+	cvValidatorPrewarmRecoverV2
+	cvValidatorPrewarmFullV2
+)
+
+// cvValidatorPrewarmModeV2 selects how sampled validators prepare before a
+// validation request arrives. At large n the full-catalog prewarm pulls and
+// verifies every pool component on most nodes, which dominates cluster bytes
+// and CPU; deployments pick the trade-off explicitly.
+func cvValidatorPrewarmModeFromEnvV2(rosterSize int) cvValidatorPrewarmModeV2 {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("RLADKR_VALIDATOR_PREWARM"))) {
+	case "full":
+		return cvValidatorPrewarmFullV2
+	case "recover":
+		return cvValidatorPrewarmRecoverV2
+	case "off":
+		return cvValidatorPrewarmOffV2
+	default:
+		// Latency runs at small n win from fully prewarmed validators; above
+		// n=32 the full-catalog verify on most of the committee dominates CPU
+		// and cluster bytes, so payload prewarm with on-request verification
+		// is the default.
+		if rosterSize > 32 {
+			return cvValidatorPrewarmRecoverV2
+		}
+		return cvValidatorPrewarmFullV2
+	}
+}
+
+type cvRecoveredPayloadCallV2 struct {
+	done    chan struct{}
+	payload []byte
+	err     error
+}
+
+// recoveredComponentPayloadV2 returns the locked component payload, using the
+// verified-leaf cache first, then a service-level recovered-payload cache, and
+// only falling back to the network. Prewarmed validators therefore pay for
+// verification once per selected component instead of once per catalog entry.
+func (s *cvAPDBNetworkServiceV2) recoveredComponentPayloadV2(
+	ctx context.Context, ref cvComponentRefV2, purpose cvRecoveryPurposeV2,
+) ([]byte, error) {
+	key := string(ref.Header.Instance)
+	s.mu.Lock()
+	if entry, ok := s.verifiedComponentsV2[ref.Header.DealerID]; ok &&
+		equalComponentRefsV2(entry.ref, ref) && len(entry.payload) > 0 {
+		payload := entry.payload
+		s.mu.Unlock()
+		return payload, nil
+	}
+	if payload, ok := s.recoveredPayloadsV2[key]; ok {
+		s.mu.Unlock()
+		return payload, nil
+	}
+	if call := s.recoveredPayloadCallsV2[key]; call != nil {
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		case <-call.done:
+			return call.payload, call.err
+		}
+	}
+	call := &cvRecoveredPayloadCallV2{done: make(chan struct{})}
+	if s.recoveredPayloadCallsV2 == nil {
+		s.recoveredPayloadCallsV2 = make(map[string]*cvRecoveredPayloadCallV2, 8)
+	}
+	s.recoveredPayloadCallsV2[key] = call
+	s.mu.Unlock()
+
+	payload, err := s.recoverComponentForPurpose(ctx, &ref.Lock, func(recovered []byte) error {
+		if !bytes.Equal(cvComponentPayloadDigestV2(recovered), ref.Header.PayloadDigest) {
+			return fmt.Errorf("CV V2 component payload mismatch")
+		}
+		return nil
+	}, purpose, ref.Header.DealerID)
+
+	s.mu.Lock()
+	call.payload, call.err = payload, err
+	delete(s.recoveredPayloadCallsV2, key)
+	if err == nil {
+		if s.recoveredPayloadsV2 == nil {
+			s.recoveredPayloadsV2 = make(map[string][]byte, len(s.cfg.OldRoster))
+		}
+		if len(s.recoveredPayloadsV2) < len(s.cfg.OldRoster) {
+			s.recoveredPayloadsV2[key] = append([]byte(nil), payload...)
+		}
+	}
+	close(call.done)
+	s.mu.Unlock()
+	return payload, err
+}
+
+// prewarmComponentRecoveryV2 pulls every broadcast component payload into the
+// recovered-payload cache without verifying it. Sampled validators use it so
+// the expensive APVSS verification runs only for the components a validation
+// request actually selects.
+func (s *cvAPDBNetworkServiceV2) prewarmComponentRecoveryV2() {
+	workers := make(chan struct{}, 4)
+	var group sync.WaitGroup
+	defer group.Wait()
+	seen := make(map[int]struct{}, len(s.cfg.OldRoster))
+	for {
+		s.mu.Lock()
+		pending := make([]cvComponentRefV2, 0, len(s.componentRefsV2))
+		for dealer, ref := range s.componentRefsV2 {
+			if _, done := seen[dealer]; done {
+				continue
+			}
+			seen[dealer] = struct{}{}
+			if _, verified := s.verifiedComponentsV2[dealer]; verified {
+				continue
+			}
+			pending = append(pending, ref)
+		}
+		updates := s.componentRefUpdatesV2
+		complete := len(seen) >= len(s.cfg.OldRoster)
+		s.mu.Unlock()
+		if complete {
+			return
+		}
+		for _, ref := range pending {
+			group.Add(1)
+			workers <- struct{}{}
+			go func(ref cvComponentRefV2) {
+				defer func() { <-workers; group.Done() }()
+				_, _ = s.recoveredComponentPayloadV2(s.ctx, ref, cvRecoveryValidatorComponentV2)
+			}(ref)
+		}
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-updates:
 		}
 	}
 }

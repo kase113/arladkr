@@ -387,12 +387,7 @@ func (s *cvAPDBNetworkServiceV2) verifiedComponentLeafV2(
 	s.verifiedComponentCalls[dealer] = call
 	s.mu.Unlock()
 
-	payload, err := s.recoverComponentForPurpose(ctx, &ref.Lock, func(recovered []byte) error {
-		if !bytes.Equal(cvComponentPayloadDigestV2(recovered), ref.Header.PayloadDigest) {
-			return fmt.Errorf("CV V2 component payload mismatch")
-		}
-		return nil
-	}, purpose, ref.Header.DealerID)
+	payload, err := s.recoveredComponentPayloadV2(ctx, ref, purpose)
 	var leaf *cvLeafV2
 	if err == nil {
 		leaf, err = cvDecodeLeafV2(payload, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators)
