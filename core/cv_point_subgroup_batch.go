@@ -79,6 +79,17 @@ func cvDecodeG1WireUnchecked(encoded []byte) (bls12381.G1Affine, error) {
 		if err := point.Y.SetBytesCanonical(encoded[fp.Bytes : fp.Bytes*2]); err != nil {
 			return bls12381.G1Affine{}, err
 		}
+		// Uncompressed input skips the square root, so curve membership is
+		// not implied the way it is on the compressed path; check it here
+		// before the point reaches the batch subgroup combination.
+		var lhs, rhs fp.Element
+		lhs.Square(&point.Y)
+		rhs.Square(&point.X).Mul(&rhs, &point.X)
+		// BLS12-381 G1 curve coefficient b is 4.
+		rhs.Add(&rhs, new(fp.Element).SetUint64(4))
+		if !lhs.Equal(&rhs) {
+			return bls12381.G1Affine{}, fmt.Errorf("invalid CV point not on curve")
+		}
 		return point, nil
 	}
 	var point bls12381.G1Affine
@@ -150,9 +161,16 @@ func (r *cvWireReader) pointDeferred() (bls12381.G1Affine, error) {
 	if _, err := io.ReadFull(r.reader, encoded); err != nil {
 		return bls12381.G1Affine{}, err
 	}
-	point, err := cvDecodeG1WireUnchecked(encoded)
-	if err != nil {
-		return bls12381.G1Affine{}, fmt.Errorf("invalid CV-sAPVSS canonical point: %w", err)
+	point, ok := r.side.consumeHint(encoded)
+	if !ok {
+		var err error
+		point, err = cvDecodeG1WireUnchecked(encoded)
+		if err != nil {
+			return bls12381.G1Affine{}, fmt.Errorf("invalid CV-sAPVSS canonical point: %w", err)
+		}
+	}
+	if r.side != nil && r.side.record != nil {
+		r.side.record = cvAppendG1HintUncompressed(r.side.record, &point)
 	}
 	r.deferredPoints = append(r.deferredPoints, point)
 	return point, nil

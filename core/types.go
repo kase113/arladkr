@@ -143,6 +143,10 @@ type EpochResult struct {
 	CVNewAggregateRecoveryLatency           time.Duration
 	CVARCFormationLatency                   time.Duration
 	CVValidationCertificateFormationLatency time.Duration
+	CVValidationCanonicalLatency            time.Duration
+	CVValidationNetworkWaitLatency          time.Duration
+	CVValidationSignatureVerifyLatency      time.Duration
+	CVValidationAggregateVerifyLatency      time.Duration
 	CVDecisionCertificateFormationLatency   time.Duration
 	CVScalarBoundedDLogLatency              time.Duration
 	CVBlindingGroupDecryptionLatency        time.Duration

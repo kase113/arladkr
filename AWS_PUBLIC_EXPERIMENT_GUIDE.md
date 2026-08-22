@@ -859,3 +859,56 @@ compact summary 收集采用单节点容错：若某节点在服务退出竞态�
 失败。artifact 文件读取使用 `sudo`，兼容 runner 创建的受限目录。
 compact 快路径也使用 `sudo test/grep/tail`，避免 systemd runner 的文件权限使所有节点都被误报为
 缺少 bench/status。
+
+## 基建优化批次（2026-08-22，fabfile 本地未入库）
+
+代码位于 `practicaladkr_project_code/fabfile.py`（编辑前备份 `fabfile.py.bak-20260822`；
+该文件不在 git 管理内，建议收纳入版本库）。本批次五项：
+
+1. **compact 收集健壮化（已默认启用）**：缺失 bench 的节点不再立即标
+   `collection_error`，先走一次**批量耐心精确重试**（60s 窗口、每 Region 一条命令），
+   重试成功只记 `collection_fallback.txt`；仍失败才标 unavailable。输出带
+   `collection_schema.txt`（当前版本 2）。原先的逐节点 chunked fallback 已移除。
+2. **setup shard 并行化 + 持久 bucket（已默认启用）**：shard 的 tar+upload+presign 从
+   控制机串行循环改为 8 线程并行；默认 bucket 改为每账号持久的 `arladkr-ssm-<account>`
+   （配置 `runner.s3_bucket` 仍可覆盖）；public/shard 对象按 digest 内容寻址
+   （`setup/<project>/<digest16>/...`），未变化的材料跨轮复用、不再每轮删除。
+3. **roster 稳定性双检（已默认启用）**：`_aws_wait_ssm_targets` 首次拿到完整 roster 后
+   等 15s 再核一次 instance-id/address，Spot 换机或地址漂移则重新等待
+   （`runner.roster_stability_seconds` 可调，0 关闭）。
+4. **full 收集节点直传 S3（opt-in，待小 fleet 验证）**：`runner.collect_via_s3: true`
+   开启后，full 模式改为节点侧 tar.gz → presigned PUT 直传持久 bucket（每 Region 一条
+   批量命令 + put-index），控制机只下载校验 digest；失败节点自动回退旧 chunked 路径。
+   100+ 节点必开；验证通过后可改默认。
+5. **cleanup/launch 批量化（未做，记录）**：cleanup barrier 与 launch 仍为每节点单实例
+   命令（50 线程池并发）；>50 节点顺序分批。runner 脚本模板化（per-node 差异只剩
+   node-slot）后可批量化，属下一批次。
+
+δ good-case 相关旋钮见本地性能追踪文档第六轮（默认关）。
+
+### 2026-08-22 本地补丁状态
+
+Fabric 已在本地工作树实现三项收口，但尚未提交到一个 Git 仓库：
+
+- cleanup-ready 和 benchmark launch 在 SSM 模式下按 NodeSlot 生成临时 AES256 S3 命令包，
+  每个 Region 使用批量 SSM command；不再为每个节点单独发送 cleanup/launch command。
+- benchmark 启动后记录 instance ID、NodeSlot、地址和 Region baseline。`aws-wait` 每轮轮询检查
+  Spot replacement、实例停止/终止和地址漂移；检测到变化时记录为 `invalidated`，而不是可用的
+  协议失败或性能样本。
+- full S3 收集按 NodeSlot 索引 presigned PUT，并在下载校验后删除本轮 transient objects；旧的
+  chunked SSM 路径仍作为失败节点 fallback。
+
+这些改动只做离线单元测试和 dry-run 验证，未在本轮创建 AWS 资源。`collect_via_s3` 仍建议先在
+n=10 小 fleet 验证后再用于 n>=100；cleanup/launch 批量路径则通过现有 58 个 Fabric 单元测试覆盖。
+
+### 2026-08-22 跨 Region 与 quorum-first 收集
+
+- cross-region suite 的各 Region Terraform apply、协议 ingress 二次 apply 和 destroy 现在并发执行；
+  任一 Region 失败仍会让整轮失败，但不会让其他 Region 无故串行等待。
+- `aws_collect(..., quorum_only=true)` 先读取所有在线节点的指定 run status，按 NodeSlot 选择确定性的
+  `n-f` 个 `success` 节点，再只对这组节点收集 summary。其余节点保留在 roster/manifest 中但标记为
+  `uncollected_hosts`，不再因为尾部 SSM 或服务退出阻塞有效 quorum 数据。
+- cross-region suite 在协议达到 quorum 后默认使用 quorum-only summary；full diagnostics 不再是成功
+  样本的默认前置条件。需要全节点取证时仍可显式调用 `aws-collect`，不会改变协议成功判据。
+- 这些路径已通过离线 Fabric 测试和 dry-run；真实跨 Region 的 SSM/公网 roster、Spot interruption 和
+  presigned S3 收集仍需 AWS 小规模 smoke 验证。

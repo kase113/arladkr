@@ -128,9 +128,16 @@ func (c *cvAPDBLockCollectorV2) RecoverLock() (*cvAPDBLockV2, error) {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("insufficient CV V2 APDB stored shares")
 	}
-	shares := make(map[int][]byte, len(c.shares))
-	for member, share := range c.shares {
+	shares := make(map[int][]byte, c.signer.Threshold())
+	for _, member := range c.oldRoster {
+		share, ok := c.shares[member]
+		if !ok {
+			continue
+		}
 		shares[member] = append([]byte(nil), share...)
+		if len(shares) == c.signer.Threshold() {
+			break
+		}
 	}
 	c.mu.Unlock()
 	certificate, err := c.signer.Recover(cvAPDBStoredDomain, c.statement, shares)

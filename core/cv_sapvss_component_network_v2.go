@@ -10,12 +10,13 @@ import (
 )
 
 type cvComponentVerificationResultV2 struct {
-	ref        cvComponentRefV2
-	leafDigest []byte
-	payload    []byte
-	leaf       *cvLeafV2
-	recoverErr error
-	verifyErr  error
+	ref          cvComponentRefV2
+	leafDigest   []byte
+	payload      []byte
+	payloadHints []byte
+	leaf         *cvLeafV2
+	recoverErr   error
+	verifyErr    error
 }
 
 type cvComponentPipelineJobV2 struct {
@@ -209,7 +210,9 @@ func (s *cvAPDBNetworkServiceV2) recoverComponentPayloadV2(
 	ctx context.Context, ref cvComponentRefV2,
 ) cvComponentVerificationResultV2 {
 	result := cvComponentVerificationResultV2{ref: cloneComponentRefV2(ref)}
-	payload, err := s.recoverComponentForPurpose(ctx, &ref.Lock, nil, cvRecoveryProposerCatalogV2, ref.Header.DealerID)
+	payload, hints, err := s.recoverComponentForPurpose(
+		ctx, &ref.Lock, nil, cvRecoveryProposerCatalogV2, ref.Header.DealerID,
+	)
 	if err != nil {
 		result.recoverErr = fmt.Errorf("recover CV V2 component %d: %w", ref.Header.DealerID, err)
 		return result
@@ -219,6 +222,7 @@ func (s *cvAPDBNetworkServiceV2) recoverComponentPayloadV2(
 		return result
 	}
 	result.payload = append([]byte(nil), payload...)
+	result.payloadHints = append([]byte(nil), hints...)
 	return result
 }
 
@@ -230,7 +234,9 @@ func (s *cvAPDBNetworkServiceV2) verifyRecoveredComponentV2(
 	}
 	ref := result.ref
 	payload := result.payload
-	leaf, err := cvDecodeLeafV2(payload, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators)
+	leaf, err := cvDecodeLeafV2WithHints(
+		payload, result.payloadHints, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators,
+	)
 	if err != nil {
 		result.verifyErr = fmt.Errorf("invalid CV V2 component %d payload: %w", ref.Header.DealerID, err)
 		return result
@@ -387,10 +393,12 @@ func (s *cvAPDBNetworkServiceV2) verifiedComponentLeafV2(
 	s.verifiedComponentCalls[dealer] = call
 	s.mu.Unlock()
 
-	payload, err := s.recoveredComponentPayloadV2(ctx, ref, purpose)
+	payload, hints, err := s.recoveredComponentPayloadV2(ctx, ref, purpose)
 	var leaf *cvLeafV2
 	if err == nil {
-		leaf, err = cvDecodeLeafV2(payload, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators)
+		leaf, err = cvDecodeLeafV2WithHints(
+			payload, hints, s.cfg.LeafContext, s.cfg.Receivers, s.cfg.Validators,
+		)
 		if err == nil && leaf.DealerID != dealer {
 			err = fmt.Errorf("CV V2 component dealer mismatch: leaf=%d ref=%d", leaf.DealerID, dealer)
 		}

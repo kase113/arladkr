@@ -614,10 +614,32 @@ func (b *DXTBackend) Deal(_ context.Context, dealer int, secret *big.Int) (*DXTT
 			}
 
 			deadline := time.NewTimer(timeout)
+			// Paper good-case optimization (Fig. 4c): once the ack threshold
+			// is met, keep collecting for a bounded delta so slow-but-honest
+			// recipients still land in the transcript instead of paying
+			// straggler costs in later phases. The paper uses delta=1s at
+			// n=127/196 and 2s at n=56; PRACTICAL_DEALING_DELTA_MS=0
+			// (default) keeps the legacy proceed-at-threshold behavior, and
+			// the overall deadline still caps the extra window.
+			dealingDelta := durationFromEnvMsOr("PRACTICAL_DEALING_DELTA_MS", 0)
+			var deltaDone <-chan time.Time
 		collectAcks:
-			for len(acks) < requiredAcks {
+			for {
+				if len(acks) >= requiredAcks {
+					if dealingDelta <= 0 {
+						break
+					}
+					if deltaDone == nil {
+						deltaDone = time.After(dealingDelta)
+					}
+				}
+				if len(acks) >= len(b.newCommittee) {
+					break
+				}
 				select {
 				case <-deadline.C:
+					break collectAcks
+				case <-deltaDone:
 					break collectAcks
 				case ack := <-ackCh:
 					if _, ok := b.newIndex[ack.Recipient]; !ok {

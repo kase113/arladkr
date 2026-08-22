@@ -103,6 +103,10 @@ type runStat struct {
 	cvNewAggregateRecoveryMs              float64
 	cvARCFormationMs                      float64
 	cvValidationCertificateFormationMs    float64
+	cvValidationCanonicalMs               float64
+	cvValidationNetworkWaitMs             float64
+	cvValidationSignatureVerifyMs         float64
+	cvValidationAggregateVerifyMs         float64
 	cvDecisionCertificateFormationMs      float64
 	cvScalarBoundedDLogMs                 float64
 	cvBlindingGroupDecryptionMs           float64
@@ -557,6 +561,10 @@ func main() {
 				cvNewAggregateRecoveryMs:              float64(res.CVNewAggregateRecoveryLatency.Microseconds()) / 1000.0,
 				cvARCFormationMs:                      float64(res.CVARCFormationLatency.Microseconds()) / 1000.0,
 				cvValidationCertificateFormationMs:    float64(res.CVValidationCertificateFormationLatency.Microseconds()) / 1000.0,
+				cvValidationCanonicalMs:               float64(res.CVValidationCanonicalLatency.Microseconds()) / 1000.0,
+				cvValidationNetworkWaitMs:             float64(res.CVValidationNetworkWaitLatency.Microseconds()) / 1000.0,
+				cvValidationSignatureVerifyMs:         float64(res.CVValidationSignatureVerifyLatency.Microseconds()) / 1000.0,
+				cvValidationAggregateVerifyMs:         float64(res.CVValidationAggregateVerifyLatency.Microseconds()) / 1000.0,
 				cvDecisionCertificateFormationMs:      float64(res.CVDecisionCertificateFormationLatency.Microseconds()) / 1000.0,
 				cvScalarBoundedDLogMs:                 float64(res.CVScalarBoundedDLogLatency.Nanoseconds()) / 1e6,
 				cvBlindingGroupDecryptionMs:           float64(res.CVBlindingGroupDecryptionLatency.Nanoseconds()) / 1e6,
@@ -1060,7 +1068,7 @@ func formatBenchResult(in benchResultInput) string {
 		in.cvSamplingUnionBound,
 	)
 	cvLine := line + fmt.Sprintf(
-		" mean_cv_component_count=%.0f mean_cv_arc_holder_count=%.0f mean_cv_recovered_shard_count=%.0f mean_cv_verified_receipt_count=%.0f leaf_build_ms=%.0f component_disperse_ms=%.0f candidate_formation_ms=%.0f eligibility_coin_ms=%.2f proposer_slots_ms=%.2f mean_coin_fanout_ms=%.2f mean_candidate_ack_wait_ms=%.2f mean_candidate_retry_wait_ms=%.2f mean_candidate_fanout_max_peer_ms=%.2f mean_candidate_fanout_attempts=%.0f mean_candidate_fanout_retries=%.0f aggregate_disperse_ms=%.0f aggregate_agreement_ms=%.0f mean_apvss_ack_count=%.2f mean_apvss_fallback_count=%.2f mean_apvss_proof_bytes=%.0f mean_apvss_leaf_wire_bytes=%.0f mean_completed_candidate_count=%.0f mean_pool_wire_bytes=%.0f mean_validation_request_wire_bytes=%.0f mean_agreement_object_wire_bytes=%.0f mean_aggregate_payload_bytes=%.0f mean_aggregate_apdb_encoded_bytes=%.0f mean_pool_certificate_bytes=%.0f mean_validation_certificate_bytes=%.0f mean_arc_certificate_bytes=%.0f mean_decision_certificate_bytes=%.0f mean_handoff_wire_bytes=%.0f mean_proposer_component_recovery_sent_bytes=%.0f mean_proposer_component_recovery_recv_bytes=%.0f mean_proposer_component_recovery_ms=%.2f mean_proposer_catalog_verify_ms=%.2f mean_proposer_catalog_scan_count=%.0f mean_proposer_rejected_component_count=%.0f mean_validator_component_recovery_sent_bytes=%.0f mean_validator_component_recovery_recv_bytes=%.0f mean_validator_component_recovery_ms=%.2f mean_validator_aggregate_recovery_sent_bytes=%.0f mean_validator_aggregate_recovery_recv_bytes=%.0f mean_validator_aggregate_recovery_ms=%.2f mean_arc_formation_ms=%.3f mean_vcert_formation_ms=%.3f mean_deccert_formation_ms=%.3f mean_scalar_bounded_dlog_ms=%.3f mean_blinding_group_decryption_ms=%.3f aggregate_gate_wait_ms=%.2f aggregate_leaf_load_ms=%.2f aggregate_build_ms=%.2f aggregate_rs_ms=%.2f aggregate_header_token_ms=%.2f aggregate_offer_send_ms=%.2f aggregate_arc_wait_ms=%.2f aggregate_certificate_ms=%.2f recover_shard_ms=%.0f receipt_ms=%.0f mean_component_disperse_sent_bytes=%.0f mean_component_disperse_recv_bytes=%.0f mean_candidate_formation_sent_bytes=%.0f mean_candidate_formation_recv_bytes=%.0f mean_aggregate_agreement_sent_bytes=%.0f mean_aggregate_agreement_recv_bytes=%.0f mean_recover_shard_sent_bytes=%.0f mean_recover_shard_recv_bytes=%.0f mean_receipt_sent_bytes=%.0f mean_receipt_recv_bytes=%.0f mean_mvba_pd_data_sent_bytes=%.0f mean_mvba_pd_data_recv_bytes=%.0f mean_mvba_rc_data_sent_bytes=%.0f mean_mvba_rc_data_recv_bytes=%.0f mean_mvba_certificate_sent_bytes=%.0f mean_mvba_certificate_recv_bytes=%.0f",
+		" mean_cv_component_count=%.0f mean_cv_arc_holder_count=%.0f mean_cv_recovered_shard_count=%.0f mean_cv_verified_receipt_count=%.0f leaf_build_ms=%.0f component_disperse_ms=%.0f candidate_formation_ms=%.0f eligibility_coin_ms=%.2f proposer_slots_ms=%.2f mean_coin_fanout_ms=%.2f mean_candidate_ack_wait_ms=%.2f mean_candidate_retry_wait_ms=%.2f mean_candidate_fanout_max_peer_ms=%.2f mean_candidate_fanout_attempts=%.0f mean_candidate_fanout_retries=%.0f aggregate_disperse_ms=%.0f aggregate_agreement_ms=%.0f mean_apvss_ack_count=%.2f mean_apvss_fallback_count=%.2f mean_apvss_proof_bytes=%.0f mean_apvss_leaf_wire_bytes=%.0f mean_completed_candidate_count=%.0f mean_pool_wire_bytes=%.0f mean_validation_request_wire_bytes=%.0f mean_agreement_object_wire_bytes=%.0f mean_aggregate_payload_bytes=%.0f mean_aggregate_apdb_encoded_bytes=%.0f mean_pool_certificate_bytes=%.0f mean_validation_certificate_bytes=%.0f mean_arc_certificate_bytes=%.0f mean_decision_certificate_bytes=%.0f mean_handoff_wire_bytes=%.0f mean_proposer_component_recovery_sent_bytes=%.0f mean_proposer_component_recovery_recv_bytes=%.0f mean_proposer_component_recovery_ms=%.2f mean_proposer_catalog_verify_ms=%.2f mean_proposer_catalog_scan_count=%.0f mean_proposer_rejected_component_count=%.0f mean_validator_component_recovery_sent_bytes=%.0f mean_validator_component_recovery_recv_bytes=%.0f mean_validator_component_recovery_ms=%.2f mean_validator_aggregate_recovery_sent_bytes=%.0f mean_validator_aggregate_recovery_recv_bytes=%.0f mean_validator_aggregate_recovery_ms=%.2f mean_arc_formation_ms=%.3f mean_vcert_formation_ms=%.3f mean_vcert_canonical_ms=%.3f mean_vcert_network_wait_ms=%.3f mean_vcert_signature_verify_ms=%.3f mean_vcert_aggregate_verify_ms=%.3f mean_deccert_formation_ms=%.3f mean_scalar_bounded_dlog_ms=%.3f mean_blinding_group_decryption_ms=%.3f aggregate_gate_wait_ms=%.2f aggregate_leaf_load_ms=%.2f aggregate_build_ms=%.2f aggregate_rs_ms=%.2f aggregate_header_token_ms=%.2f aggregate_offer_send_ms=%.2f aggregate_arc_wait_ms=%.2f aggregate_certificate_ms=%.2f recover_shard_ms=%.0f receipt_ms=%.0f mean_component_disperse_sent_bytes=%.0f mean_component_disperse_recv_bytes=%.0f mean_candidate_formation_sent_bytes=%.0f mean_candidate_formation_recv_bytes=%.0f mean_aggregate_agreement_sent_bytes=%.0f mean_aggregate_agreement_recv_bytes=%.0f mean_recover_shard_sent_bytes=%.0f mean_recover_shard_recv_bytes=%.0f mean_receipt_sent_bytes=%.0f mean_receipt_recv_bytes=%.0f mean_mvba_pd_data_sent_bytes=%.0f mean_mvba_pd_data_recv_bytes=%.0f mean_mvba_rc_data_sent_bytes=%.0f mean_mvba_rc_data_recv_bytes=%.0f mean_mvba_certificate_sent_bytes=%.0f mean_mvba_certificate_recv_bytes=%.0f",
 		meanOf(in.stats, func(s runStat) float64 { return s.cvComponentCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvARCHolderCount }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvRecoveredShardCount }),
@@ -1107,6 +1115,10 @@ func formatBenchResult(in benchResultInput) string {
 		meanOf(in.stats, func(s runStat) float64 { return s.cvValidatorAggregateRecoveryMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvARCFormationMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvValidationCertificateFormationMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvValidationCanonicalMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvValidationNetworkWaitMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvValidationSignatureVerifyMs }),
+		meanOf(in.stats, func(s runStat) float64 { return s.cvValidationAggregateVerifyMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvDecisionCertificateFormationMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvScalarBoundedDLogMs }),
 		meanOf(in.stats, func(s runStat) float64 { return s.cvBlindingGroupDecryptionMs }),

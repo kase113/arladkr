@@ -823,6 +823,39 @@ func cvDecodeLeafV2(
 	wire []byte, expectedContext *cvLeafContextV2,
 	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
 ) (*cvLeafV2, error) {
+	return cvDecodeLeafV2Sidechannel(wire, nil, expectedContext, receivers, validators)
+}
+
+// cvDecodeLeafV2WithHints decodes with an optional uncompressed-point
+// attachment. Hints only change how y-coordinates are obtained; every
+// accepted point still recompresses to the exact signed wire bytes.
+func cvDecodeLeafV2WithHints(
+	wire, hints []byte, expectedContext *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) (*cvLeafV2, error) {
+	return cvDecodeLeafV2Sidechannel(
+		wire, newCVDecodeSidechannelHintsV2(hints), expectedContext, receivers, validators,
+	)
+}
+
+// cvRecordLeafDeferredHintsV2 decodes exactly as consumers will and records
+// the uncompressed form of every deferred point in wire order. A nil result
+// means the decode rejected the wire, so no attachment is served.
+func cvRecordLeafDeferredHintsV2(
+	wire []byte, expectedContext *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) []byte {
+	side := newCVDecodeSidechannelRecordingV2()
+	if _, err := cvDecodeLeafV2Sidechannel(wire, side, expectedContext, receivers, validators); err != nil {
+		return nil
+	}
+	return side.record
+}
+
+func cvDecodeLeafV2Sidechannel(
+	wire []byte, side *cvDecodeSidechannelV2, expectedContext *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2, validators *cvValidatorKeyMaterialV2,
+) (*cvLeafV2, error) {
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(cvLeafWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvLeafWireDomainV2)) {
@@ -836,7 +869,7 @@ func cvDecodeLeafV2(
 	if err != nil || len(signature) != bls12381.SizeOfG1AffineCompressed || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid CV V2 dealer signature framing")
 	}
-	leaf, err := cvDecodeLeafV2Unsigned(unsigned, expectedContext, receivers)
+	leaf, err := cvDecodeLeafV2UnsignedSidechannel(unsigned, side, expectedContext, receivers)
 	if err != nil {
 		return nil, err
 	}
@@ -865,10 +898,17 @@ func cvDecodeLeafV2(
 func cvDecodeLeafV2Unsigned(
 	wire []byte, expectedContext *cvLeafContextV2, receivers *cvReceiverKeyMaterialV2,
 ) (*cvLeafV2, error) {
+	return cvDecodeLeafV2UnsignedSidechannel(wire, nil, expectedContext, receivers)
+}
+
+func cvDecodeLeafV2UnsignedSidechannel(
+	wire []byte, side *cvDecodeSidechannelV2, expectedContext *cvLeafContextV2,
+	receivers *cvReceiverKeyMaterialV2,
+) (*cvLeafV2, error) {
 	if cvValidateReceiverMaterialForLeafV2(expectedContext, receivers) != nil {
 		return nil, fmt.Errorf("invalid CV V2 leaf receiver registry")
 	}
-	r := newCVWireReader(wire)
+	r := newCVWireReaderSide(wire, side)
 	domain, err := r.bytes(len(cvLeafUnsignedWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvLeafUnsignedWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 unsigned leaf domain")
@@ -899,7 +939,7 @@ func cvDecodeLeafV2Unsigned(
 	if err != nil {
 		return nil, err
 	}
-	coreProof, err := cvDecodeCoreProofV2(coreWire, len(commitments))
+	coreProof, err := cvDecodeCoreProofV2Sidechannel(coreWire, len(commitments), side)
 	if err != nil {
 		return nil, err
 	}
@@ -944,8 +984,8 @@ func cvDecodeLeafV2Unsigned(
 				&receivers.encryptionPublicKeys[i],
 			)
 		} else {
-			offer, err = cvDecodeReceiverLaneOfferBeforeVerificationV2(
-				offerWire, expectedContext, leaf.DealerID, expectedContext.NewRoster[i], i+1,
+			offer, err = cvDecodeReceiverLaneOfferBeforeVerificationV2Sidechannel(
+				offerWire, side, expectedContext, leaf.DealerID, expectedContext.NewRoster[i], i+1,
 				&receivers.encryptionPublicKeys[i],
 			)
 		}
@@ -958,7 +998,7 @@ func cvDecodeLeafV2Unsigned(
 			if readErr != nil {
 				return nil, readErr
 			}
-			ack, readErr := cvDecodeACKEvidenceV2(ackWire, expectedContext)
+			ack, readErr := cvDecodeACKEvidenceV2Sidechannel(ackWire, side, expectedContext)
 			if readErr != nil {
 				return nil, readErr
 			}

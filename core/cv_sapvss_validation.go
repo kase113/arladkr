@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/big"
+	"time"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
@@ -20,6 +21,11 @@ const (
 type cvValidationCertificateV2 struct {
 	SignerBitmap       []byte
 	AggregateSignature []byte
+}
+
+type cvValidationBuildTimingsV2 struct {
+	IndividualVerify time.Duration
+	AggregateVerify  time.Duration
 }
 
 func cvValidationStatementV2(validatorSample []int, header *cvAggregateHeaderV2) ([]byte, error) {
@@ -86,13 +92,24 @@ func cvBuildValidationCertificateV2(
 	header *cvAggregateHeaderV2, validatorSample []int, quorum int,
 	signatures map[int][]byte, material *cvValidatorKeyMaterialV2,
 ) (*cvValidationCertificateV2, error) {
+	certificate, _, err := cvBuildValidationCertificateModeV2(
+		header, validatorSample, quorum, signatures, material, true,
+	)
+	return certificate, err
+}
+
+func cvBuildValidationCertificateModeV2(
+	header *cvAggregateHeaderV2, validatorSample []int, quorum int,
+	signatures map[int][]byte, material *cvValidatorKeyMaterialV2, verifyIndividuals bool,
+) (*cvValidationCertificateV2, cvValidationBuildTimingsV2, error) {
+	var timings cvValidationBuildTimingsV2
 	if material == nil || quorum <= 0 || quorum > len(validatorSample) || len(signatures) < quorum ||
 		!cvValidValidatorSampleV2(validatorSample, material) {
-		return nil, fmt.Errorf("invalid CV V2 validation certificate construction")
+		return nil, timings, fmt.Errorf("invalid CV V2 validation certificate construction")
 	}
 	statement, err := cvValidationStatementV2(validatorSample, header)
 	if err != nil {
-		return nil, err
+		return nil, timings, err
 	}
 	bitmap := make([]byte, cvValidationBitmapBytesV2(len(validatorSample)))
 	var aggregate bls12381.G1Affine
@@ -103,9 +120,16 @@ func cvBuildValidationCertificateV2(
 		if !ok {
 			continue
 		}
-		publicKey := &material.publicKeys[material.memberIndex[member]]
-		if !cvVerifyValidatorSignatureV2(publicKey, cvValidationCertificateV2Domain, statement, signature) {
-			return nil, fmt.Errorf("invalid CV V2 validator signature")
+		if verifyIndividuals {
+			started := time.Now()
+			valid := cvVerifyValidatorSignatureV2(
+				&material.publicKeys[material.memberIndex[member]],
+				cvValidationCertificateV2Domain, statement, signature,
+			)
+			timings.IndividualVerify += time.Since(started)
+			if !valid {
+				return nil, timings, fmt.Errorf("invalid CV V2 validator signature")
+			}
 		}
 		var point bls12381.G1Affine
 		_, _ = point.SetBytes(signature)
@@ -114,7 +138,7 @@ func cvBuildValidationCertificateV2(
 		signerCount++
 	}
 	if signerCount < quorum || signerCount != len(signatures) {
-		return nil, fmt.Errorf("insufficient or non-sample CV V2 validator signatures")
+		return nil, timings, fmt.Errorf("insufficient or non-sample CV V2 validator signatures")
 	}
 	certificate := &cvValidationCertificateV2{
 		SignerBitmap: bitmap,
@@ -123,10 +147,13 @@ func cvBuildValidationCertificateV2(
 			return append([]byte(nil), encoded[:]...)
 		}(),
 	}
-	if err := cvVerifyValidationCertificateV2(certificate, header, validatorSample, quorum, material); err != nil {
-		return nil, err
+	started := time.Now()
+	verifyErr := cvVerifyValidationCertificateV2(certificate, header, validatorSample, quorum, material)
+	timings.AggregateVerify = time.Since(started)
+	if verifyErr != nil {
+		return nil, timings, verifyErr
 	}
-	return certificate, nil
+	return certificate, timings, nil
 }
 
 func cvVerifyValidationCertificateV2(certificate *cvValidationCertificateV2, header *cvAggregateHeaderV2, validatorSample []int, quorum int, material *cvValidatorKeyMaterialV2) error {

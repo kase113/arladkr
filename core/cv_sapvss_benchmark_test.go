@@ -238,10 +238,9 @@ func BenchmarkCVAVerVerified(b *testing.B) {
 	})
 }
 
-func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
-	if os.Getenv("RLADKR_RUN_N32_LOCAL_BENCH") != "1" {
-		b.Skip("set RLADKR_RUN_N32_LOCAL_BENCH=1 to build and verify the n=32 catalog fixture")
-	}
+func cvN32CatalogBenchmarkFixture(b *testing.B) (
+	[]cvComponentVerificationResultV2, []cvComponentRefV2, *cvAPDBNetworkServiceV2,
+) {
 	oldRoster := make([]int, 32)
 	newRoster := make([]int, 32)
 	for i := range oldRoster {
@@ -310,15 +309,23 @@ func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
 	service := &cvAPDBNetworkServiceV2{cfg: cvAPDBNetworkServiceConfigV2{
 		LeafContext: leafContext, Receivers: receivers, Validators: validators,
 	}}
+	refs := make([]cvComponentRefV2, len(components))
+	for index := range components {
+		refs[index] = components[index].ref
+	}
+	return components, refs, service
+}
+
+func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N32_LOCAL_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N32_LOCAL_BENCH=1 to build and verify the n=32 catalog fixture")
+	}
+	components, refs, service := cvN32CatalogBenchmarkFixture(b)
 	previousProcs := runtime.GOMAXPROCS(4)
 	defer runtime.GOMAXPROCS(previousProcs)
 	b.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "4")
 	b.ReportAllocs()
 	b.ReportMetric(float64(len(components)), "components/op")
-	refs := make([]cvComponentRefV2, len(components))
-	for index := range components {
-		refs[index] = components[index].ref
-	}
 	b.ResetTimer()
 	for iteration := 0; iteration < b.N; iteration++ {
 		verified, _ := cvRunComponentPipelineV2(
@@ -334,6 +341,173 @@ func BenchmarkCVV2ProposerCatalogVerifyN32(b *testing.B) {
 			}
 		}
 	}
+}
+
+// BenchmarkCVV2ProposerCatalogVerifyN32Hints measures the same fixture with
+// dealer-served uncompressed-point attachments, the byte-for-CPU trade the
+// dealer payload path makes to skip per-point square roots.
+func BenchmarkCVV2ProposerCatalogVerifyN32Hints(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N32_LOCAL_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N32_LOCAL_BENCH=1 to build and verify the n=32 catalog fixture")
+	}
+	components, refs, service := cvN32CatalogBenchmarkFixture(b)
+	for i := range components {
+		hints := cvRecordLeafDeferredHintsV2(
+			components[i].payload, service.cfg.LeafContext, service.cfg.Receivers, service.cfg.Validators,
+		)
+		if len(hints) == 0 {
+			b.Fatalf("component %d produced no hints", i)
+		}
+		components[i].payloadHints = hints
+	}
+	previousProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previousProcs)
+	b.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "4")
+	b.ReportAllocs()
+	b.ReportMetric(float64(len(components)), "components/op")
+	hintBytes := 0
+	for i := range components {
+		hintBytes += len(components[i].payloadHints)
+	}
+	b.ReportMetric(float64(hintBytes)/float64(len(components))/1024, "hintKB/component")
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		verified, _ := cvRunComponentPipelineV2(
+			refs, 1, cvLeafVerifyWorkers(len(components)),
+			func(ref cvComponentRefV2) cvComponentVerificationResultV2 {
+				return components[ref.Header.DealerID]
+			},
+			service.verifyRecoveredComponentV2,
+		)
+		for i := range verified {
+			if verified[i].verifyErr != nil || verified[i].leaf == nil {
+				b.Fatalf("verify component %d: %v", i, verified[i].verifyErr)
+			}
+		}
+	}
+}
+
+// BenchmarkCVV2ProposerCatalogVerifyN64 runs the n=64 catalog fixture twice
+// on the same leaves: once with legacy square-root decompression and once
+// with dealer-served uncompressed-point attachments, quantifying the
+// bytes-for-CPU trade on the exact scale the local cluster measures.
+func BenchmarkCVV2ProposerCatalogVerifyN64(b *testing.B) {
+	if os.Getenv("RLADKR_RUN_N64_LOCAL_BENCH") != "1" {
+		b.Skip("set RLADKR_RUN_N64_LOCAL_BENCH=1 to build and verify the n=64 catalog fixture")
+	}
+	const (
+		n = 64
+		f = 21
+	)
+	oldRoster := make([]int, n)
+	newRoster := make([]int, n)
+	for i := range oldRoster {
+		oldRoster[i] = i
+		newRoster[i] = n + i
+	}
+	cfg := Config{
+		SID: "cv-v2-n64-catalog-benchmark", Epoch: 1,
+		OldCommittee: oldRoster, NewCommittee: newRoster,
+		OldFaults: f, NewFaults: f,
+		CVProposerSampleSize: 3, CVValidatorSampleSize: 3,
+	}
+	params, err := cvDeriveV2Params(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if params.poolSize != n-f {
+		b.Fatalf("n=64 pool size=%d, want %d", params.poolSize, n-f)
+	}
+	keyRoot := b.TempDir()
+	receiverPublic := filepath.Join(keyRoot, "receiver-public")
+	receiverSecret := filepath.Join(keyRoot, "receiver-secret")
+	if err := cvGenerateReceiverRegistryV2(receiverPublic, receiverSecret, cfg.SID, uint64(cfg.Epoch), newRoster); err != nil {
+		b.Fatal(err)
+	}
+	receivers, err := cvLoadReceiverRegistryV2(
+		receiverPublic, receiverSecret, cfg.SID, uint64(cfg.Epoch), newRoster, newRoster,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	validatorPublic := filepath.Join(keyRoot, "validator-public")
+	validatorSecret := filepath.Join(keyRoot, "validator-secret")
+	if err := cvGenerateValidatorRegistryV2(validatorPublic, validatorSecret, cfg.SID, uint64(cfg.Epoch), oldRoster); err != nil {
+		b.Fatal(err)
+	}
+	validators, err := cvLoadValidatorRegistryV2(
+		validatorPublic, validatorSecret, cfg.SID, uint64(cfg.Epoch), oldRoster, oldRoster,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	leafContext := &cvLeafContextV2{
+		SID: cfg.SID, Epoch: uint64(cfg.Epoch),
+		OldRoster: append([]int(nil), oldRoster...), NewRoster: append([]int(nil), newRoster...),
+		ReceiverRegistryDigest: append([]byte(nil), receivers.registryDigest...),
+		SharingDegree:          params.newShareDegree,
+		Profile:                cvChunkProfile{chunkBits: 8, maxComponents: params.componentCount},
+	}
+	components := make([]cvComponentVerificationResultV2, params.poolSize)
+	hintBytes := 0
+	for i := range components {
+		leaf, buildErr := cvBuildReferenceAllACKLeafV2(oldRoster[i], leafContext, receivers, validators)
+		if buildErr != nil {
+			b.Fatalf("build component %d: %v", i, buildErr)
+		}
+		payload, encodeErr := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
+		if encodeErr != nil {
+			b.Fatalf("encode component %d: %v", i, encodeErr)
+		}
+		hints := cvRecordLeafDeferredHintsV2(payload, leafContext, receivers, validators)
+		if len(hints) == 0 {
+			b.Fatalf("component %d produced no hints", i)
+		}
+		hintBytes += len(hints)
+		components[i] = cvComponentVerificationResultV2{
+			ref:     cvComponentRefV2{Header: cvComponentHeaderV2{DealerID: oldRoster[i]}},
+			payload: payload,
+		}
+		components[i].payloadHints = hints
+	}
+	service := &cvAPDBNetworkServiceV2{cfg: cvAPDBNetworkServiceConfigV2{
+		LeafContext: leafContext, Receivers: receivers, Validators: validators,
+	}}
+	refs := make([]cvComponentRefV2, len(components))
+	for index := range components {
+		refs[index] = components[index].ref
+	}
+	runCatalog := func(b *testing.B, withHints bool) {
+		previousProcs := runtime.GOMAXPROCS(4)
+		defer runtime.GOMAXPROCS(previousProcs)
+		b.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "4")
+		b.ReportAllocs()
+		b.ReportMetric(float64(len(components)), "components/op")
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			verified, _ := cvRunComponentPipelineV2(
+				refs, 1, cvLeafVerifyWorkers(len(components)),
+				func(ref cvComponentRefV2) cvComponentVerificationResultV2 {
+					result := components[ref.Header.DealerID]
+					if !withHints {
+						result.payloadHints = nil
+					}
+					return result
+				},
+				service.verifyRecoveredComponentV2,
+			)
+			for i := range verified {
+				if verified[i].verifyErr != nil || verified[i].leaf == nil {
+					b.Fatalf("verify component %d: %v", i, verified[i].verifyErr)
+				}
+			}
+		}
+	}
+	b.Run("legacy", func(b *testing.B) { runCatalog(b, false) })
+	b.Run("hints", func(b *testing.B) {
+		b.ReportMetric(float64(hintBytes)/float64(len(components))/1024, "hintKB/component")
+		runCatalog(b, true)
+	})
 }
 
 func BenchmarkCVV2ReceiverEvaluationVerificationN127(b *testing.B) {

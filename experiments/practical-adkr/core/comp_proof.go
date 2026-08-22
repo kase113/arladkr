@@ -391,8 +391,11 @@ func compProve(
 		transcript := transcripts[dealer]
 		if _, acked := transcript.Signatures[nodeID]; acked {
 			share, ok := localShares[dealer][nodeID]
-			if !ok || share.S == nil || share.SR == nil || !bytes.Equal(commitSharePair(curve, share.S, share.SR), transcript.Commitments[nodeID]) {
-				return CompPublicKeyShare{}, nil, fmt.Errorf("receiver %d lacks valid ACK aux for dealer %d", nodeID, dealer)
+			if !ok || share.S == nil || share.SR == nil {
+				return CompPublicKeyShare{}, nil, fmt.Errorf("receiver %d lacks valid ACK aux for dealer %d (missing entry)", nodeID, dealer)
+			}
+			if !bytes.Equal(commitSharePair(curve, share.S, share.SR), transcript.Commitments[nodeID]) {
+				return CompPublicKeyShare{}, nil, fmt.Errorf("receiver %d lacks valid ACK aux for dealer %d (commitment mismatch)", nodeID, dealer)
 			}
 			z.Add(z, share.S).Mod(z, order)
 			ackRandomness.Add(ackRandomness, share.SR).Mod(ackRandomness, order)

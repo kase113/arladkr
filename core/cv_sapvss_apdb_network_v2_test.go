@@ -291,10 +291,13 @@ func TestCVAPDBNetworkServiceV2BuildsVCertAfterRecovery(t *testing.T) {
 	}
 	for _, member := range cfg.OldCommittee {
 		if cvContainsID(services[proposer].validatorSample, member) {
+			if got := transport.sentCountFromTo(cvTagValidationRequestV2, proposer, member); got < 1 {
+				t.Fatalf("validator %d received %d validation requests, want at least one", member, got)
+			}
 			continue
 		}
-		if got := transport.sentCountFromTo(cvTagValidationRequestV2, proposer, member); got != 1 {
-			t.Fatalf("non-validator %d received %d validation requests, want one initial delivery", member, got)
+		if got := transport.sentCountFromTo(cvTagValidationRequestV2, proposer, member); got != 0 {
+			t.Fatalf("non-validator %d received %d validation requests, want none", member, got)
 		}
 	}
 }

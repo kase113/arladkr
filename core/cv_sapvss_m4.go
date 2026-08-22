@@ -579,10 +579,20 @@ type cvWireReader struct {
 	// scratch is reused for compressed-point reads; hot leaf decode paths
 	// otherwise allocate per point and dominate garbage on large committees.
 	scratch [96]byte
+	// side shares one leaf decode's uncompressed-point sidechannel across
+	// every nested reader that reads deferred points, keeping hint
+	// consumption and recording in wire order. nil keeps legacy behavior.
+	side *cvDecodeSidechannelV2
 }
 
 func newCVWireReader(wire []byte) *cvWireReader {
 	return &cvWireReader{reader: bytes.NewReader(wire)}
+}
+
+func newCVWireReaderSide(wire []byte, side *cvDecodeSidechannelV2) *cvWireReader {
+	r := newCVWireReader(wire)
+	r.side = side
+	return r
 }
 
 func (r *cvWireReader) uint32() (int, error) {

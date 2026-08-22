@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
 const (
@@ -370,16 +372,28 @@ const cvAPDBPayloadWireDomain = "ARL-CV-sAPVSS/v2-scalar-group/apdb-recover-payl
 type cvAPDBPayloadResponseV2 struct {
 	InstanceDigest []byte
 	Payload        []byte
+	// Hints optionally carries the uncompressed forms of every deferred
+	// point the consumer's leaf decode reads, in wire order. Each entry is
+	// authenticated by exact recompression against the signed payload bytes,
+	// so the attachment trades bytes for square roots and never adds a trust
+	// assumption; responses without it decode exactly as before.
+	Hints []byte
 }
 
 func cvAPDBPayloadResponseV2CanonicalBytes(response *cvAPDBPayloadResponseV2) ([]byte, error) {
 	if response == nil || len(response.InstanceDigest) != 32 || len(response.Payload) == 0 {
 		return nil, fmt.Errorf("invalid CV V2 APDB payload response")
 	}
+	if len(response.Hints) > 0 && len(response.Hints)%bls12381.SizeOfG1AffineUncompressed != 0 {
+		return nil, fmt.Errorf("invalid CV V2 APDB payload response hints framing")
+	}
 	var wire bytes.Buffer
 	_ = cvWriteBytes(&wire, []byte(cvAPDBPayloadWireDomain))
 	_ = cvWriteBytes(&wire, response.InstanceDigest)
 	_ = cvWriteBytes(&wire, response.Payload)
+	if len(response.Hints) > 0 {
+		_ = cvWriteBytes(&wire, response.Hints)
+	}
 	return wire.Bytes(), nil
 }
 
@@ -397,8 +411,16 @@ func cvDecodeAPDBPayloadResponseV2(wire []byte, maximumPayload int) (*cvAPDBPayl
 		return nil, fmt.Errorf("invalid CV V2 APDB payload response instance")
 	}
 	payload, err := r.bytes(maximumPayload)
-	if err != nil || len(payload) == 0 || r.reader.Len() != 0 {
+	if err != nil || len(payload) == 0 {
 		return nil, fmt.Errorf("invalid CV V2 APDB payload response body")
 	}
-	return &cvAPDBPayloadResponseV2{InstanceDigest: instanceDigest, Payload: payload}, nil
+	var hints []byte
+	if r.reader.Len() > 0 {
+		hints, err = r.bytes(cvMaxPayloadHintsBytesV2(maximumPayload))
+		if err != nil || r.reader.Len() != 0 ||
+			len(hints)%bls12381.SizeOfG1AffineUncompressed != 0 {
+			return nil, fmt.Errorf("invalid CV V2 APDB payload response hints")
+		}
+	}
+	return &cvAPDBPayloadResponseV2{InstanceDigest: instanceDigest, Payload: payload, Hints: hints}, nil
 }

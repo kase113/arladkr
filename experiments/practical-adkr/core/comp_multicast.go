@@ -433,7 +433,7 @@ func collectCompKeyWires(
 	recipientPublic *ecdsa.PublicKey,
 	addrMap map[int]string,
 	threshold int,
-	in <-chan compKeyWire,
+	in chan compKeyWire,
 	out chan<- compCollectorOutput,
 ) {
 	committeeSet := make(map[int]struct{}, len(committee))
@@ -441,7 +441,39 @@ func collectCompKeyWires(
 		committeeSet[id] = struct{}{}
 	}
 	valid := make(map[int]CompPublicKeyShare, threshold)
-	for len(valid) < threshold {
+	// Paper good-case variant (Fig. 4d): once the interpolation threshold is
+	// met, wait a bounded extra window for KEY messages from the remaining
+	// committee members before interpolating. PRACTICAL_DERIVE_WAIT_ALL_MS=0
+	// (default) keeps the legacy proceed-at-threshold behavior.
+	waitAll := durationFromEnvMsOr("PRACTICAL_DERIVE_WAIT_ALL_MS", 0)
+	var waitAllDone <-chan time.Time
+	// The wait window overlaps with whatever the channel carries next (other
+	// processes start their completion phase as soon as their own collectors
+	// finish). Non-KEY traffic read during the window must be handed back so
+	// the next collection phase still observes it; without the window the
+	// collector exits at threshold before any other traffic can arrive.
+	var stashed []compKeyWire
+	defer func() {
+		for _, wire := range stashed {
+			select {
+			case in <- wire:
+			default:
+			}
+		}
+	}()
+collectKeys:
+	for {
+		if len(valid) >= threshold {
+			if waitAll <= 0 {
+				break
+			}
+			if waitAllDone == nil {
+				waitAllDone = time.After(waitAll)
+			}
+		}
+		if len(valid) >= len(committee) {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			ids := make([]int, 0, len(valid))
@@ -451,8 +483,14 @@ func collectCompKeyWires(
 			sort.Ints(ids)
 			out <- compCollectorOutput{recipient: recipient, err: fmt.Errorf("%w: valid=%d ids=%v need=%d", ctx.Err(), len(valid), ids, threshold)}
 			return
+		case <-waitAllDone:
+			break collectKeys
 		case wire := <-in:
-			if wire.Kind != "key" || wire.SID != cfg.SID || wire.Epoch != cfg.Epoch || !bytes.Equal(wire.SelectedDigest, selectedDigest) ||
+			if wire.Kind != "key" {
+				stashed = append(stashed, wire)
+				continue
+			}
+			if wire.SID != cfg.SID || wire.Epoch != cfg.Epoch || !bytes.Equal(wire.SelectedDigest, selectedDigest) ||
 				wire.Sender != wire.Share.NodeID {
 				continue
 			}

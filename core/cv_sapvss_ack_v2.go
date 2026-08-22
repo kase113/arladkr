@@ -382,7 +382,7 @@ func cvDecodeReceiverLaneOfferV2(
 	receiverPublicKey *bls12381.G1Affine,
 ) (*cvReceiverLaneOfferV2, error) {
 	return cvDecodeReceiverLaneOfferV2Mode(
-		wire, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey, true,
+		wire, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey, true, nil,
 	)
 }
 
@@ -390,21 +390,31 @@ func cvDecodeReceiverLaneOfferBeforeVerificationV2(
 	wire []byte, context *cvLeafContextV2, expectedDealer, expectedReceiverID, expectedReceiverIndex int,
 	receiverPublicKey *bls12381.G1Affine,
 ) (*cvReceiverLaneOfferV2, error) {
+	return cvDecodeReceiverLaneOfferBeforeVerificationV2Sidechannel(
+		wire, nil, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey,
+	)
+}
+
+func cvDecodeReceiverLaneOfferBeforeVerificationV2Sidechannel(
+	wire []byte, side *cvDecodeSidechannelV2, context *cvLeafContextV2,
+	expectedDealer, expectedReceiverID, expectedReceiverIndex int,
+	receiverPublicKey *bls12381.G1Affine,
+) (*cvReceiverLaneOfferV2, error) {
 	return cvDecodeReceiverLaneOfferV2Mode(
-		wire, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey, false,
+		wire, context, expectedDealer, expectedReceiverID, expectedReceiverIndex, receiverPublicKey, false, side,
 	)
 }
 
 func cvDecodeReceiverLaneOfferV2Mode(
 	wire []byte, context *cvLeafContextV2, expectedDealer, expectedReceiverID, expectedReceiverIndex int,
-	receiverPublicKey *bls12381.G1Affine, verifyOwnership bool,
+	receiverPublicKey *bls12381.G1Affine, verifyOwnership bool, side *cvDecodeSidechannelV2,
 ) (*cvReceiverLaneOfferV2, error) {
 	if expectedDealer < 0 || cvValidateReceiverBindingV2(
 		context, expectedReceiverID, expectedReceiverIndex, receiverPublicKey,
 	) != nil {
 		return nil, fmt.Errorf("invalid expected CV V2 lane offer binding")
 	}
-	r := newCVWireReader(wire)
+	r := newCVWireReaderSide(wire, side)
 	domain, err := r.bytes(len(cvLaneOfferWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvLaneOfferWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 lane offer domain")
@@ -459,7 +469,7 @@ func cvDecodeReceiverLaneOfferV2Mode(
 	if err != nil || r.reader.Len() != 0 {
 		return nil, fmt.Errorf("invalid CV V2 lane offer proof framing")
 	}
-	proof, err := cvDecodeOwnershipProofV2(proofWire, context)
+	proof, err := cvDecodeOwnershipProofV2Sidechannel(proofWire, side, context)
 	if err != nil {
 		return nil, err
 	}
@@ -526,6 +536,12 @@ func cvOwnershipProofV2CanonicalBytesMode(
 }
 
 func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnershipProofV2, error) {
+	return cvDecodeOwnershipProofV2Sidechannel(wire, nil, context)
+}
+
+func cvDecodeOwnershipProofV2Sidechannel(
+	wire []byte, side *cvDecodeSidechannelV2, context *cvLeafContextV2,
+) (*cvOwnershipProofV2, error) {
 	if context == nil {
 		return nil, fmt.Errorf("nil CV V2 ownership context")
 	}
@@ -533,7 +549,7 @@ func cvDecodeOwnershipProofV2(wire []byte, context *cvLeafContextV2) (*cvOwnersh
 	if err != nil {
 		return nil, err
 	}
-	r := newCVWireReader(wire)
+	r := newCVWireReaderSide(wire, side)
 	domain, err := r.bytes(len(cvOwnershipProofWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvOwnershipProofWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 ownership proof domain")
@@ -619,6 +635,12 @@ func cvACKEvidenceV2CanonicalBytesMode(
 }
 
 func cvDecodeACKEvidenceV2(wire []byte, context *cvLeafContextV2) (*cvACKEvidenceV2, error) {
+	return cvDecodeACKEvidenceV2Sidechannel(wire, nil, context)
+}
+
+func cvDecodeACKEvidenceV2Sidechannel(
+	wire []byte, side *cvDecodeSidechannelV2, context *cvLeafContextV2,
+) (*cvACKEvidenceV2, error) {
 	r := newCVWireReader(wire)
 	domain, err := r.bytes(len(cvACKWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvACKWireDomainV2)) {
@@ -628,7 +650,7 @@ func cvDecodeACKEvidenceV2(wire []byte, context *cvLeafContextV2) (*cvACKEvidenc
 	if err != nil {
 		return nil, fmt.Errorf("invalid CV V2 ACK ownership proof")
 	}
-	ownership, err := cvDecodeOwnershipProofV2(ownershipWire, context)
+	ownership, err := cvDecodeOwnershipProofV2Sidechannel(ownershipWire, side, context)
 	if err != nil {
 		return nil, err
 	}

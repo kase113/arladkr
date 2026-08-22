@@ -308,10 +308,16 @@ func cvCoreProofV2CanonicalBytesMode(
 }
 
 func cvDecodeCoreProofV2(wire []byte, coefficientCount int) (*cvCoreProofV2, error) {
+	return cvDecodeCoreProofV2Sidechannel(wire, coefficientCount, nil)
+}
+
+func cvDecodeCoreProofV2Sidechannel(
+	wire []byte, coefficientCount int, side *cvDecodeSidechannelV2,
+) (*cvCoreProofV2, error) {
 	if coefficientCount <= 0 {
 		return nil, fmt.Errorf("invalid CV V2 core proof coefficient count")
 	}
-	r := newCVWireReader(wire)
+	r := newCVWireReaderSide(wire, side)
 	domain, err := r.bytes(len(cvCoreProofWireDomainV2))
 	if err != nil || !bytes.Equal(domain, []byte(cvCoreProofWireDomainV2)) {
 		return nil, fmt.Errorf("invalid CV V2 core proof domain")

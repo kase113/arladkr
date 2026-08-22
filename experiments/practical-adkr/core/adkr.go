@@ -634,6 +634,15 @@ func RunPracticalADKR(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The distributed DXT cache snapshots receiver ACK aux when the local
+	// dealer finishes, but a dealer's dealing-delta window can stay open
+	// past that point and include a slow receiver's ACK whose local share
+	// write lands after the snapshot. Re-read the live receiver store here:
+	// MVBA has fixed the transcript set, so every signature-implying write
+	// has already happened.
+	if dxt != nil && dxt.networkService != nil {
+		allShares = dxt.networkService.shareSnapshot()
+	}
 	newShares, newThresholdPK, newPublicShares, compCompletionCerts, err := runCompKeyDerivationMulticast(
 		ctx, cfg, newC, verifiedSelected, recoveredTranscripts, allShares,
 		recipPriv, compKeys, compService, dxt,

@@ -22,6 +22,7 @@ type cvAPDBRecoveryCollectorV2 struct {
 	stores         map[int]cvAPDBStoreV2
 	storeWires     map[int][]byte
 	payload        []byte
+	payloadHints   []byte
 }
 
 func newCVAPDBRecoveryCollectorV2(
@@ -131,7 +132,10 @@ func (c *cvAPDBRecoveryCollectorV2) AddStore(from int, wire []byte) (bool, error
 
 // AddPayload accepts one full-payload recovery response. The payload is only
 // trusted after deterministic re-encoding reproduces the locked Merkle root,
-// which is the same binding the shard reconstruction path verifies.
+// which is the same binding the shard reconstruction path verifies. An
+// attached uncompressed-point sidecar is retained for the decode but is
+// itself bound point-by-point by recompression, so a wrong or malicious
+// sidecar only costs square roots, never correctness.
 func (c *cvAPDBRecoveryCollectorV2) AddPayload(_ int, wire []byte) (bool, error) {
 	if c == nil {
 		return false, fmt.Errorf("nil CV V2 APDB recovery collector")
@@ -149,8 +153,15 @@ func (c *cvAPDBRecoveryCollectorV2) AddPayload(_ int, wire []byte) (bool, error)
 	if err != nil || !bytes.Equal(reencoded.root, c.lock.Root) {
 		return false, fmt.Errorf("CV V2 APDB payload response root mismatch")
 	}
+	hints := response.Hints
+	if !cvPayloadHintsEnabledV2() {
+		hints = nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.payloadHints == nil && len(hints) > 0 {
+		c.payloadHints = append([]byte(nil), hints...)
+	}
 	if c.payload != nil {
 		if !bytes.Equal(c.payload, response.Payload) {
 			return false, fmt.Errorf("conflicting CV V2 APDB payload response")
@@ -159,6 +170,17 @@ func (c *cvAPDBRecoveryCollectorV2) AddPayload(_ int, wire []byte) (bool, error)
 	}
 	c.payload = append([]byte(nil), response.Payload...)
 	return true, nil
+}
+
+// RecoveredHints returns the retained uncompressed-point sidecar, if any
+// authenticated payload response carried one.
+func (c *cvAPDBRecoveryCollectorV2) RecoveredHints() []byte {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.payloadHints
 }
 
 func (c *cvAPDBRecoveryCollectorV2) Recover() ([]byte, error) {

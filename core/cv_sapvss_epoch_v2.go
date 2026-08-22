@@ -194,6 +194,15 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 	publicKeyBytes := publicKey.Bytes()
 	serviceGraceStarted := time.Now()
 	serviceGrace := cvRecoverServiceGraceV2(c.RouteSendTimeout)
+	// The linger keeps every responder alive, which includes decision-share
+	// replies for peers still inside FinalizeDecision. RLADKR_DECISION_
+	// RESPONDER_GRACE_MS can widen that window on deployments whose
+	// finalization stragglers outlive the recover grace; the linger stays
+	// excluded from reported latency either way. Failure paths never reach
+	// this point, so only successful nodes linger.
+	if decisionGrace := cvDecisionResponderGraceV2(); decisionGrace > serviceGrace {
+		serviceGrace = decisionGrace
+	}
 	graceTimer := time.NewTimer(serviceGrace)
 	select {
 	case <-ctx.Done():
@@ -281,6 +290,10 @@ func RunCVEpochV2(ctx context.Context, cfg Config) (*EpochResult, error) {
 		CVARCFormationLatency:                   experimentMetrics.arcFormationLatency,
 		CVAggregateOfferSendLatency:             experimentMetrics.aggregateOfferSendLatency,
 		CVValidationCertificateFormationLatency: experimentMetrics.validationCertificateLatency,
+		CVValidationCanonicalLatency:            experimentMetrics.validationCanonicalLatency,
+		CVValidationNetworkWaitLatency:          experimentMetrics.validationNetworkWaitLatency,
+		CVValidationSignatureVerifyLatency:      experimentMetrics.validationSignatureVerifyLatency,
+		CVValidationAggregateVerifyLatency:      experimentMetrics.validationAggregateVerifyLatency,
 		CVDecisionCertificateFormationLatency:   experimentMetrics.decisionCertificateLatency,
 		CVScalarBoundedDLogLatency:              receiverExperimentMetrics.scalarBoundedDLogLatency,
 		CVBlindingGroupDecryptionLatency:        receiverExperimentMetrics.blindingGroupDecryptionLatency,
