@@ -99,7 +99,7 @@ func TestCVSendRecoveryRequestsWithRetryV2StopsOnContextCancellation(t *testing.
 
 func TestCVVerifiedCatalogPrewarmStartsOnlyOnceForEligibleProposer(t *testing.T) {
 	_, public := cvAgreementObjectV2Fixture(t)
-	proposers, _, err := cvDeriveEligibilitySamplesV2(
+	proposers, validators, err := cvDeriveEligibilitySamplesV2(
 		public.OldCommittee, public.EligibilityCoin.Value,
 		public.Params.proposerSampleSize, public.Params.validatorSampleSize,
 	)
@@ -107,15 +107,17 @@ func TestCVVerifiedCatalogPrewarmStartsOnlyOnceForEligibleProposer(t *testing.T)
 		t.Fatal(err)
 	}
 	eligible := proposers[0]
+	// The default prewarm mode also covers sampled validators, so the negative
+	// case must be a member outside both samples.
 	nonEligible := -1
 	for _, member := range public.OldCommittee {
-		if !cvContainsID(proposers, member) {
+		if !cvContainsID(proposers, member) && !cvContainsID(validators, member) {
 			nonEligible = member
 			break
 		}
 	}
 	if nonEligible < 0 {
-		t.Fatal("test fixture did not include a non-proposer")
+		t.Fatal("test fixture did not include a member outside both samples")
 	}
 
 	newService := func(localNode int) *cvAPDBNetworkServiceV2 {
@@ -147,7 +149,7 @@ func TestCVVerifiedCatalogPrewarmStartsOnlyOnceForEligibleProposer(t *testing.T)
 		t.Fatal(err)
 	}
 	if nonEligibleService.verifiedCatalogPrewarm {
-		t.Fatal("non-proposer started verified catalog prewarm")
+		t.Fatal("member outside both samples started verified catalog prewarm")
 	}
 }
 

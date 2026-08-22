@@ -32,13 +32,14 @@ func cvLeafVerifyWorkers(jobs int) int {
 		return jobs
 	}
 	workers := runtime.GOMAXPROCS(0)
-	// Inner MSM work is already single-threaded. Use all four vCPUs for the
-	// outer leaf batch while transport remains asynchronous.
+	// Inner MSM work is already single-threaded. Use the whole outer budget:
+	// four vCPUs on c7g.xlarge and up to eight on 2xlarge-class nodes so
+	// n>=128 catalogs are not serialized behind the old four-worker cap.
 	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RLADKR_LEAF_VERIFY_WORKERS"))); err == nil && configured > 0 {
 		workers = configured
 	}
-	if workers > 4 {
-		workers = 4
+	if workers > 8 {
+		workers = 8
 	}
 	if workers > jobs {
 		workers = jobs

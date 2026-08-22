@@ -1794,11 +1794,11 @@ func cvValidatorPrewarmModeFromEnvV2(rosterSize int) cvValidatorPrewarmModeV2 {
 	case "off":
 		return cvValidatorPrewarmOffV2
 	default:
-		// Latency runs at small n win from fully prewarmed validators; above
-		// n=32 the full-catalog verify on most of the committee dominates CPU
-		// and cluster bytes, so payload prewarm with on-request verification
-		// is the default.
-		if rosterSize > 32 {
+		// Latency runs win from fully prewarmed validators while proposer
+		// catalogs keep validator cores idle; beyond n=128 that idle window
+		// shrinks and the full-catalog verify dominates committee CPU and
+		// bytes, so payload prewarm with on-request verification takes over.
+		if rosterSize > 128 {
 			return cvValidatorPrewarmRecoverV2
 		}
 		return cvValidatorPrewarmFullV2

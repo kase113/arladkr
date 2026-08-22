@@ -576,6 +576,9 @@ type cvWireReader struct {
 	// check; decode units flush them through one batch subgroup check via
 	// assertDecodedSubgroup before returning trusted structures.
 	deferredPoints []bls12381.G1Affine
+	// scratch is reused for compressed-point reads; hot leaf decode paths
+	// otherwise allocate per point and dominate garbage on large committees.
+	scratch [96]byte
 }
 
 func newCVWireReader(wire []byte) *cvWireReader {
@@ -612,7 +615,7 @@ func (r *cvWireReader) bytes(maximum int) ([]byte, error) {
 }
 
 func (r *cvWireReader) point() (bls12381.G1Affine, error) {
-	encoded := make([]byte, bls12381.SizeOfG1AffineCompressed)
+	encoded := r.scratch[:bls12381.SizeOfG1AffineCompressed]
 	if _, err := io.ReadFull(r.reader, encoded); err != nil {
 		return bls12381.G1Affine{}, err
 	}

@@ -45,8 +45,8 @@ func TestCVLeafVerifyWorkerBudget(t *testing.T) {
 		t.Fatalf("job-limited leaf verification workers=%d, want 2", got)
 	}
 	t.Setenv("RLADKR_LEAF_VERIFY_WORKERS", "99")
-	if got := cvLeafVerifyWorkers(10); got != 4 {
-		t.Fatalf("capped leaf verification workers=%d, want 4", got)
+	if got := cvLeafVerifyWorkers(10); got != 8 {
+		t.Fatalf("capped leaf verification workers=%d, want 8", got)
 	}
 }
 

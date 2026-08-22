@@ -146,7 +146,7 @@ func cvAssertG1SubgroupBatch(points []bls12381.G1Affine) error {
 }
 
 func (r *cvWireReader) pointDeferred() (bls12381.G1Affine, error) {
-	encoded := make([]byte, bls12381.SizeOfG1AffineCompressed)
+	encoded := r.scratch[:bls12381.SizeOfG1AffineCompressed]
 	if _, err := io.ReadFull(r.reader, encoded); err != nil {
 		return bls12381.G1Affine{}, err
 	}

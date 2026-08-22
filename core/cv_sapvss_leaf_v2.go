@@ -32,6 +32,13 @@ type cvLeafV2 struct {
 	Fallback               *cvFallbackEvidenceV2
 	DealerSignature        []byte
 	Digest                 []byte
+	// decodeVerifiedStatement is the dealer-signature statement hash computed
+	// from the canonical wire during decoding, and decodeCanonicalVerified
+	// records that the full wire already passed the canonical-bytes check.
+	// Together they let the APVSS verifier skip re-encoding megabyte wires per
+	// leaf; locally built leaves leave them unset and take the encode path.
+	decodeVerifiedStatement []byte
+	decodeCanonicalVerified bool
 }
 
 func cvBuildAllACKLeafV2(
@@ -243,15 +250,26 @@ func cvVerifyAPVSSModeV2(
 	if !ok {
 		return fmt.Errorf("CV V2 dealer is outside validator registry")
 	}
-	unsigned, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
-	if err != nil {
-		return err
+	statement := leaf.decodeVerifiedStatement
+	if statement == nil {
+		unsigned, err := cvLeafV2UnsignedCanonicalBytesAfterValidation(leaf, receivers)
+		if err != nil {
+			return err
+		}
+		statement = hashBytes([]byte(cvDealerSignatureDomainV2), unsigned)
 	}
-	statement := hashBytes([]byte(cvDealerSignatureDomainV2), unsigned)
 	if !cvVerifyValidatorSignatureV2(
 		&validators.publicKeys[dealerIndex], cvDealerSignatureDomainV2, statement, leaf.DealerSignature,
 	) {
 		return fmt.Errorf("invalid CV V2 dealer signature")
+	}
+	if leaf.decodeCanonicalVerified {
+		// The decode path already proved the full wire canonical and derived
+		// the digest from it; re-encoding megabytes per leaf is pure overhead.
+		if len(leaf.Digest) != 32 {
+			return fmt.Errorf("invalid CV V2 leaf digest")
+		}
+		return nil
 	}
 	wire, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
 	if err != nil {
@@ -824,10 +842,20 @@ func cvDecodeLeafV2(
 	}
 	leaf.DealerSignature = signature
 	leaf.Digest = hashBytes([]byte(cvLeafDigestDomainV2), wire)
+	// The unsigned statement hashes the exact canonical sub-slice of the wire
+	// that framing already delimitated, so the APVSS verifier can reuse it
+	// instead of re-encoding the full leaf again.
+	// Wire framing is [len domain][domain][len unsigned][unsigned][len
+	// signature][signature]; hash the exact unsigned span instead of
+	// re-encoding the whole leaf again for the dealer-signature statement.
+	unsignedOffset := 4 + len(cvLeafWireDomainV2) + 4
+	unsignedWire := wire[unsignedOffset : unsignedOffset+len(unsigned)]
+	leaf.decodeVerifiedStatement = hashBytes([]byte(cvDealerSignatureDomainV2), unsignedWire)
 	canonical, err := cvLeafV2CanonicalBytesAfterValidation(leaf, receivers, validators)
 	if err != nil || !bytes.Equal(canonical, wire) {
 		return nil, fmt.Errorf("non-canonical CV V2 leaf")
 	}
+	leaf.decodeCanonicalVerified = true
 	if err := cvVerifyAPVSSAfterPointDecodingV2(leaf, expectedContext, receivers, validators); err != nil {
 		return nil, err
 	}
